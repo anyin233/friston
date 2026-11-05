@@ -1,0 +1,13 @@
+/target
+**/.build/
+**/.swiftpm/
+**/DerivedData/
+/native/**/.build-xcode/
+.DS_Store
+*.xcuserstate
+# Local runtime data (models, recordings, databases) never belongs in git.
+/data/
+/models/
+*.sqlite
+*.sqlite-*
+__pycache__/

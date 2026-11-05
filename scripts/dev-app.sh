@@ -5,7 +5,13 @@
 # refuses bare executables ("Invalid app"). Its per-app approval is keyed to the app, so
 # the bundle id and path below must stay stable across rebuilds.
 #
-# Usage: scripts/dev-app.sh {build|launch|stop|status|path}
+# Signing: TCC keys grants to the code signature's designated requirement. An ad-hoc signature
+# pins that to the cdhash, so every rebuild looks like a new app and loses microphone/screen
+# grants. We therefore sign with the first "Apple Development" identity in the keychain, whose
+# requirement (bundle id + certificate) survives rebuilds. MM_SIGN_IDENTITY overrides this;
+# set it to "-" to force ad-hoc.
+#
+# Usage: scripts/dev-app.sh {build|launch|stop|status|path|sign-identity}
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,7 +32,21 @@ APP_PATH="$(target_dir)/debug/MeetingMasterDev.app"
 # shellcheck source=lib/bundle.sh
 source "$REPO_ROOT/scripts/lib/bundle.sh"
 
-# build: compile the GUI binary and wrap it into a stable, ad-hoc signed .app bundle.
+# sign_identity: print the codesign identity for the dev bundle.
+#   Order: $MM_SIGN_IDENTITY, else the SHA-1 of the first "Apple Development" identity (SHA-1, not
+#   the name, so duplicate certificates with the same name stay unambiguous), else "-" (ad-hoc).
+sign_identity() {
+  if [[ -n "${MM_SIGN_IDENTITY:-}" ]]; then
+    echo "$MM_SIGN_IDENTITY"
+    return
+  fi
+  local sha
+  sha="$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/"Apple Development: /{print $2; exit}')"
+  echo "${sha:--}"
+}
+
+# build: compile the GUI binary and wrap it into a .app bundle signed with a stable identity.
 build() {
   (cd "$REPO_ROOT" && cargo build -p mm-app)
   local bin
@@ -34,8 +54,12 @@ build() {
   [[ -x "$bin" ]] || { echo "error: expected binary at $bin after build" >&2; exit 1; }
 
   write_bundle "$APP_PATH" "$bin" "$BUNDLE_ID" "$APP_NAME" "${MM_ENGINES_DIR:-$REPO_ROOT/target/engines/Debug}"
-  # Ad-hoc signature so macOS treats the bundle as a coherent app (TCC/AX identity).
-  sign_bundle "$APP_PATH"
+  local identity
+  identity="$(sign_identity)"
+  if [[ "$identity" == "-" ]]; then
+    echo "warning: no Apple Development identity; ad-hoc signing, TCC grants reset on every rebuild" >&2
+  fi
+  MM_SIGN_IDENTITY="$identity" sign_bundle "$APP_PATH"
   echo "$APP_PATH"
 }
 
@@ -76,5 +100,6 @@ case "${1:-}" in
   stop) stop ;;
   status) if [[ -n "$(pids)" ]]; then echo "running pid=$(pids | head -1)"; else echo "stopped"; exit 1; fi ;;
   path) echo "$APP_PATH" ;;
-  *) echo "usage: $0 {build|launch|stop|status|path}" >&2; exit 2 ;;
+  sign-identity) sign_identity ;;
+  *) echo "usage: $0 {build|launch|stop|status|path|sign-identity}" >&2; exit 2 ;;
 esac

@@ -82,5 +82,6 @@
 ## 待验证
 
 - 在已签名的 App 里拿到麦克风权限后，AVFoundation 的 `multichannelAudioMode = .firstOrderAmbisonics` 在 MacBook 内置麦克风上是否可用。本次探测时进程没有麦克风授权，结果是“不支持”。
+- DJI Mic Mini（2 TX + 1 RX）接 Mac 时是否输出 2 个独立声道，以及两路之间的时延是否稳定（抖动 < 0.3 样本），清单见 spatial-feasibility.md 2.4 节。
 - Qwen3-ASR 0.6B 在 M5 Pro 上的流式延迟和中文准确率，需要下载模型后实测。
 - 两个 MLX 进程同时运行时的显存占用。

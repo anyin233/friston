@@ -50,6 +50,38 @@ pub struct SpeakerRelabel {
     pub to: SpeakerLabel,
 }
 
+/// `spatial/cue`: where one final utterance came from, sent right after its `caption/final`.
+///
+/// Positions are relative to this meeting (no geometry needed) and mirror-corrected for the
+/// screen: `position[0]` is left (−1) to right (1), combining whichever of time and level
+/// difference the engine trusts for this microphone; `position[1]`/`position[2]` are those two
+/// raw relative axes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpatialCueEvent {
+    pub session_id: String,
+    pub utterance_id: u64,
+    pub origin: AudioOrigin,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub position: Vec<f32>,
+    /// 0..1 reliability.
+    pub confidence: f32,
+    /// Degrees from straight ahead, positive to the right; only with a known mic spacing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azimuth_deg: Option<f32>,
+    pub speaker: SpeakerLabel,
+}
+
+impl SpatialCueEvent {
+    /// The left-right coordinate.
+    ///
+    /// Returns: `position[0]`, or `None` for an empty position.
+    pub fn lateral(&self) -> Option<f32> {
+        self.position.first().copied().filter(|x| x.is_finite())
+    }
+}
+
 /// A known voiceprint handed to the engine at `capture/start` so captions can name people.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -226,6 +258,26 @@ mod tests {
         )
         .expect("decode speaker/relabel");
         assert_eq!(relabel.to, SpeakerLabel::Cluster { index: 1 });
+    }
+
+    #[test]
+    fn spatial_cue_decodes_the_engine_shape() {
+        // Same keys as `spatialCueEventUsesCamelCaseAndOmitsUnknownAzimuth` in CaptionPipelineTests.swift.
+        let cue: SpatialCueEvent = serde_json::from_str(
+            r#"{"sessionId":"s","utteranceId":7,"origin":"microphone","startMs":1200,"endMs":2500,
+                "position":[-0.8,-0.75,0.1],"confidence":0.6,"speaker":{"kind":"cluster","index":1}}"#,
+        )
+        .expect("decode spatial/cue");
+        assert_eq!(cue.lateral(), Some(-0.8));
+        assert_eq!(cue.azimuth_deg, None);
+        assert_eq!(cue.speaker, SpeakerLabel::Cluster { index: 1 });
+        let with_azimuth: SpatialCueEvent = serde_json::from_str(
+            r#"{"sessionId":"s","utteranceId":7,"origin":"microphone","startMs":0,"endMs":1,
+                "position":[],"confidence":1,"azimuthDeg":30,"speaker":{"kind":"unknown"}}"#,
+        )
+        .expect("decode spatial/cue with azimuth");
+        assert_eq!(with_azimuth.azimuth_deg, Some(30.0));
+        assert_eq!(with_azimuth.lateral(), None);
     }
 
     #[test]

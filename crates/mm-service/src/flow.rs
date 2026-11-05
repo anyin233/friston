@@ -177,6 +177,11 @@ pub fn build_preset(
         fps: Some(cfg.fps),
         output_directory: cfg.recordings_dir.clone(),
         voiceprints,
+        spatial_flip: cfg.spatial_flip,
+        // A non-positive spacing would only make the engine's asin meaningless.
+        spatial_spacing_cm: cfg
+            .spatial_spacing_cm
+            .filter(|cm| cm.is_finite() && *cm > 0.0),
     })
 }
 
@@ -678,6 +683,21 @@ mod tests {
         assert_eq!(preset.window_id, Some(7));
         assert_eq!(preset.microphone_uid.as_deref(), Some("default"));
         assert_eq!(preset.caption_language.as_deref(), Some("zh"));
+        assert!(!preset.spatial_flip);
+        assert_eq!(preset.spatial_spacing_cm, None);
+        let mut spatial_cfg = cfg.clone();
+        spatial_cfg.spatial_flip = true;
+        spatial_cfg.spatial_spacing_cm = Some(14.0);
+        let spatial = build_preset(&spatial_cfg, &store, &m, None).unwrap();
+        assert!(spatial.spatial_flip);
+        assert_eq!(spatial.spatial_spacing_cm, Some(14.0));
+        spatial_cfg.spatial_spacing_cm = Some(0.0);
+        assert_eq!(
+            build_preset(&spatial_cfg, &store, &m, None)
+                .unwrap()
+                .spatial_spacing_cm,
+            None
+        );
 
         let started = CaptureStarted {
             session_id: "s".into(),

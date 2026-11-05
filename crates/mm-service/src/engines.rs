@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use mm_core::{
     AudioInput, AudioLevels, CalendarEvent, CaptionFinal, CaptionPartial, CapturePreset,
     CaptureSources, CaptureStarted, CaptureStateEvent, CaptureStopped, ClipRequest, FileTranscript,
-    SpeakerRelabel, VoiceprintSample,
+    SpatialCueEvent, SpeakerRelabel, VoiceprintSample,
 };
 use mm_engine::methods::{common, embed, meeting};
 use mm_engine::{EngineClient, EngineEvent, RpcError};
@@ -94,7 +94,8 @@ pub enum MeetingNotice {
     Relabel(SpeakerRelabel),
     Levels(AudioLevels),
     State(CaptureStateEvent),
-    /// `spatial/cue` and anything newer than this build.
+    Spatial(SpatialCueEvent),
+    /// Anything newer than this build.
     Other {
         method: String,
         params: Value,
@@ -112,6 +113,7 @@ pub fn decode_notice(method: &str, params: Value) -> Result<MeetingNotice, Servi
         meeting::N_SPEAKER_RELABEL => MeetingNotice::Relabel(decode(method, params)?),
         meeting::N_AUDIO_LEVELS => MeetingNotice::Levels(decode(method, params)?),
         meeting::N_CAPTURE_STATE => MeetingNotice::State(decode(method, params)?),
+        meeting::N_SPATIAL_CUE => MeetingNotice::Spatial(decode(method, params)?),
         _ => MeetingNotice::Other {
             method: method.to_string(),
             params,
@@ -456,8 +458,21 @@ mod tests {
         assert!(matches!(n, MeetingNotice::Final(f) if f.text == "好"));
         let err = decode_notice("caption/partial", json!({"text": 1})).unwrap_err();
         assert!(err.to_string().contains("caption/partial"));
+        let cue = decode_notice(
+            "spatial/cue",
+            json!({"sessionId":"s","utteranceId":1,"origin":"microphone","startMs":0,"endMs":900,
+                   "position":[0.5,0.4,0.1],"confidence":0.7,"speaker":{"kind":"cluster","index":0}}),
+        )
+        .unwrap();
+        assert!(matches!(cue, MeetingNotice::Spatial(c) if c.lateral() == Some(0.5)));
+        assert!(
+            decode_notice("spatial/cue", json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains("spatial/cue")
+        );
         assert!(matches!(
-            decode_notice("spatial/cue", json!({})).unwrap(),
+            decode_notice("spatial/summary", json!({})).unwrap(),
             MeetingNotice::Other { .. }
         ));
     }

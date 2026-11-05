@@ -44,6 +44,10 @@ pub struct AppConfig {
     pub floating_captions: bool,
     /// Minutes language (`zh`, `en`, `ja`).
     pub minutes_language: String,
+    /// Mirror the microphone's direction cues (its first channel is on the right).
+    pub spatial_flip: bool,
+    /// Distance between the two spatial mics in centimetres; `None` = unknown geometry.
+    pub spatial_spacing_cm: Option<f64>,
 }
 
 impl Default for AppConfig {
@@ -65,6 +69,8 @@ impl Default for AppConfig {
             auto_minutes: true,
             floating_captions: true,
             minutes_language: "zh".into(),
+            spatial_flip: false,
+            spatial_spacing_cm: None,
         }
     }
 }
@@ -161,6 +167,11 @@ mod tests {
         let cfg = AppConfig::load(dir.path()).unwrap();
         assert_eq!(cfg.fps, 30);
         assert!(cfg.system_audio);
+        assert!(
+            !cfg.spatial_flip,
+            "files from before the spatial settings load"
+        );
+        assert_eq!(cfg.spatial_spacing_cm, None);
         std::fs::write(dir.path().join("config.json"), "{").unwrap();
         assert!(
             AppConfig::load(dir.path())

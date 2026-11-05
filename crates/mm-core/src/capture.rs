@@ -44,6 +44,13 @@ pub struct CapturePreset {
     /// Enrolled voiceprints so live captions can name known people.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub voiceprints: Vec<crate::PresetVoiceprint>,
+    /// Mirror direction cues (the mic's first channel is on the right).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spatial_flip: bool,
+    /// Distance between the two spatial mics in centimetres; lets the engine report
+    /// `azimuthDeg`. `None` means unknown geometry (relative positions only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spatial_spacing_cm: Option<f64>,
 }
 
 /// Files of one session; one per source so ASR can keep stream origin apart.
@@ -128,9 +135,11 @@ mod tests {
     #[test]
     fn preset_matches_the_swift_wire_shape() {
         // Same JSON as `presetDecodesTheWireShape` in CapturePlanTests.swift.
-        let json = r#"{"title":"周会","windowID":4242,"microphoneUID":"usb","systemAudio":true,"captionLanguage":"zh","fps":15}"#;
+        let json = r#"{"title":"周会","windowID":4242,"microphoneUID":"usb","systemAudio":true,"captionLanguage":"zh","fps":15,"spatialFlip":true,"spatialSpacingCm":14.5}"#;
         let preset: CapturePreset = serde_json::from_str(json).expect("decode preset");
         assert_eq!(preset.window_id, Some(4242));
+        assert!(preset.spatial_flip);
+        assert_eq!(preset.spatial_spacing_cm, Some(14.5));
         assert_eq!(preset.microphone_uid.as_deref(), Some("usb"));
         assert!(preset.system_audio);
         let back = serde_json::to_value(&preset).expect("encode preset");
@@ -138,6 +147,12 @@ mod tests {
             back,
             serde_json::from_str::<serde_json::Value>(json).unwrap()
         );
+    }
+
+    #[test]
+    fn spatial_preset_fields_are_omitted_when_unset() {
+        let v = serde_json::to_value(CapturePreset::default()).expect("encode preset");
+        assert_eq!(v, serde_json::json!({"systemAudio": false}));
     }
 
     #[test]

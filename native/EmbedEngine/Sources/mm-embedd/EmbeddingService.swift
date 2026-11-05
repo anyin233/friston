@@ -13,6 +13,9 @@ struct EmbedItem: Decodable {
     var images: [String]?
     var video: [String]?
     var audio: [String]?
+    /// Window inside `audio` / `video`, so whole recordings can be embedded piecewise.
+    var startMs: Int?
+    var endMs: Int?
 }
 
 /// `embed/batch` params.
@@ -66,13 +69,32 @@ actor EmbeddingService {
         let dims = request.dimensions ?? 768
         guard [128, 256, 512, 768].contains(dims) else { throw RPCError.invalidParams("dimensions must be 128/256/512/768") }
         var inputs: [EmbeddingInput] = []
+        var clips: [URL] = []
+        // Temporary window clips are deleted whether embedding succeeds or not.
+        defer { Clips.remove(clips) }
         for item in request.items {
             let file = { (p: String) in URL(fileURLWithPath: p) }
             var parts: [EmbeddingInput.Part] = []
             if let text = item.text, !text.isEmpty { parts.append(.text(text)) }
             parts += (item.images ?? []).map { .image(.url(file($0))) }
-            parts += (item.video ?? []).map { .video(.url(file($0))) }
-            parts += (item.audio ?? []).map { .audio(.url(file($0))) }
+            for path in item.video ?? [] {
+                if let start = item.startMs, let end = item.endMs {
+                    let clip = try await Clips.video(file(path), startMs: start, endMs: end)
+                    clips.append(clip)
+                    parts.append(.video(.url(clip)))
+                } else {
+                    parts.append(.video(.url(file(path))))
+                }
+            }
+            for path in item.audio ?? [] {
+                if let start = item.startMs, let end = item.endMs {
+                    let clip = try Clips.audio(file(path), startMs: start, endMs: end)
+                    clips.append(clip)
+                    parts.append(.audio(.url(clip)))
+                } else {
+                    parts.append(.audio(.url(file(path))))
+                }
+            }
             inputs.append(EmbeddingInput(parts, title: item.title))
         }
         let vectors = try await model.embed(inputs, task: Self.task(request.task))

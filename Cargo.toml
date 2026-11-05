@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/mm-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+mm-core = { path = "crates/mm-core" }
+mm-engine = { path = "crates/mm-engine" }
+mm-store = { path = "crates/mm-store" }
+mm-index = { path = "crates/mm-index" }
+mm-vault = { path = "crates/mm-vault" }
+mm-llm = { path = "crates/mm-llm" }
+
+# GUI: GPUI Kit pins the matching GPUI release and re-exports GPUI + gpui-component.
+gpui-kit = "0.9"
+
+# Shared infrastructure
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-channel = "2"
+blake3 = "1"
+dirs = "6"
+percent-encoding = "2"
+rusqlite = { version = "0.41", features = ["bundled"] }
+sqlite-vec = "=0.1.9" # 0.1.10-alpha.* ships without sqlite-vec-diskann.c and fails to build
+tempfile = "3"
+
+[profile.dev.package."*"]
+# GPUI is very slow unoptimised; optimise dependencies even in dev builds.
+opt-level = 2

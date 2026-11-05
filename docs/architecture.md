@@ -55,7 +55,7 @@
 ```
 crates/          Rust 工作区（见上图）
 native/
-  NativeKit/     无 ML 依赖：EngineKit（JSON-RPC 服务端）、MeetingCore（GCC-PHAT、说话人融合、麦克风探测）
+  NativeKit/     无 ML 依赖：EngineKit（JSON-RPC 服务端）、MeetingCore（GCC-PHAT、说话人融合、麦克风探测、阵列声道选择）
   MeetingEngine/ mm-meetingd（依赖 speech-swift）
   EmbedEngine/   mm-embedd（依赖 mlx-swift-lm main）
 design/mockups/  界面原型（HTML/SVG），index.html 可直接打开

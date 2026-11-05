@@ -65,3 +65,30 @@ private func near0(_ c: Float, towards j: Int) -> [Float] {
     let remote = tracker.assign(.init(embedding: basis(1), origin: .system))
     #expect(remote != .cluster(index: 1), "identical timbre from system audio must not join a room cluster")
 }
+
+@Test func strayUtteranceClusterIsAbsorbedOnceTheMainSpeakerTalksAgain() {
+    // One off-timbre utterance (cosine 0.5 < cluster threshold) opens a cluster of its own;
+    // a one-utterance centroid is too noisy to keep apart at the strict merge threshold,
+    // so once the main speaker is established, their next utterance folds it back
+    // (with a relabel for the UI).
+    let tracker = OnlineSpeakerTracker(bank: VoiceprintBank())
+    for _ in 0..<3 {
+        #expect(tracker.assign(.init(embedding: basis(0), origin: .microphone)) == .cluster(index: 0))
+    }
+    let stray = tracker.assignReportingRelabels(.init(embedding: near0(0.5, towards: 2), origin: .microphone))
+    #expect(stray.label == .cluster(index: 1))
+    let back = tracker.assignReportingRelabels(.init(embedding: basis(0), origin: .microphone))
+    #expect(back.label == .cluster(index: 0))
+    #expect(back.relabels == [SpeakerRelabel(from: .cluster(index: 1), to: .cluster(index: 0))])
+}
+
+@Test func establishedDifferentSpeakersStayApart() {
+    // Two speakers with several utterances each and a cross cosine of 0.3 must not merge.
+    let tracker = OnlineSpeakerTracker(bank: VoiceprintBank())
+    let b = near0(0.3, towards: 2)
+    for _ in 0..<3 {
+        _ = tracker.assign(.init(embedding: basis(0), origin: .microphone))
+        _ = tracker.assign(.init(embedding: b, origin: .microphone))
+    }
+    #expect(tracker.assign(.init(embedding: b, origin: .microphone)) == .cluster(index: 1))
+}

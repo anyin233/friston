@@ -155,6 +155,12 @@ public struct SpeakerFusionConfig: Sendable {
     /// Fused centroid-to-centroid score at which two clusters are judged to be one person.
     /// Higher than `clusterThreshold`, because a merge rewrites captions already shown.
     public var mergeThreshold: Float = 0.75
+    /// Clusters with fewer utterances than this are "small": their centroid comes from one or
+    /// two utterances and is too noisy to hold against the strict merge threshold.
+    public var smallClusterCount: Int = 3
+    /// Merge threshold when either cluster is small, so a stray utterance's cluster folds back
+    /// into the speaker it belongs to instead of lingering as "说话人 9". Tuned on AMI ES2004a (4 real speakers, live path): 0.55 → 10 clusters, 0.45 → 7, 0.35 → 6 with 4.6 % one-to-one confusion and no real speakers merged.
+    public var smallMergeThreshold: Float = 0.35
     /// Utterances an anonymous cluster needs before its centroid may be matched to a voiceprint.
     public var minCountForRename: Int = 2
     /// Maximum influence of direction on the fused score (± this value).
@@ -170,6 +176,19 @@ public struct SpeakerFusionConfig: Sendable {
     public var turnWeight: Float = 0.2
 
     public init() {}
+
+    /// Defaults with `MM_FUSION_*` environment overrides, used only for threshold sweeps
+    /// (`MM_FUSION_CLUSTER`, `MM_FUSION_MERGE`, `MM_FUSION_SMALL_MERGE`, `MM_FUSION_SMALL_COUNT`).
+    /// - Parameter env: Environment to read (injectable for tests).
+    /// - Returns: The configuration.
+    public static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> SpeakerFusionConfig {
+        var c = SpeakerFusionConfig()
+        if let v = env["MM_FUSION_CLUSTER"].flatMap(Float.init) { c.clusterThreshold = v }
+        if let v = env["MM_FUSION_MERGE"].flatMap(Float.init) { c.mergeThreshold = v }
+        if let v = env["MM_FUSION_SMALL_MERGE"].flatMap(Float.init) { c.smallMergeThreshold = v }
+        if let v = env["MM_FUSION_SMALL_COUNT"].flatMap(Int.init) { c.smallClusterCount = v }
+        return c
+    }
 }
 
 /// Online speaker attribution fusing timbre (speaker embeddings), position
@@ -309,7 +328,13 @@ public final class OnlineSpeakerTracker {
                     && (c.personId == nil || clusters[j].personId == nil || c.personId == clusters[j].personId)
             }
             .map { j in (j, centroidScore(c, clusters[j])) }
-            .filter { $0.1 >= config.mergeThreshold }
+            .filter { j, score in
+                // Only an established speaker absorbs a small cluster, and only when it is the
+                // one being updated: a cluster just opened for an off-timbre utterance must not
+                // fold back in the same step, or the cluster threshold would never apply.
+                let absorbs = c.count >= config.smallClusterCount && clusters[j].count < config.smallClusterCount
+                return score >= (absorbs ? config.smallMergeThreshold : config.mergeThreshold)
+            }
             .max { $0.1 < $1.1 }?.0
     }
 

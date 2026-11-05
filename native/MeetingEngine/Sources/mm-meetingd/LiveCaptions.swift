@@ -437,7 +437,7 @@ final class LiveCaptioner: @unchecked Sendable {
         if !samples.isEmpty {
             log("captions \(sessionId): \(bank.personCount) enrolled people (\(samples.count) samples, model \(SpeechModelIDs.speakerEmbedding))")
         }
-        tracker = OnlineSpeakerTracker(bank: bank)
+        tracker = OnlineSpeakerTracker(bank: bank, config: .fromEnvironment())
         languageName = ASRLanguage.qwenName(for: preset.captionLanguage)
         languageCode = ASRLanguage.primaryCode(for: preset.captionLanguage)
     }

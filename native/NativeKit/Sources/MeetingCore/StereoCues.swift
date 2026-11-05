@@ -56,7 +56,7 @@ public struct StereoFrameCue: Sendable, Equatable {
 }
 
 /// Tunables for ``StereoCueAnalyzer``.
-public struct StereoCueConfig: Sendable {
+public struct StereoCueConfig: Sendable, Equatable {
     public var sampleRate: Float = 48_000
     /// Samples per channel per frame (2048 at 48 kHz ≈ 43 ms).
     public var frameCount: Int = 2048

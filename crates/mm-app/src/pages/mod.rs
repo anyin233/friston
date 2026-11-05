@@ -2,6 +2,13 @@
 
 use gpui_kit::component::IconName;
 
+pub mod library;
+pub mod live;
+pub mod people;
+pub mod schedule;
+pub mod settings;
+pub mod today;
+
 /// A page reachable from the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -55,20 +62,6 @@ impl Page {
             Page::Library => IconName::BookOpen,
             Page::People => IconName::CircleUser,
             Page::Settings => IconName::Settings,
-        }
-    }
-
-    /// One-line description shown in the page header until the real page lands.
-    ///
-    /// Returns: the description.
-    pub fn summary(self) -> &'static str {
-        match self {
-            Page::Today => "接下来的会议、一键开始记录、最近生成的纪要和待办。",
-            Page::Schedule => "来自系统日历的会议，每场会议可以设置记录方式和纪要模板。",
-            Page::Live => "窗口录制、实时字幕与说话人、边开会边记笔记。",
-            Page::Library => "纪要、转写、截图、录音和录屏，一个搜索框全部找到。",
-            Page::People => "提前录制或从录音截取声纹，让字幕直接显示名字。",
-            Page::Settings => "纪要生成方式、本地模型、录制与字幕、Obsidian 库和搜索索引。",
         }
     }
 }

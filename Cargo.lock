@@ -3808,10 +3808,21 @@ name = "mm-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
+ "chrono",
  "gpui-kit",
  "mm-core",
+ "mm-engine",
+ "mm-index",
+ "mm-llm",
+ "mm-service",
+ "mm-store",
+ "mm-vault",
+ "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

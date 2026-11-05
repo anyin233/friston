@@ -17,3 +17,16 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 mm-core.workspace = true
+mm-service.workspace = true
+mm-store.workspace = true
+mm-llm.workspace = true
+mm-index.workspace = true
+mm-vault.workspace = true
+mm-engine.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+async-channel.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

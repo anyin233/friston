@@ -168,6 +168,8 @@ pub struct LiveSession {
     pub capture_state: CaptureState,
     pub capture_error: Option<String>,
     pub levels: HashMap<LevelSource, AudioLevels>,
+    /// Running left-right position per speaker, from `spatial/cue` (empty without a stereo mic).
+    pub positions: logic::SpeakerPositions,
     pub note_path: Option<PathBuf>,
     pub window_id: Option<u32>,
     last_sync: Instant,
@@ -551,6 +553,9 @@ impl AppState {
                 }
             }
             MeetingNotice::Relabel(r) => {
+                if r.session_id == live.started.session_id {
+                    live.positions.relabel(&r.from, &r.to);
+                }
                 if live.board.apply_relabel(&r) > 0 || r.session_id == live.started.session_id {
                     self.writer
                         .send(WriteMsg::Relabel(live.meeting.id, r.from, r.to));
@@ -570,6 +575,13 @@ impl AppState {
                             format!("录制失败：{}", s.error.unwrap_or_else(|| "未知原因".into()));
                         self.notify(NoticeKind::Error, msg, cx);
                     }
+                }
+            }
+            MeetingNotice::Spatial(c) => {
+                if c.session_id == live.started.session_id
+                    && let Some(x) = c.lateral()
+                {
+                    live.positions.apply(&c.speaker, x, c.confidence);
                 }
             }
             MeetingNotice::Other { .. } => {}
@@ -1275,6 +1287,7 @@ impl AppState {
                             capture_state: CaptureState::Recording,
                             capture_error: None,
                             levels: HashMap::new(),
+                            positions: logic::SpeakerPositions::default(),
                             note_path,
                             window_id,
                             last_sync: Instant::now(),

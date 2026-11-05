@@ -25,6 +25,7 @@ enum Field {
     BaseUrl,
     EmbedDir,
     LlmDir,
+    Spacing,
 }
 
 /// The 设置 page.
@@ -37,6 +38,7 @@ pub struct SettingsPage {
     api_key: Entity<InputState>,
     embed_dir: Entity<InputState>,
     llm_dir: Entity<InputState>,
+    spacing: Entity<InputState>,
     mics: Entity<SelectState<Vec<Choice>>>,
     mic_sig: Vec<String>,
     /// BYOK kind chosen in the form (may differ from config until a model is typed).
@@ -124,6 +126,12 @@ impl SettingsPage {
             window,
             cx,
         );
+        let spacing = mk(
+            logic::spacing_text(cfg.spatial_spacing_cm),
+            "选填，例如 14",
+            window,
+            cx,
+        );
         let mics = cx.new(|cx| {
             SelectState::new(
                 vec![Choice::new("", "系统默认麦克风")],
@@ -140,6 +148,7 @@ impl SettingsPage {
             (&base_url, Field::BaseUrl),
             (&embed_dir, Field::EmbedDir),
             (&llm_dir, Field::LlmDir),
+            (&spacing, Field::Spacing),
         ] {
             cx.subscribe(input, move |this, state, ev: &InputEvent, cx| {
                 if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -169,6 +178,7 @@ impl SettingsPage {
             api_key,
             embed_dir,
             llm_dir,
+            spacing,
             mics,
             mic_sig: vec![],
             byok_kind: kind,
@@ -241,6 +251,10 @@ impl SettingsPage {
             }
             Field::EmbedDir => a.update_config(cx, |c| c.embedding_model_dir = parse_path(&value)),
             Field::LlmDir => a.update_config(cx, |c| c.local_llm_dir = parse_path(&value)),
+            Field::Spacing => match logic::parse_spacing_cm(&value) {
+                Ok(cm) => a.update_config(cx, |c| c.spatial_spacing_cm = cm),
+                Err(msg) => a.notify(NoticeKind::Warning, msg, cx),
+            },
         });
     }
 
@@ -376,6 +390,20 @@ impl SettingsPage {
                 "默认麦克风",
                 Some("两个及以上声道的实体麦克风可以判断方位。".into()),
                 Select::new(&self.mics).small(),
+                cx,
+            ))
+            .child(Self::row(
+                "方位",
+                Some("麦克风有两个声道时，会议中会标出每个人偏左、居中还是偏右。".into()),
+                self.switch("s-flip", "左右翻转", cfg.spatial_flip, |c, v| {
+                    c.spatial_flip = v
+                }),
+                cx,
+            ))
+            .child(Self::row(
+                "麦克风间距（厘米）",
+                Some("选填。填了能算出实际角度，不填也能判断左右。".into()),
+                Input::new(&self.spacing).small(),
                 cx,
             ))
             .child(Self::row(

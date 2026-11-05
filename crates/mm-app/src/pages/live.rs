@@ -744,8 +744,83 @@ impl LivePage {
                             ),
                     )
             }))
+            .children(self.directions(live, cx))
             .child(ui::section_title("录音位置"))
             .child(ui::muted(live.started.directory.display().to_string(), cx))
+    }
+
+    /// Speaker directions: a front half-circle with one dot per speaker, then 偏左/居中/偏右 rows.
+    ///
+    /// Shown only for a microphone with at least two channels whose engine has sent direction
+    /// cues; mono, beamformed and virtual inputs never produce any, so nothing is drawn there.
+    /// Params: `live` – the running session; `cx`.
+    /// Returns: the section, or `None` without direction data.
+    fn directions(&self, live: &LiveSession, cx: &App) -> Option<impl IntoElement> {
+        if live.started.microphone_channels.unwrap_or(1) < 2 || live.positions.is_empty() {
+            return None;
+        }
+        // Radius fits the 260 px pane minus padding; dots sit on the arc.
+        const R: f32 = 96.;
+        const DOT: f32 = 12.;
+        let entries = live.positions.entries();
+        let dots = entries.iter().map(|(label, x)| {
+            let (dx, dy) = logic::seat_point(*x);
+            div()
+                .absolute()
+                .left(px(DOT / 2. + R + dx * R - DOT / 2.))
+                .top(px(DOT / 2. + R - dy * R - DOT / 2.))
+                .size(px(DOT))
+                .rounded_full()
+                .border_2()
+                .border_color(cx.theme().background)
+                .bg(ui::hue_color(live.directory.hue(label)))
+        });
+        let seats = div()
+            .relative()
+            .w(px(2. * R + DOT))
+            .h(px(R + DOT))
+            .child(
+                // The arc: top half of a circle, open towards the microphone at the bottom.
+                div()
+                    .absolute()
+                    .left(px(DOT / 2.))
+                    .top(px(DOT / 2.))
+                    .w(px(2. * R))
+                    .h(px(R))
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+                    .rounded_tl(px(R))
+                    .rounded_tr(px(R)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(DOT / 2. + R - 9.))
+                    .top(px(R - 4.))
+                    .w(px(18.))
+                    .h(px(8.))
+                    .rounded_sm()
+                    .bg(cx.theme().muted_foreground),
+            )
+            .children(dots);
+        Some(
+            v_flex()
+                .gap_2()
+                .child(ui::section_title("方位"))
+                .child(seats)
+                .children(entries.into_iter().map(|(label, x)| {
+                    h_flex()
+                        .justify_between()
+                        .child(ui::speaker_name(
+                            live.directory.name(&label),
+                            live.directory.hue(&label),
+                        ))
+                        .child(ui::muted(logic::direction_label(x), cx))
+                }))
+                .child(ui::muted("相对本场其他人的位置，下方是麦克风。", cx).text_xs()),
+        )
     }
 }
 

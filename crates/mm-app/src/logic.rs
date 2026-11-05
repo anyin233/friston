@@ -387,14 +387,7 @@ pub fn talk_time(lines: &[CaptionLine]) -> Vec<(SpeakerLabel, u64)> {
     for l in lines {
         let Some(end) = l.end_ms else { continue };
         let ms = end.saturating_sub(l.start_ms);
-        // Known labels carry a per-utterance score; group by person, not by score.
-        let key = match &l.speaker {
-            SpeakerLabel::Known { person_id, .. } => SpeakerLabel::Known {
-                person_id: *person_id,
-                score: 0.0,
-            },
-            other => other.clone(),
-        };
+        let key = speaker_key(&l.speaker);
         match out.iter_mut().find(|(k, _)| *k == key) {
             Some((_, t)) => *t += ms,
             None => out.push((key, ms)),
@@ -402,6 +395,155 @@ pub fn talk_time(lines: &[CaptionLine]) -> Vec<(SpeakerLabel, u64)> {
     }
     out.sort_by_key(|e| std::cmp::Reverse(e.1));
     out
+}
+
+/// Groups labels by speaker: known labels carry a per-utterance score, so compare by person.
+///
+/// Params: `label` – as received.
+/// Returns: the label with a zero score for known people.
+fn speaker_key(label: &SpeakerLabel) -> SpeakerLabel {
+    match label {
+        SpeakerLabel::Known { person_id, .. } => SpeakerLabel::Known {
+            person_id: *person_id,
+            score: 0.0,
+        },
+        other => other.clone(),
+    }
+}
+
+/// Left-right coordinates within this band around 0 read as "居中". A third of the observed
+/// range: relative positions span about −1…1, so three equal bands split the room evenly.
+pub const DIRECTION_CENTRE_BAND: f32 = 0.33;
+
+/// Direction label for a speaker's average left-right coordinate.
+///
+/// Params: `x` – average `spatial/cue` `position[0]`, about −1 (left) … 1 (right).
+/// Returns: `偏左`, `居中` or `偏右`.
+pub fn direction_label(x: f32) -> &'static str {
+    if x < -DIRECTION_CENTRE_BAND {
+        "偏左"
+    } else if x > DIRECTION_CENTRE_BAND {
+        "偏右"
+    } else {
+        "居中"
+    }
+}
+
+/// Widest angle the seat indicator uses; ±90° would put dots on the baseline next to the mic.
+pub const SEAT_MAX_DEG: f32 = 75.0;
+
+/// Where a speaker sits on the front half-circle indicator.
+///
+/// Relative positions carry no true angle, so this is a display mapping, not an azimuth.
+/// Params: `x` – average left-right coordinate (clamped to −1…1).
+/// Returns: `(dx, dy)` on a unit half-circle: `dx` −1…1 to the right, `dy` 0…1 upwards (front).
+pub fn seat_point(x: f32) -> (f32, f32) {
+    let x = if x.is_finite() {
+        x.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let a = (x * SEAT_MAX_DEG).to_radians();
+    (a.sin(), a.cos())
+}
+
+/// Parses the optional "麦克风间距（厘米）" field.
+///
+/// Params: `s` – field text; blank clears the value.
+/// Returns: `Ok(None)` for blank, `Ok(Some(cm))` for 1–500 cm, `Err` with a Chinese message otherwise.
+pub fn parse_spacing_cm(s: &str) -> Result<Option<f64>, String> {
+    let t = s
+        .trim()
+        .trim_end_matches("cm")
+        .trim_end_matches("厘米")
+        .trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    match t.parse::<f64>() {
+        // Narrower than a capsule pair or wider than a room is a typo, not a microphone.
+        Ok(cm) if cm.is_finite() && (1.0..=500.0).contains(&cm) => Ok(Some(cm)),
+        _ => Err(format!(
+            "麦克风间距要填 1 到 500 之间的厘米数，收到的是“{}”",
+            s.trim()
+        )),
+    }
+}
+
+/// Shows a stored spacing in the settings field.
+///
+/// Params: `cm` – stored value.
+/// Returns: e.g. `14` or `14.5`; empty when unknown.
+pub fn spacing_text(cm: Option<f64>) -> String {
+    cm.map(|v| format!("{v}")).unwrap_or_default()
+}
+
+/// Cues below this confidence say little about where someone sits.
+const MIN_CUE_CONFIDENCE: f32 = 0.15;
+/// Smoothing floor: after five cues the average becomes a moving one, so a speaker who
+/// changes seats (or glasses wearer who turns) is followed within a few utterances.
+const MIN_SMOOTHING: f32 = 0.2;
+
+/// Running left-right position per speaker, fed by `spatial/cue`.
+#[derive(Debug, Default, Clone)]
+pub struct SpeakerPositions {
+    /// `(speaker, average x, cues seen)` in first-heard order.
+    entries: Vec<(SpeakerLabel, f32, u32)>,
+}
+
+impl SpeakerPositions {
+    /// Folds one cue into its speaker's average.
+    ///
+    /// Params: `speaker`; `x` – `position[0]`; `confidence` – 0…1.
+    /// Returns: `true` when the cue was used (known speaker, finite, confident enough).
+    pub fn apply(&mut self, speaker: &SpeakerLabel, x: f32, confidence: f32) -> bool {
+        if *speaker == SpeakerLabel::Unknown || !x.is_finite() || confidence < MIN_CUE_CONFIDENCE {
+            return false;
+        }
+        let key = speaker_key(speaker);
+        match self.entries.iter_mut().find(|(k, _, _)| *k == key) {
+            Some((_, avg, n)) => {
+                *n += 1;
+                let alpha = (1.0 / *n as f32).max(MIN_SMOOTHING);
+                *avg += alpha * (x - *avg);
+            }
+            None => self.entries.push((key, x, 1)),
+        }
+        true
+    }
+
+    /// Applies `speaker/relabel`: `from`'s history moves to `to`, merged by cue count.
+    ///
+    /// Params: `from`, `to` – labels from the notice.
+    pub fn relabel(&mut self, from: &SpeakerLabel, to: &SpeakerLabel) {
+        let (from, to) = (speaker_key(from), speaker_key(to));
+        let Some(i) = self.entries.iter().position(|(k, _, _)| *k == from) else {
+            return;
+        };
+        let (_, x, n) = self.entries.remove(i);
+        match self.entries.iter_mut().find(|(k, _, _)| *k == to) {
+            Some((_, avg, m)) => {
+                *avg = (*avg * *m as f32 + x * n as f32) / (*m + n) as f32;
+                *m += n;
+            }
+            None => self.entries.insert(i.min(self.entries.len()), (to, x, n)),
+        }
+    }
+
+    /// Speakers with a position, in first-heard order.
+    ///
+    /// Returns: `(speaker, average left-right coordinate)`.
+    pub fn entries(&self) -> Vec<(SpeakerLabel, f32)> {
+        self.entries
+            .iter()
+            .map(|(k, x, _)| (k.clone(), *x))
+            .collect()
+    }
+
+    /// Whether no cue has arrived yet.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// Microphone used when the settings say "system default": the first physical input,
@@ -665,6 +807,88 @@ mod tests {
         assert_eq!(parse_seconds(""), None);
         assert_eq!(parse_seconds("-1"), None);
         assert_eq!(parse_seconds("x"), None);
+    }
+
+    #[test]
+    fn direction_labels_split_the_room_in_thirds() {
+        assert_eq!(direction_label(-0.9), "偏左");
+        assert_eq!(direction_label(-0.34), "偏左");
+        assert_eq!(direction_label(-0.33), "居中");
+        assert_eq!(direction_label(0.0), "居中");
+        assert_eq!(direction_label(0.33), "居中");
+        assert_eq!(direction_label(0.5), "偏右");
+        assert_eq!(direction_label(f32::NAN), "居中");
+    }
+
+    #[test]
+    fn spacing_field_parses_centimetres() {
+        assert_eq!(parse_spacing_cm("  "), Ok(None));
+        assert_eq!(parse_spacing_cm("14"), Ok(Some(14.0)));
+        assert_eq!(parse_spacing_cm("14.5 cm"), Ok(Some(14.5)));
+        assert_eq!(parse_spacing_cm("20厘米"), Ok(Some(20.0)));
+        assert!(parse_spacing_cm("0").unwrap_err().contains("“0”"));
+        assert!(parse_spacing_cm("abc").is_err());
+        assert!(parse_spacing_cm("9999").is_err());
+        assert_eq!(spacing_text(Some(14.0)), "14");
+        assert_eq!(spacing_text(Some(14.5)), "14.5");
+        assert_eq!(spacing_text(None), "");
+    }
+
+    #[test]
+    fn seat_points_stay_on_the_front_half_circle() {
+        let (dx, dy) = seat_point(0.0);
+        assert!(
+            dx.abs() < 1e-6 && (dy - 1.0).abs() < 1e-6,
+            "centre is straight ahead"
+        );
+        let (l, _) = seat_point(-1.0);
+        let (r, ry) = seat_point(2.0);
+        assert!(l < -0.9 && r > 0.9, "left is left, right is right");
+        assert!(ry > 0.2, "the widest seat is still above the baseline");
+        assert_eq!(seat_point(f32::INFINITY), seat_point(0.0));
+    }
+
+    #[test]
+    fn speaker_positions_average_merge_and_skip_noise() {
+        let mut p = SpeakerPositions::default();
+        let c0 = SpeakerLabel::Cluster { index: 0 };
+        let c1 = SpeakerLabel::Cluster { index: 1 };
+        assert!(!p.apply(&SpeakerLabel::Unknown, -0.9, 0.9));
+        assert!(!p.apply(&c0, -0.9, 0.05), "low confidence ignored");
+        assert!(p.is_empty());
+        assert!(p.apply(&c0, -0.8, 0.5));
+        assert!(p.apply(&c0, -0.6, 0.5));
+        assert!(p.apply(&c1, 0.9, 0.5));
+        let e = p.entries();
+        assert_eq!(e[0].0, c0);
+        assert!(
+            (e[0].1 + 0.7).abs() < 1e-6,
+            "plain mean at first: {}",
+            e[0].1
+        );
+        // Later cues move the average by at least the smoothing floor.
+        for _ in 0..20 {
+            p.apply(&c0, 0.0, 0.5);
+        }
+        assert!(direction_label(p.entries()[0].1) == "居中");
+
+        // Known people group across scores; relabel merges by cue count.
+        let zhao = PersonId::new();
+        let known = |score| SpeakerLabel::Known {
+            person_id: zhao,
+            score,
+        };
+        p.apply(&known(0.7), 0.5, 0.5);
+        p.apply(&known(0.9), 0.7, 0.5);
+        assert_eq!(p.entries().len(), 3);
+        p.relabel(&c1, &known(0.8));
+        let e = p.entries();
+        assert_eq!(e.len(), 2);
+        let (_, x) = e.iter().find(|(k, _)| *k == known(0.0)).unwrap();
+        assert!((x - (0.6 * 2.0 + 0.9) / 3.0).abs() < 1e-6, "{x}");
+        // Relabel into a new label keeps the history.
+        p.relabel(&c0, &SpeakerLabel::Cluster { index: 5 });
+        assert_eq!(p.entries()[0].0, SpeakerLabel::Cluster { index: 5 });
     }
 
     #[test]

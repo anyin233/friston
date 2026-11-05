@@ -19,6 +19,8 @@
 | `audio/probeInputs` | ✅ | 输入设备列表 `{uid,name,channels,sampleRate,isVirtual}` |
 | `capture/listSources` | ✅ | ScreenCaptureKit 可录制的窗口与显示器 |
 | `calendar/events` `{from,to}` | ✅ | ISO-8601 时间范围；返回事件和识别出的会议链接 |
+| `permissions/status` | ✅ | `{screenCapture,microphone,calendar}`，值为 `granted` / `denied` / `notDetermined` / `restricted`；系统把引擎的权限算在启动它的 App 头上 |
+| `permissions/request` `{kind}` | ✅ | 请求一项权限（`screenCapture` / `microphone` / `calendar`），返回请求后的状态 |
 | `capture/start` | ✅ | 见下方“录制”；返回 `{sessionId,directory,files,microphoneChannels,startedAt}` |
 | `capture/stop` | ✅ | 返回 `{sessionId,durationMs,files}`，`files` 只列出真正写入数据的文件 |
 | `voiceprint/enroll` / `voiceprint/fromClip` | ✅ | 见下方“声纹”；返回声纹向量及质量指标 |

@@ -37,6 +37,13 @@ public enum AudioInputProbe {
         deviceIDs().compactMap(info(for:)).sorted { $0.name < $1.name }
     }
 
+    /// Resolves a device UID (stable across reboots) to the current Core Audio object ID.
+    /// - Parameter uid: `kAudioDevicePropertyDeviceUID`, as reported by `inputs()`.
+    /// - Returns: The device ID, or `nil` when no input device has that UID.
+    public static func deviceID(forUID uid: String) -> AudioObjectID? {
+        deviceIDs().first { stringProperty($0, kAudioDevicePropertyDeviceUID) == uid && inputChannelCount($0) > 0 }
+    }
+
     private static func deviceIDs() -> [AudioObjectID] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal,

@@ -1,12 +1,18 @@
 import EngineKit
 import Foundation
 import MeetingCore
-import Qwen3ASR
-import SpeechVAD
 
 // mm-meetingd: newline-delimited JSON-RPC 2.0 over stdio. Logs go to stderr.
 
-let server = RPCServer()
+/// The protocol sink. speech-swift `print`s model-loading progress, so the real stdout is
+/// reserved for protocol lines and descriptor 1 is pointed at stderr before any model loads.
+let protocolSink: @Sendable (Data) -> Void = {
+    do { return StdoutGuard.sink(try StdoutGuard.reserve()) } catch {
+        log("stdout guard unavailable, library output may corrupt the protocol: \(error)")
+        return RPCServer.stdout
+    }
+}()
+let server = RPCServer(sink: protocolSink)
 let calendar = CalendarService()
 let capture = CaptureController(notify: { method, params in
     Task { await server.notify(method, params) }
@@ -29,8 +35,17 @@ await server.register(Methods.initialize) { _ in
         "capabilities": .object([
             "windowCapture": .bool(true),
             "capture": .string("window/display HEVC + multichannel mic + system audio"),
-            "liveCaptions": .string("planned: Qwen3-ASR streaming (speech-swift)"),
-            "diarization": .string("planned: \(String(describing: SortformerStreamingSession.self)) + speaker embeddings"),
+            "liveCaptions": .string("Qwen3-ASR 0.6B per Silero-VAD utterance, partials every 1 s"),
+            "diarization": .string("live: WeSpeaker embeddings + spatial fusion; file: Pyannote + WeSpeaker clustering"),
+            "models": .object([
+                "liveASR": .string(SpeechModelIDs.liveASR),
+                "offlineASR": .string(HubCacheLocator.snapshot(repo: SpeechModelIDs.offlineASRHub) != nil
+                    ? SpeechModelIDs.offlineASRHub : SpeechModelIDs.offlineASRDownload),
+                "vad": .string(SpeechModelIDs.vad),
+                "speakerEmbedding": .string(SpeechModelIDs.speakerEmbedding),
+                "segmentation": .string(SpeechModelIDs.segmentation),
+            ]),
+            "speakerEmbeddingModel": .string(SpeechModelIDs.speakerEmbedding),
             "spatialInputs": .array(inputs.filter(\.supportsSpatialCues).map { .string($0.name) }),
         ]),
     ])
@@ -62,10 +77,19 @@ await server.register(Methods.Meeting.captureStop) { _ in
     try isoJSON(try await capture.stop())
 }
 
-for method in [
-    Methods.Meeting.voiceprintEnroll, Methods.Meeting.voiceprintFromClip, Methods.Meeting.transcribeFile,
-] {
-    await server.register(method) { _ in throw RPCError.notImplemented(method) }
+await server.register(Methods.Meeting.voiceprintFromClip) { params in
+    let p = try (params ?? .object([:])).decode(VoiceprintFromClipParams.self)
+    return try JSONValue.from(try await SpeechRequests.fromClip(p))
+}
+
+await server.register(Methods.Meeting.voiceprintEnroll) { params in
+    let p = try (params ?? .object([:])).decode(VoiceprintEnrollParams.self)
+    return try JSONValue.from(try await SpeechRequests.enroll(p))
+}
+
+await server.register(Methods.Meeting.transcribeFile) { params in
+    let p = try (params ?? .object([:])).decode(TranscribeFileParams.self)
+    return try JSONValue.from(try await SpeechRequests.transcribeFile(p))
 }
 
 await server.register(Methods.shutdown) { _ in

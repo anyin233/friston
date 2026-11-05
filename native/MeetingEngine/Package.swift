@@ -22,6 +22,8 @@ let package = Package(
                 // Qwen3-ASR (zh/en/ja/ko + 22 Chinese dialects) and Silero / Sortformer / WeSpeaker.
                 .product(name: "Qwen3ASR", package: "speech-swift"),
                 .product(name: "SpeechVAD", package: "speech-swift"),
+                // AudioFileLoader (any AVAudioFile format → 16 kHz mono) for transcribe/file and clips.
+                .product(name: "AudioCommon", package: "speech-swift"),
             ],
             linkerSettings: [
                 .linkedFramework("ScreenCaptureKit"),

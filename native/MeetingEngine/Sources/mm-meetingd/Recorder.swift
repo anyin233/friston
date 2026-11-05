@@ -56,6 +56,8 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var micFile: AVAudioFile?
     private var micThrottle = Throttle(interval: 0.1)
     private(set) var microphoneChannels: Int?
+    /// Live captions; fed from the capture threads, does its model work elsewhere.
+    private let captioner: LiveCaptioner
 
     /// Creates a session; nothing is captured until `start()`.
     /// - Parameters:
@@ -66,6 +68,9 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.plan = plan
         self.notify = notify
         startedAt = .now
+        // ScreenCaptureKit is configured for 48 kHz below; the mic runs at its nominal rate.
+        captioner = LiveCaptioner(sessionId: id, plan: plan, micRate: plan.microphone?.sampleRate,
+                                  systemRate: plan.preset.systemAudio ? 48_000 : nil, notify: notify)
     }
 
     /// Creates the output folder and starts every requested source.
@@ -75,6 +80,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         do {
             if plan.microphone != nil { try startMicrophone() }
             if plan.files.screen != nil || plan.preset.systemAudio { try await startStream() }
+            captioner.start()
         } catch {
             _ = await stop()
             // Leave no empty "2026-… 会议" folders behind after a permission failure.
@@ -96,6 +102,8 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             }
         }
         stream = nil
+        // After the sources stop, so the last words reach the captioner before it flushes.
+        await captioner.stop()
         return await finishWriters()
     }
 
@@ -104,13 +112,9 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// Points the engine's input unit at the chosen device and records its native format.
     private func startMicrophone() throws {
         guard let mic = plan.microphone, let url = plan.files.microphone else { return }
-        guard var deviceID = AudioInputProbe.deviceID(forUID: mic.uid) else { throw RecorderError.microphoneNotFound(mic.uid) }
         let engine = AVAudioEngine()
+        try selectInput(of: engine, uid: mic.uid)
         let input = engine.inputNode
-        guard let unit = input.audioUnit else { throw RecorderError.microphoneSelect(mic.uid, -1) }
-        let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                          &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
-        guard status == noErr else { throw RecorderError.microphoneSelect(mic.uid, status) }
 
         // The hardware-side format keeps every channel; AVAudioEngine would otherwise mix down.
         let format = input.inputFormat(forBus: 0)
@@ -135,6 +139,46 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             return micThrottle.shouldFire(at: CACurrentMediaTime())
         }
         if fire { emitLevels(buffer, source: .microphone) }
+        if let inbox = captioner.microphone { feed(inbox, buffer, pair: captioner.microphoneSpatial) }
+    }
+
+    /// Hands a buffer to the captioner (capture thread; copies only).
+    /// - Parameters:
+    ///   - inbox: The stream's inbox.
+    ///   - buffer: Float32 capture buffer, interleaved or not.
+    ///   - pair: Channels to keep for direction cues, or `nil`.
+    private func feed(_ inbox: CaptionInbox, _ buffer: AVAudioPCMBuffer, pair: SpatialArrayProfile?) {
+        guard buffer.format.sampleRate == inbox.sampleRate else {
+            // Would make every caption time wrong; the device changed rate under us.
+            if !rateWarned.exchange(true) {
+                log("capture \(id): captions skip \(buffer.format.sampleRate) Hz audio, expected \(inbox.sampleRate) Hz")
+            }
+            return
+        }
+        let channels = Self.channels(of: buffer)
+        guard !channels.isEmpty else { return }
+        var stereoPair: ([Float], [Float])?
+        if let pair, pair.channelA < channels.count, pair.channelB < channels.count {
+            stereoPair = (channels[pair.channelA], channels[pair.channelB])
+        }
+        inbox.append(mono: StreamingResampler.downmix(channels), pair: stereoPair,
+                     endMs: Date.now.timeIntervalSince(startedAt) * 1000)
+    }
+
+    private let rateWarned = LockedValue(false)
+
+    /// Copies a Float32 buffer into one array per channel.
+    /// - Parameter buffer: Interleaved or deinterleaved Float32 PCM.
+    /// - Returns: Channel arrays, empty for non-float formats.
+    private static func channels(of buffer: AVAudioPCMBuffer) -> [[Float]] {
+        guard let data = buffer.floatChannelData else { return [] }
+        let frames = Int(buffer.frameLength)
+        let count = Int(buffer.format.channelCount)
+        if buffer.format.isInterleaved {
+            let all = UnsafeBufferPointer(start: data[0], count: frames * count)
+            return (0..<count).map { c in (0..<frames).map { all[$0 * count + c] } }
+        }
+        return (0..<count).map { Array(UnsafeBufferPointer(start: data[$0], count: frames)) }
     }
 
     /// Removes the tap and closes `mic.caf` (AVAudioFile finalizes the header on release).
@@ -269,6 +313,7 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             log("capture \(id): system audio write failed: \(error)")
         }
         if systemThrottle.shouldFire(at: CACurrentMediaTime()) { emitLevels(buffer, source: .system) }
+        if let inbox = captioner.system { feed(inbox, buffer, pair: nil) }
     }
 
     /// Wraps a ScreenCaptureKit audio sample buffer as a PCM buffer without copying.
@@ -352,6 +397,19 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             notify(Methods.Meeting.nAudioLevels, payload)
         }
     }
+}
+
+/// Points an engine's input unit at a specific Core Audio device.
+/// - Parameters:
+///   - engine: A fresh, not yet started engine.
+///   - uid: Device UID from `audio/probeInputs`.
+/// - Throws: ``RecorderError`` when the device is gone or cannot be selected.
+func selectInput(of engine: AVAudioEngine, uid: String) throws {
+    guard var deviceID = AudioInputProbe.deviceID(forUID: uid) else { throw RecorderError.microphoneNotFound(uid) }
+    guard let unit = engine.inputNode.audioUnit else { throw RecorderError.microphoneSelect(uid, -1) }
+    let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                      &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
+    guard status == noErr else { throw RecorderError.microphoneSelect(uid, status) }
 }
 
 /// Owns the single active capture session and its lifecycle.

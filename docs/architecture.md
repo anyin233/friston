@@ -10,6 +10,7 @@
 │  ├─ mm-store    SQLite + sqlite-vec（向量）+ FTS5（关键词）               │
 │  ├─ mm-vault    Obsidian：发现库、渲染笔记、受管区块、obsidian:// URI       │
 │  ├─ mm-llm      纪要：BYOK / Codex app-server / 本地 MLX                 │
+│  ├─ mm-service  无界面服务层：设置、引擎调用、字幕状态、会议流程、后台索引     │
 │  └─ mm-core     领域模型                                               │
 │         │ stdio JSON-RPC                 │ stdio JSON-RPC              │
 │         ▼                                ▼                            │
@@ -17,7 +18,7 @@
 │  ScreenCaptureKit 窗口录制          EmbeddingGemma 2 (MLX, GPU)          │
 │  麦克风 / 系统声音 / process tap     文字·图片·音频·视频 → 768 维           │
 │  Qwen3-ASR 流式 (MLX)               按需加载、可卸载                      │
-│  Sortformer + WeSpeaker (Core ML)                                     │
+│  Sortformer + WeSpeaker (Core ML)   本地 LLM（离线纪要，JSON Schema 约束） │
 │  GCC-PHAT 方位 + 说话人融合                                              │
 │  EventKit 日程                                                         │
 └───────────────────────────────────────────────────────────────────────┘
@@ -42,6 +43,28 @@
    - 每个向量都带模型戳 `embeddinggemma-2@768/p1`；换模型或改了提示词时，后台自动重建索引。
 6. **结束**：会后精转写和全局说话人聚类 → `mm-llm` 选择提供方生成结构化纪要（JSON Schema 约束）→ 写入笔记的 `minutes` / `actions` 受管区块 → 纪要本身也进入索引。
 7. **检索**：用户的问题先转成 `search_query` 向量，再与 FTS5 的 trigram 结果融合（RRF）。结果可能是转写、笔记、截图、录音窗口或录屏窗口，点击后跳到对应的时间点。
+
+## 服务层（`mm-service`）
+
+界面只负责窗口和渲染，所有“做事”的代码都在 `mm-service`，可以脱离显示器和引擎测试：
+
+| 模块 | 职责 |
+| --- | --- |
+| `config` | `~/Library/Application Support/Meeting Master/config.json`（可用 `MM_DATA_DIR` 覆盖），缺键用默认值 |
+| `engines` | 定位引擎（`MM_ENGINES_DIR` → App 包内 `Contents/MacOS` → `target/engines/{Debug,Release}`），类型化调用，权限错误单独区分 |
+| `live` | 字幕板（易变/定稿/撤回/改标）与说话人目录（名字和色相：同一个人在所有界面同一色相） |
+| `flow` | 一场会议的各步：建笔记 → 录制预设（含已登记声纹）→ 定稿入库并写入笔记 `transcript` 区块 → 会后精转写合并 → 纪要写入 `minutes` / `actions` 区块 |
+| `indexer` | 后台线程：Obsidian 库 FSEvents → 防抖 → 增量分块 → 按模型戳补嵌入；会议进行时减小批量，把 GPU 让给字幕 |
+
+纪要提供方按 BYOK → Codex → 本地 MLX 的顺序选择。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。
+
+纪要里的时间戳链接形如 `meeting-master://open?meeting=<id>&t=<毫秒>`，App 注册了这个 URL scheme。
+
+## 打包
+
+- `scripts/dev-app.sh launch`：开发包 `target/debug/MeetingMasterDev.app`，内含 Debug 引擎及其资源包。
+- `scripts/package-app.sh`：发布包 `target/release/Meeting Master.app`（Release 引擎），`MM_SIGN_IDENTITY` 指定签名身份，默认 ad-hoc。
+- 两者共用 `scripts/lib/bundle.sh`：Info.plist 里写麦克风、日历、屏幕录制、系统声音的用途说明和 URL scheme。
 
 ## 进程与权限
 

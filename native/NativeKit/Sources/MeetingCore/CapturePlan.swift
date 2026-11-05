@@ -11,6 +11,7 @@ public struct CapturePreset: Codable, Sendable, Equatable {
     /// Whole display to record instead of a window.
     public var displayID: UInt32?
     /// Core Audio UID of the microphone; every channel is kept for spatial cues.
+    /// ``defaultMicrophoneUID`` (`"default"`) records the current system default input.
     public var microphoneUID: String?
     /// Record what the Mac plays (remote participants).
     public var systemAudio: Bool
@@ -39,6 +40,11 @@ public struct CapturePreset: Codable, Sendable, Equatable {
         self.voiceprints = voiceprints
     }
 
+    /// `microphoneUID` value meaning "the system default input", for apps that want the mic
+    /// without picking a device. Resolved once at `capture/start`; a later change of the system
+    /// default does not move a running recording.
+    public static let defaultMicrophoneUID = "default"
+
     private enum CodingKeys: String, CodingKey {
         case title, windowID, displayID, microphoneUID, systemAudio, captionLanguage, fps, outputDirectory, voiceprints
     }
@@ -64,6 +70,7 @@ public enum CapturePlanError: Error, Equatable, CustomStringConvertible {
     case nothingToRecord
     case windowAndDisplay
     case unknownMicrophone(String)
+    case noDefaultMicrophone
     case invalidFPS(Int)
 
     /// Message sent back as the RPC error text.
@@ -72,6 +79,7 @@ public enum CapturePlanError: Error, Equatable, CustomStringConvertible {
         case .nothingToRecord: "capture/start needs at least one of windowID, displayID, microphoneUID or systemAudio"
         case .windowAndDisplay: "capture/start takes windowID or displayID, not both"
         case .unknownMicrophone(let uid): "no audio input with uid \(uid); call audio/probeInputs for the current list"
+        case .noDefaultMicrophone: "microphoneUID \"default\" was requested but the system has no default audio input"
         case .invalidFPS(let fps): "fps must be 1…60, got \(fps)"
         }
     }
@@ -132,12 +140,15 @@ public struct CapturePlan: Sendable, Equatable {
     /// - Parameters:
     ///   - preset: Requested sources.
     ///   - inputs: Current audio inputs (from `AudioInputProbe.inputs()`).
+    ///   - defaultInputUID: UID of the system default input (`AudioInputProbe.defaultInputUID()`),
+    ///     used when the preset asks for ``CapturePreset/defaultMicrophoneUID``.
     ///   - baseDirectory: Recordings root; `preset.outputDirectory` wins when set.
     ///   - start: Session start, used in the folder name.
     ///   - timeZone: Zone for the folder name (the user's local time).
     /// - Returns: The plan.
     /// - Throws: `CapturePlanError` describing the first problem found.
-    public static func make(preset: CapturePreset, inputs: [AudioInputInfo], baseDirectory: URL = defaultBaseDirectory,
+    public static func make(preset: CapturePreset, inputs: [AudioInputInfo], defaultInputUID: String? = nil,
+                            baseDirectory: URL = defaultBaseDirectory,
                             start: Date = .now, timeZone: TimeZone = .current) throws -> CapturePlan {
         let records = preset.windowID != nil || preset.displayID != nil || preset.microphoneUID != nil || preset.systemAudio
         guard records else { throw CapturePlanError.nothingToRecord }
@@ -146,7 +157,11 @@ public struct CapturePlan: Sendable, Equatable {
         guard (1...60).contains(fps) else { throw CapturePlanError.invalidFPS(fps) }
 
         var microphone: AudioInputInfo?
-        if let uid = preset.microphoneUID {
+        if var uid = preset.microphoneUID {
+            if uid == CapturePreset.defaultMicrophoneUID {
+                guard let resolved = defaultInputUID else { throw CapturePlanError.noDefaultMicrophone }
+                uid = resolved
+            }
             guard let match = inputs.first(where: { $0.uid == uid }) else { throw CapturePlanError.unknownMicrophone(uid) }
             microphone = match
         }

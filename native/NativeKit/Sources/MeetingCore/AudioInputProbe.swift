@@ -44,6 +44,20 @@ public enum AudioInputProbe {
         deviceIDs().first { stringProperty($0, kAudioDevicePropertyDeviceUID) == uid && inputChannelCount($0) > 0 }
     }
 
+    /// The UID of the system default input device (System Settings › Sound › Input).
+    /// - Returns: The UID, or `nil` when there is no default input.
+    public static func defaultInputUID() -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice, mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var id = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id) == noErr,
+              id != kAudioObjectUnknown, inputChannelCount(id) > 0
+        else { return nil }
+        return stringProperty(id, kAudioDevicePropertyDeviceUID)
+    }
+
     private static func deviceIDs() -> [AudioObjectID] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal,

@@ -432,7 +432,8 @@ actor CaptureController {
     func start(_ preset: CapturePreset) async throws -> CaptureStarted {
         let plan: CapturePlan
         do {
-            plan = try CapturePlan.make(preset: preset, inputs: AudioInputProbe.inputs())
+            plan = try CapturePlan.make(preset: preset, inputs: AudioInputProbe.inputs(),
+                                        defaultInputUID: AudioInputProbe.defaultInputUID())
         } catch let error as CapturePlanError {
             throw RPCError.invalidParams(error.description)
         }

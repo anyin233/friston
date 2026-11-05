@@ -178,6 +178,21 @@ impl MeetingEngine {
         )
     }
 
+    /// macOS privacy grants as attributed to the app (no prompts).
+    pub fn permissions(&self) -> Result<mm_core::PermissionStatus, ServiceError> {
+        self.call(meeting::PERMISSIONS_STATUS, Value::Null)
+    }
+
+    /// Asks macOS for one permission (`screenCapture`, `microphone`, `calendar`).
+    ///
+    /// Params: `kind` – permission. Returns: the status afterwards.
+    pub fn request_permission(
+        &self,
+        kind: &str,
+    ) -> Result<mm_core::PermissionStatus, ServiceError> {
+        self.call(meeting::PERMISSIONS_REQUEST, json!({"kind": kind}))
+    }
+
     /// Starts recording + live captions.
     pub fn capture_start(&self, preset: &CapturePreset) -> Result<CaptureStarted, ServiceError> {
         self.call(

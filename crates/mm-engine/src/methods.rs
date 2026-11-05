@@ -21,6 +21,10 @@ pub mod meeting {
     pub const VOICEPRINT_FROM_CLIP: &str = "voiceprint/fromClip";
     pub const TRANSCRIBE_FILE: &str = "transcribe/file";
     pub const CALENDAR_EVENTS: &str = "calendar/events";
+    /// Privacy permission states as macOS attributes them to the app.
+    pub const PERMISSIONS_STATUS: &str = "permissions/status";
+    /// Asks macOS for one permission (`screenCapture`, `microphone`, `calendar`).
+    pub const PERMISSIONS_REQUEST: &str = "permissions/request";
     /// Runs the live caption pipeline over an audio file (testing without capture permissions).
     pub const CAPTION_SIMULATE_FILE: &str = "caption/simulateFile";
 

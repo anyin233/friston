@@ -56,6 +56,15 @@ await server.register(Methods.Meeting.audioProbeInputs) { _ in
     try JSONValue.from(AudioInputProbe.inputs())
 }
 
+await server.register(Methods.Meeting.permissionsStatus) { _ in
+    try JSONValue.from(Permissions.status())
+}
+
+await server.register(Methods.Meeting.permissionsRequest) { params in
+    guard let kind = params?["kind"]?.stringValue else { throw RPCError.invalidParams("permissions/request needs `kind`") }
+    return try JSONValue.from(try await Permissions.request(kind))
+}
+
 await server.register(Methods.Meeting.captureListSources) { _ in
     try JSONValue.from(try await listCaptureSources())
 }

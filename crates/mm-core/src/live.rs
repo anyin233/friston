@@ -173,6 +173,34 @@ pub struct FileTranscript {
     pub segments: Vec<FileSegment>,
 }
 
+/// `permissions/status` result: macOS privacy grants as attributed to the app.
+/// Each value is `granted`, `denied`, `notDetermined` or `restricted`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionStatus {
+    /// Screen & System Audio Recording (window capture and remote participants' audio).
+    pub screen_capture: String,
+    pub microphone: String,
+    pub calendar: String,
+}
+
+impl PermissionStatus {
+    /// Permissions not granted yet, as `(kind, Chinese label)` for the settings page.
+    ///
+    /// Returns: missing permissions in a fixed order.
+    pub fn missing(&self) -> Vec<(&'static str, &'static str)> {
+        [
+            ("screenCapture", "屏幕与系统录音", &self.screen_capture),
+            ("microphone", "麦克风", &self.microphone),
+            ("calendar", "日历", &self.calendar),
+        ]
+        .into_iter()
+        .filter(|(_, _, v)| v.as_str() != "granted")
+        .map(|(k, l, _)| (k, l))
+        .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +226,18 @@ mod tests {
         )
         .expect("decode speaker/relabel");
         assert_eq!(relabel.to, SpeakerLabel::Cluster { index: 1 });
+    }
+
+    #[test]
+    fn permission_status_lists_what_is_missing() {
+        let p: PermissionStatus = serde_json::from_str(
+            r#"{"screenCapture":"denied","microphone":"granted","calendar":"notDetermined"}"#,
+        )
+        .expect("decode permissions/status");
+        assert_eq!(
+            p.missing(),
+            vec![("screenCapture", "屏幕与系统录音"), ("calendar", "日历")]
+        );
     }
 
     #[test]

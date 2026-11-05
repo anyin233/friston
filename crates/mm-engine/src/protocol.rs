@@ -47,12 +47,18 @@ pub enum Incoming {
     Error { id: u64, error: RpcError },
     /// Server-initiated notification (captions, levels, capture state, progress …).
     Notification { method: String, params: Value },
+    /// Server-initiated request that expects a reply (e.g. a Codex approval prompt).
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
 }
 
 /// Wire form used only for decoding; `Incoming` is the validated form.
 #[derive(Deserialize)]
 struct RawIncoming {
-    id: Option<u64>,
+    id: Option<Value>,
     method: Option<String>,
     #[serde(default)]
     params: Value,
@@ -69,11 +75,24 @@ impl Incoming {
         let raw: RawIncoming = serde_json::from_str(line)
             .map_err(|e| format!("invalid JSON-RPC line {line:?}: {e}"))?;
         match (raw.id, raw.method, raw.result, raw.error) {
-            (Some(id), None, _, Some(error)) => Ok(Incoming::Error { id, error }),
-            (Some(id), None, result, None) => Ok(Incoming::Result {
+            (Some(id), Some(method), None, None) => Ok(Incoming::Request {
                 id,
-                result: result.unwrap_or(Value::Null),
+                method,
+                params: raw.params,
             }),
+            (Some(id), None, result, error) => {
+                // Our own requests always use numeric ids, so a reply with any other id is bogus.
+                let id = id
+                    .as_u64()
+                    .ok_or_else(|| format!("reply with non-numeric id in {line:?}"))?;
+                Ok(match error {
+                    Some(error) => Incoming::Error { id, error },
+                    None => Incoming::Result {
+                        id,
+                        result: result.unwrap_or(Value::Null),
+                    },
+                })
+            }
             (None, Some(method), _, _) => Ok(Incoming::Notification {
                 method,
                 params: raw.params,
@@ -108,6 +127,15 @@ mod tests {
         assert!(
             matches!(n, Incoming::Notification { ref method, .. } if method == "caption/partial")
         );
+    }
+
+    #[test]
+    fn parses_server_requests_with_any_id() {
+        let r = Incoming::parse(
+            r#"{"jsonrpc":"2.0","id":"req-1","method":"item/commandExecution/requestApproval","params":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, Incoming::Request { ref id, .. } if id == "req-1"));
     }
 
     #[test]

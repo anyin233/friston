@@ -22,6 +22,12 @@ type Pending = Arc<Mutex<HashMap<u64, async_channel::Sender<Result<Value, RpcErr
 pub enum EngineEvent {
     /// A JSON-RPC notification from the engine.
     Notification { method: String, params: Value },
+    /// The engine asked us something; answer with [`EngineClient::respond_error`] or `respond`.
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// The engine wrote something that is not valid JSON-RPC.
     ProtocolError(String),
     /// The engine closed stdout (crashed or exited).
@@ -116,6 +122,13 @@ impl EngineClient {
                             let _ = event_tx
                                 .send_blocking(EngineEvent::Notification { method, params });
                         }
+                        Ok(Incoming::Request { id, method, params }) => {
+                            let _ = event_tx.send_blocking(EngineEvent::Request {
+                                id,
+                                method,
+                                params,
+                            });
+                        }
                         Err(e) => {
                             let _ = event_tx.send_blocking(EngineEvent::ProtocolError(e));
                         }
@@ -190,6 +203,49 @@ impl EngineClient {
                     data: None,
                 })
             })
+    }
+
+    /// Sends a notification (no reply expected), e.g. Codex's `initialized`.
+    ///
+    /// Params: `method` – notification name; `params` – JSON params (`null` omits them).
+    /// Returns: an error string when the writer is gone.
+    pub fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+        let mut msg = serde_json::json!({"jsonrpc": "2.0", "method": method});
+        if !params.is_null() {
+            msg["params"] = params;
+        }
+        self.send_line(msg, method)
+    }
+
+    /// Replies to a server-initiated request.
+    ///
+    /// Params: `id` – the request id as received; `result` – reply value.
+    /// Returns: an error string when the writer is gone.
+    pub fn respond(&self, id: Value, result: Value) -> Result<(), String> {
+        self.send_line(
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            "response",
+        )
+    }
+
+    /// Rejects a server-initiated request.
+    ///
+    /// Params: `id` – request id; `code` / `message` – JSON-RPC error.
+    /// Returns: an error string when the writer is gone.
+    pub fn respond_error(&self, id: Value, code: i64, message: &str) -> Result<(), String> {
+        self.send_line(
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}),
+            "error response",
+        )
+    }
+
+    /// Queues one JSON line for the writer thread.
+    fn send_line(&self, msg: Value, what: &str) -> Result<(), String> {
+        let mut line = msg.to_string();
+        line.push('\n');
+        self.outbox
+            .send_blocking(line)
+            .map_err(|_| format!("engine writer closed; cannot send {what}"))
     }
 
     /// Kills the child process if this client spawned one.

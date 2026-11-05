@@ -12,6 +12,8 @@ let package = Package(
     dependencies: [
         .package(path: "../NativeKit"),
         .package(url: "https://github.com/soniqo/speech-swift", exact: "0.0.29"),
+        // Same version speech-swift resolves; listed only so the engine can free MLX's buffer cache.
+        .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.31.6"),
     ],
     targets: [
         .executableTarget(
@@ -22,6 +24,7 @@ let package = Package(
                 // Qwen3-ASR (zh/en/ja/ko + 22 Chinese dialects) and Silero / Sortformer / WeSpeaker.
                 .product(name: "Qwen3ASR", package: "speech-swift"),
                 .product(name: "SpeechVAD", package: "speech-swift"),
+                .product(name: "MLX", package: "mlx-swift"),
                 // AudioFileLoader (any AVAudioFile format → 16 kHz mono) for transcribe/file and clips.
                 .product(name: "AudioCommon", package: "speech-swift"),
             ],

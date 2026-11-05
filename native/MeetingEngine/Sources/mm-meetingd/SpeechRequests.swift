@@ -3,6 +3,7 @@ import AudioCommon
 import EngineKit
 import Foundation
 import MeetingCore
+import MLX
 @preconcurrency import Qwen3ASR
 @preconcurrency import SpeechVAD
 
@@ -189,6 +190,35 @@ enum SpeechRequests {
         let windows = TurnPlanner.windows(from: turns, maxGap: 0.8, maxDuration: 25)
         let labels = speakerLabels(centroids: centroids, voiceprints: params.voiceprints ?? [])
 
+        let (segments, model) = try await transcribeWindows(samples, windows: windows, labels: labels, params: params)
+        // The 1.7B model is gone once transcribeWindows returns, but MLX keeps its buffers in a
+        // cache (~1.3 GB measured); clearing it is what actually returns the memory.
+        let freed = try? await MLXGate.shared.run { () -> String in
+            let before = MLX.Memory.cacheMemory
+            MLX.Memory.clearCache()
+            return "MLX active \(MLX.Memory.activeMemory >> 20) MB, cache \(before >> 20) → \(MLX.Memory.cacheMemory >> 20) MB"
+        }
+        log("\(method): \(freed ?? "MLX cache not cleared")")
+        let language = ASRLanguage.primaryCode(for: params.language) ?? majorityLanguage(segments)
+        log("\(method) \(params.path): \(segments.count) segments, \(Set(windows.map(\.speaker)).count) speakers, "
+            + "\(model), \(String(format: "%.1f", Date().timeIntervalSince(started))) s for "
+            + "\(String(format: "%.1f", Double(samples.count) / Double(rate))) s of audio")
+        return FileTranscript(language: language, segments: segments)
+    }
+
+    /// Loads the offline model, transcribes each window and drops the model on return.
+    /// - Parameters:
+    ///   - samples: 16 kHz mono audio.
+    ///   - windows: Speaker-homogeneous windows to decode.
+    ///   - labels: Diarized speaker id → label.
+    ///   - params: Request params (path, language).
+    /// - Returns: Segments and the model id used.
+    /// - Throws: Model load errors with the method name.
+    private static func transcribeWindows(
+        _ samples: [Float], windows: [SpeakerTurn], labels: [Int: SpeakerLabel], params: TranscribeFileParams
+    ) async throws -> ([FileTranscriptSegment], String) {
+        let method = Methods.Meeting.transcribeFile
+        let rate = rate
         let (asr, model) = try await loadOrFail(method) { try await SpeechModels.shared.offlineASR() }
         var segments: [FileTranscriptSegment] = []
         for w in windows {
@@ -208,11 +238,7 @@ enum SpeechRequests {
                 startMs: lo * 1000 / rate, endMs: hi * 1000 / rate, text: text,
                 speaker: w.speaker >= 0 ? labels[w.speaker] ?? .cluster(index: w.speaker) : .unknown))
         }
-        let language = ASRLanguage.primaryCode(for: params.language) ?? majorityLanguage(segments)
-        log("\(method) \(params.path): \(segments.count) segments, \(Set(windows.map(\.speaker)).count) speakers, "
-            + "\(model), \(String(format: "%.1f", Date().timeIntervalSince(started))) s for "
-            + "\(String(format: "%.1f", Double(samples.count) / Double(rate))) s of audio")
-        return FileTranscript(language: language, segments: segments)
+        return (segments, model)
     }
 
     /// Names diarized speakers whose centroid matches an enrolled voiceprint.

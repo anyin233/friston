@@ -30,6 +30,8 @@ pub struct AppConfig {
     pub recordings_dir: Option<PathBuf>,
     /// Local EmbeddingGemma 2 checkpoint folder.
     pub embedding_model_dir: Option<PathBuf>,
+    /// Local MLX instruct model folder for offline minutes (last resort provider).
+    pub local_llm_dir: Option<PathBuf>,
     /// Configured BYOK provider (its key lives in the Keychain).
     pub byok: Option<ByokProvider>,
     /// Allow minutes through the local Codex (ChatGPT sign-in).
@@ -56,6 +58,7 @@ impl Default for AppConfig {
             fps: 15,
             recordings_dir: None,
             embedding_model_dir: None,
+            local_llm_dir: None,
             byok: None,
             use_codex: true,
             refine_after_meeting: true,

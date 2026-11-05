@@ -264,12 +264,61 @@ impl EmbedEngine {
             .ok_or_else(|| ServiceError::Engine("embed/batch returned no vector".into()))
     }
 
+    /// Loads a local MLX language model for offline minutes.
+    pub fn llm_load(&self, dir: &Path) -> Result<LlmStatus, ServiceError> {
+        self.call(embed::LLM_LOAD, json!({"directory": dir}))
+    }
+
+    /// Reports whether a language model is loaded.
+    pub fn llm_status(&self) -> Result<LlmStatus, ServiceError> {
+        self.call(embed::LLM_STATUS, Value::Null)
+    }
+
+    /// Frees the language model.
+    pub fn llm_unload(&self) -> Result<(), ServiceError> {
+        self.client
+            .call_blocking(embed::LLM_UNLOAD, Value::Null)
+            .map(|_| ())
+            .map_err(|e| rpc(embed::LLM_UNLOAD, e))
+    }
+
+    /// Generates minutes on-device, constrained to the minutes JSON Schema.
+    ///
+    /// Params: `input` – meeting material.
+    /// Returns: parsed minutes.
+    pub fn local_minutes(&self, input: &mm_llm::MinutesInput) -> Result<mm_llm::Minutes, mm_llm::LlmError> {
+        let v = self
+            .client
+            .call_blocking(
+                embed::LLM_GENERATE,
+                json!({
+                    "system": mm_llm::instructions(input.language.as_deref()),
+                    "prompt": input.render(),
+                    "jsonSchema": mm_llm::minutes_json_schema(),
+                    "maxTokens": 4096
+                }),
+            )
+            .map_err(|e| mm_llm::LlmError::Local(format!("llm/generate: {}", e.message)))?;
+        let text = v["text"]
+            .as_str()
+            .ok_or_else(|| mm_llm::LlmError::Local(format!("llm/generate returned no text: {v}")))?;
+        mm_llm::byok::parse_minutes(text)
+    }
+
     /// Asks the engine to exit.
     pub fn shutdown(&self) {
         if let Err(e) = self.client.call_blocking(common::SHUTDOWN, Value::Null) {
             tracing::warn!("mm-embedd shutdown: {e}");
         }
     }
+}
+
+/// `llm/status` result.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct LlmStatus {
+    pub loaded: bool,
+    #[serde(default)]
+    pub directory: Option<String>,
 }
 
 /// Maps Swift's modality names (`text`, `image`, `audio`, `video` or enum-ish

@@ -1,0 +1,13 @@
+[package]
+name = "mm-index"
+description = "Fully automatic multimodal indexing: chunking, change detection, debouncing, scheduling."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mm-core.workspace = true
+blake3.workspace = true
+serde.workspace = true

@@ -149,7 +149,7 @@ Apple 的文档和 WWDC 讲解都**没有给出支持的设备列表**，示例�
 
 - **随系统升级重新探测**：每次 macOS 大版本升级或换新机后，跑一次 `swift scripts/probe-spatial-capture.swift`。一旦内置麦克风出现 `foa=true`，就可以接入。
 - **FOA 接入后的价值**：FOA 的 4 个分量（W、X、Y、Z）可以用声强向量直接算出方位角，覆盖 360°，**没有双麦的前后歧义**。届时可以把它作为 `SpatialCue` 的另一种来源（例如 `[cos θ, sin θ]`），融合逻辑不用改。
-- **iPhone 作为陪伴录音设备**：iOS 18 起 iPhone 支持这套 FOA 采集，但支持哪些机型 Apple 没有列出，需要实测。代价是要多做一个 iOS 端 App，把 4 声道音频实时传回 Mac，工作量明显大于外接一个 USB 双声道麦克风。现阶段不建议。
+- **iPhone 作为陪伴录音设备**：iOS 18 起 iPhone 支持这套 FOA 采集，但支持哪些机型 Apple 没有列出，需要实测。代价是要多做一个 iOS 端 App，把 4 声道音频实时传回 Mac，工作量明显大于外接一个 USB 双声道麦克风。现阶段不建议。完整评估见 [ios-feasibility.md](ios-feasibility.md)。
 
 ## 建议的下一步
 

@@ -27,5 +27,9 @@ public enum Methods {
         public static let modelStatus = "model/status"
         public static let modelLoad = "model/load"
         public static let modelUnload = "model/unload"
+        public static let llmLoad = "llm/load"
+        public static let llmUnload = "llm/unload"
+        public static let llmStatus = "llm/status"
+        public static let llmGenerate = "llm/generate"
     }
 }

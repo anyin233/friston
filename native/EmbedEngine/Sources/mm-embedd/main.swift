@@ -5,6 +5,7 @@ import Foundation
 
 let server = RPCServer()
 let service = EmbeddingService()
+let llm = LocalLLM()
 
 await server.register(Methods.initialize) { _ in
     .object([
@@ -33,6 +34,25 @@ await server.register(Methods.Embed.batch) { params in
     let request = try params.decode(EmbedRequest.self)
     let vectors = try await service.embed(request)
     return .object(["vectors": .array(vectors.map { .array($0.map { .number(Double($0)) }) })])
+}
+
+await server.register(Methods.Embed.llmLoad) { params in
+    guard let path = params?["directory"]?.stringValue else { throw RPCError.invalidParams("llm/load needs `directory`") }
+    try await llm.load(directory: URL(fileURLWithPath: path))
+    return await llm.status()
+}
+
+await server.register(Methods.Embed.llmUnload) { _ in
+    await llm.unload()
+    return .null
+}
+
+await server.register(Methods.Embed.llmStatus) { _ in await llm.status() }
+
+await server.register(Methods.Embed.llmGenerate) { params in
+    guard let params else { throw RPCError.invalidParams("llm/generate needs params") }
+    let request = try params.decode(GenerateRequest.self)
+    return .object(["text": .string(try await llm.generate(request))])
 }
 
 await server.register(Methods.shutdown) { _ in

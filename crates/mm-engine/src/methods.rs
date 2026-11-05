@@ -37,4 +37,9 @@ pub mod embed {
     pub const MODEL_STATUS: &str = "model/status";
     pub const MODEL_LOAD: &str = "model/load";
     pub const MODEL_UNLOAD: &str = "model/unload";
+    /// Local language model for offline minutes (same MLX process as the embedder).
+    pub const LLM_LOAD: &str = "llm/load";
+    pub const LLM_UNLOAD: &str = "llm/unload";
+    pub const LLM_STATUS: &str = "llm/status";
+    pub const LLM_GENERATE: &str = "llm/generate";
 }

@@ -21,6 +21,9 @@ let package = Package(
                 .product(name: "EngineKit", package: "NativeKit"),
                 .product(name: "MLXVLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                // Offline minutes: a local instruct model, constrained to the minutes JSON Schema.
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXGuidedGeneration", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "Tokenizers", package: "swift-transformers"),

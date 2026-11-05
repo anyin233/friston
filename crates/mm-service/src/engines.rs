@@ -22,29 +22,40 @@ pub const EMBEDD: &str = "mm-embedd";
 
 /// Finds a helper executable.
 ///
-/// Search order: `MM_ENGINES_DIR`; next to the running executable (inside the `.app`
-/// bundle, `Contents/MacOS`); then `target/engines/{Debug,Release}` in any ancestor
-/// folder (development runs from `target/debug`).
+/// Each engine lives in its own folder (`<name>/<name>` plus its resource bundles and
+/// `mlx.metallib`) because the two engines ship different MLX builds. Search order:
+/// `MM_ENGINES_DIR`; the app bundle's `Contents/Helpers`; next to the running executable;
+/// then `target/engines/{Debug,Release}` in any ancestor folder (development runs from
+/// `target/debug`).
 ///
 /// Params: `name` – executable name.
 /// Returns: the path, or `None` when not built yet.
 pub fn locate_engine(name: &str) -> Option<PathBuf> {
+    engine_candidates(name, std::env::var_os("MM_ENGINES_DIR").map(PathBuf::from), std::env::current_exe().ok())
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+/// Candidate paths for [`locate_engine`], in priority order (pure, for tests).
+fn engine_candidates(name: &str, env_dir: Option<PathBuf>, exe: Option<PathBuf>) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    if let Some(dir) = std::env::var_os("MM_ENGINES_DIR") {
-        candidates.push(PathBuf::from(dir).join(name));
+    if let Some(dir) = env_dir {
+        candidates.push(dir.join(name).join(name));
+        candidates.push(dir.join(name));
     }
-    if let Ok(exe) = std::env::current_exe() {
+    if let Some(exe) = exe {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(name));
+            candidates.push(dir.join("../Helpers").join(name).join(name));
+            candidates.push(dir.join(name).join(name));
         }
         for ancestor in exe.ancestors().skip(1) {
             for config in ["Debug", "Release"] {
-                candidates.push(ancestor.join("target/engines").join(config).join(name));
-                candidates.push(ancestor.join("engines").join(config).join(name));
+                candidates.push(ancestor.join("target/engines").join(config).join(name).join(name));
+                candidates.push(ancestor.join("engines").join(config).join(name).join(name));
             }
         }
     }
-    candidates.into_iter().find(|p| p.is_file())
+    candidates
 }
 
 /// Decodes a result value into `T`, naming the method on failure.
@@ -201,6 +212,23 @@ impl MeetingEngine {
         language: Option<&str>,
     ) -> Result<FileTranscript, ServiceError> {
         let mut params = json!({"path": path});
+        if let Some(l) = language {
+            params["language"] = json!(l);
+        }
+        self.call(meeting::TRANSCRIBE_FILE, params)
+    }
+
+    /// Offline transcription that also names enrolled speakers (`known` labels).
+    ///
+    /// Params: `path` – audio file; `language` – hint; `voiceprints` – enrolled samples.
+    /// Returns: the transcript.
+    pub fn transcribe_file_with_voiceprints(
+        &self,
+        path: &Path,
+        language: Option<&str>,
+        voiceprints: &[mm_core::PresetVoiceprint],
+    ) -> Result<FileTranscript, ServiceError> {
+        let mut params = json!({"path": path, "voiceprints": voiceprints});
         if let Some(l) = language {
             params["language"] = json!(l);
         }
@@ -420,6 +448,19 @@ mod tests {
             },
         );
         assert!(matches!(e, ServiceError::Permission(m) if m.contains("麦克风")));
+    }
+
+    #[test]
+    fn engine_candidates_prefer_env_then_app_helpers_then_build_tree() {
+        let c = engine_candidates(
+            "mm-embedd",
+            Some("/e".into()),
+            Some("/A.app/Contents/MacOS/meeting-master".into()),
+        );
+        assert_eq!(c[0], PathBuf::from("/e/mm-embedd/mm-embedd"));
+        assert_eq!(c[2], PathBuf::from("/A.app/Contents/MacOS/../Helpers/mm-embedd/mm-embedd"));
+        let dev = engine_candidates("mm-meetingd", None, Some("/repo/target/debug/meeting-master".into()));
+        assert!(dev.contains(&PathBuf::from("/repo/target/engines/Debug/mm-meetingd/mm-meetingd")));
     }
 
     #[test]

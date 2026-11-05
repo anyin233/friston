@@ -105,7 +105,8 @@ pub fn note_title(path: &Path, markdown: &str) -> String {
             if let Some(v) = line.strip_prefix("title:") {
                 let v = v.trim();
                 // Titles we write are JSON-quoted; hand-written ones may be bare.
-                let v = serde_json::from_str::<String>(v).unwrap_or_else(|_| v.trim_matches('\'').to_string());
+                let v = serde_json::from_str::<String>(v)
+                    .unwrap_or_else(|_| v.trim_matches('\'').to_string());
                 if !v.is_empty() {
                     return v;
                 }
@@ -132,7 +133,11 @@ fn frontmatter_meeting(markdown: &str) -> Option<MeetingId> {
 ///
 /// Params: `store`; `uri` – vault-relative path (identity); `markdown` – contents.
 /// Returns: the change applied (all zero when the note is unchanged).
-pub fn index_note(store: &mut Store, uri: &str, markdown: &str) -> Result<SourceUpdate, IndexError> {
+pub fn index_note(
+    store: &mut Store,
+    uri: &str,
+    markdown: &str,
+) -> Result<SourceUpdate, IndexError> {
     let meeting = frontmatter_meeting(markdown);
     let (source_id, changed) =
         store.upsert_source(SourceKind::Note, uri, meeting, &hash(markdown.as_bytes()))?;
@@ -196,7 +201,11 @@ pub fn vault_uri(root: &Path, path: &Path) -> Option<String> {
 ///
 /// Params: `store`; `root` – vault folder; `path` – changed file.
 /// Returns: the change applied.
-pub fn refresh_note(store: &mut Store, root: &Path, path: &Path) -> Result<SourceUpdate, IndexError> {
+pub fn refresh_note(
+    store: &mut Store,
+    root: &Path,
+    path: &Path,
+) -> Result<SourceUpdate, IndexError> {
     let Some(uri) = vault_uri(root, path) else {
         return Ok(SourceUpdate::default());
     };
@@ -298,9 +307,17 @@ pub fn index_transcript(
         end = seg.end_ms;
     }
     flush(&mut body, &mut start, end);
-    let all = fresh.iter().map(|c| c.hash.as_str()).collect::<Vec<_>>().join(",");
-    let (source_id, changed) =
-        store.upsert_source(SourceKind::Transcript, &uri, Some(meeting), &hash(all.as_bytes()))?;
+    let all = fresh
+        .iter()
+        .map(|c| c.hash.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let (source_id, changed) = store.upsert_source(
+        SourceKind::Transcript,
+        &uri,
+        Some(meeting),
+        &hash(all.as_bytes()),
+    )?;
     if !changed {
         return Ok(SourceUpdate::default());
     }
@@ -335,7 +352,12 @@ pub fn index_asset(
     fingerprint: &str,
 ) -> Result<SourceUpdate, IndexError> {
     let uri = path.display().to_string();
-    let (source_id, changed) = store.upsert_source(SourceKind::Asset, &uri, meeting, &hash(fingerprint.as_bytes()))?;
+    let (source_id, changed) = store.upsert_source(
+        SourceKind::Asset,
+        &uri,
+        meeting,
+        &hash(fingerprint.as_bytes()),
+    )?;
     if !changed {
         return Ok(SourceUpdate::default());
     }
@@ -465,9 +487,19 @@ mod tests {
 
         let first = scan_vault(&mut store, root).unwrap();
         assert_eq!(first.inserted, 1);
-        assert_eq!(scan_vault(&mut store, root).unwrap(), SourceUpdate { kept: 0, ..Default::default() });
+        assert_eq!(
+            scan_vault(&mut store, root).unwrap(),
+            SourceUpdate {
+                kept: 0,
+                ..Default::default()
+            }
+        );
 
-        std::fs::write(&note, "---\ntitle: \"周会\"\n---\n# 决策\n\n预算上调\n\n# 待办\n\n- 跟进\n").unwrap();
+        std::fs::write(
+            &note,
+            "---\ntitle: \"周会\"\n---\n# 决策\n\n预算上调\n\n# 待办\n\n- 跟进\n",
+        )
+        .unwrap();
         let u = refresh_note(&mut store, root, &note).unwrap();
         assert_eq!((u.inserted, u.kept, u.deleted), (1, 1, 0));
 
@@ -504,19 +536,49 @@ mod tests {
         let segs = vec![seg(0, "大家好"), seg(61_000, "开始吧")];
         let u = index_transcript(&mut store, m.id, "周会", &segs, &names).unwrap();
         assert_eq!(u.inserted, 1);
-        assert_eq!(index_transcript(&mut store, m.id, "周会", &segs, &names).unwrap(), SourceUpdate::default());
+        assert_eq!(
+            index_transcript(&mut store, m.id, "周会", &segs, &names).unwrap(),
+            SourceUpdate::default()
+        );
 
-        index_asset(&mut store, Path::new("/r/mic.caf"), Modality::Audio, 70_000, Some(m.id), "size=1").unwrap();
-        index_asset(&mut store, Path::new("/r/screen.mov"), Modality::Video, 10_000, Some(m.id), "size=1").unwrap();
+        index_asset(
+            &mut store,
+            Path::new("/r/mic.caf"),
+            Modality::Audio,
+            70_000,
+            Some(m.id),
+            "size=1",
+        )
+        .unwrap();
+        index_asset(
+            &mut store,
+            Path::new("/r/screen.mov"),
+            Modality::Video,
+            10_000,
+            Some(m.id),
+            "size=1",
+        )
+        .unwrap();
 
-        let fake = FakeEmbedder { seen: RefCell::new(vec![]) };
+        let fake = FakeEmbedder {
+            seen: RefCell::new(vec![]),
+        };
         // Video is not in the fake's modalities, so it stays pending.
         let n = embed_pending(&mut store, &fake, STAMP, 100).unwrap();
         assert_eq!(n, 1 + 3);
         let seen = fake.seen.borrow();
-        assert!(seen[0].text.as_deref().unwrap().contains("[01:01] 说话人 1（远程）：开始吧"));
+        assert!(
+            seen[0]
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("[01:01] 说话人 1（远程）：开始吧")
+        );
         assert_eq!(seen[0].title.as_deref(), Some("周会"));
-        assert!(seen.iter().any(|i| i.audio == ["/r/mic.caf"] && i.start_ms == Some(40_000)));
+        assert!(
+            seen.iter()
+                .any(|i| i.audio == ["/r/mic.caf"] && i.start_ms == Some(40_000))
+        );
         drop(seen);
         assert_eq!(embed_pending(&mut store, &fake, STAMP, 100).unwrap(), 0);
 

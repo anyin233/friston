@@ -265,20 +265,24 @@ impl Store {
         let pool = (k * 4).max(20);
         let mut keyword: Vec<i64> = Vec::new();
         if let Some(q) = fts_query(query) {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT rowid FROM chunk_fts WHERE chunk_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+            )?;
             keyword = stmt
                 .query_map(params![q, pool as i64], |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
         } else if !query.trim().is_empty() {
             // Short CJK queries (“预算”) are below the trigram minimum; fall back to LIKE.
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id FROM chunks WHERE text LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM chunks WHERE text LIKE ?1 ESCAPE '\\' ORDER BY id DESC LIMIT ?2",
+            )?;
             let pattern = format!(
                 "%{}%",
-                query.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+                query
+                    .trim()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
             );
             keyword = stmt
                 .query_map(params![pattern, pool as i64], |r| r.get(0))?
@@ -310,8 +314,10 @@ impl Store {
         for (rank, id) in semantic.iter().enumerate() {
             scores.entry(*id).or_default().0 += 1.0 / (RRF_K + rank as f64 + 1.0);
         }
-        let mut ranked: Vec<(i64, f64, bool)> =
-            scores.into_iter().map(|(id, (s, kw))| (id, s, kw)).collect();
+        let mut ranked: Vec<(i64, f64, bool)> = scores
+            .into_iter()
+            .map(|(id, (s, kw))| (id, s, kw))
+            .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.0.cmp(&a.0)));
         ranked.truncate(k);
 
@@ -373,30 +379,67 @@ mod tests {
     #[test]
     fn source_hash_detects_changes() {
         let store = Store::open_in_memory().unwrap();
-        let (id, changed) = store.upsert_source(SourceKind::Note, "a.md", None, "h1").unwrap();
+        let (id, changed) = store
+            .upsert_source(SourceKind::Note, "a.md", None, "h1")
+            .unwrap();
         assert!(changed);
         assert_eq!(
-            store.upsert_source(SourceKind::Note, "a.md", None, "h1").unwrap(),
+            store
+                .upsert_source(SourceKind::Note, "a.md", None, "h1")
+                .unwrap(),
             (id, false)
         );
-        assert!(store.upsert_source(SourceKind::Note, "a.md", None, "h2").unwrap().1);
-        assert_eq!(store.sources(SourceKind::Note).unwrap(), vec![(id, "a.md".into())]);
+        assert!(
+            store
+                .upsert_source(SourceKind::Note, "a.md", None, "h2")
+                .unwrap()
+                .1
+        );
+        assert_eq!(
+            store.sources(SourceKind::Note).unwrap(),
+            vec![(id, "a.md".into())]
+        );
         assert!(store.delete_source("a.md").unwrap());
     }
 
     #[test]
     fn pending_chunks_follow_the_model_stamp() {
         let mut store = Store::open_in_memory().unwrap();
-        let (src, _) = store.upsert_source(SourceKind::Note, "a.md", None, "h").unwrap();
+        let (src, _) = store
+            .upsert_source(SourceKind::Note, "a.md", None, "h")
+            .unwrap();
         let ids = store
             .apply_chunks(src, &[chunk("一"), chunk("二")], &[])
             .unwrap();
-        assert_eq!(store.pending_chunks("m@768/p1", &["text"], 10).unwrap().len(), 2);
-        assert!(store.pending_chunks("m@768/p1", &["audio"], 10).unwrap().is_empty());
+        assert_eq!(
+            store
+                .pending_chunks("m@768/p1", &["text"], 10)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            store
+                .pending_chunks("m@768/p1", &["audio"], 10)
+                .unwrap()
+                .is_empty()
+        );
         store.put_embedding(ids[0], &unit(0), "m@768/p1").unwrap();
-        assert_eq!(store.pending_chunks("m@768/p1", &["text"], 10).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .pending_chunks("m@768/p1", &["text"], 10)
+                .unwrap()
+                .len(),
+            1
+        );
         // A new stamp makes everything pending again (automatic re-index).
-        assert_eq!(store.pending_chunks("m@768/p2", &["text"], 10).unwrap().len(), 2);
+        assert_eq!(
+            store
+                .pending_chunks("m@768/p2", &["text"], 10)
+                .unwrap()
+                .len(),
+            2
+        );
         let stats = store.index_stats("m@768/p1").unwrap();
         assert_eq!((stats.sources, stats.chunks, stats.embedded), (1, 2, 1));
 
@@ -407,7 +450,9 @@ mod tests {
     #[test]
     fn hybrid_search_fuses_keyword_and_vector_rankings() {
         let mut store = Store::open_in_memory().unwrap();
-        let (src, _) = store.upsert_source(SourceKind::Note, "a.md", None, "h").unwrap();
+        let (src, _) = store
+            .upsert_source(SourceKind::Note, "a.md", None, "h")
+            .unwrap();
         let ids = store
             .apply_chunks(
                 src,
@@ -431,7 +476,10 @@ mod tests {
         // Vector pulls in a chunk without keyword overlap.
         let hits = store.search("预算", Some(&unit(1)), 5).unwrap();
         assert_eq!(hits.len(), 3);
-        assert!(hits.iter().any(|h| h.chunk_id == ids[1] && !h.keyword_match));
+        assert!(
+            hits.iter()
+                .any(|h| h.chunk_id == ids[1] && !h.keyword_match)
+        );
         // Chunk that matched both lists ranks first.
         let both = store.search("预算", Some(&unit(2)), 5).unwrap();
         assert_eq!(both[0].chunk_id, ids[2]);

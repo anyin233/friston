@@ -189,7 +189,11 @@ impl Store {
     ///
     /// Params: `id` – meeting; `minutes` – JSON value (mm-llm `Minutes`).
     /// Returns: `Ok(())` once written.
-    pub fn set_minutes(&self, id: MeetingId, minutes: &serde_json::Value) -> Result<(), StoreError> {
+    pub fn set_minutes(
+        &self,
+        id: MeetingId,
+        minutes: &serde_json::Value,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE meetings SET minutes_json = ?2 WHERE id = ?1",
             params![id.to_string(), minutes.to_string()],
@@ -212,7 +216,8 @@ impl Store {
             .optional()?
             .flatten();
         raw.map(|s| {
-            serde_json::from_str(&s).map_err(|e| StoreError::Decode(format!("minutes of {id}: {e}")))
+            serde_json::from_str(&s)
+                .map_err(|e| StoreError::Decode(format!("minutes of {id}: {e}")))
         })
         .transpose()
     }
@@ -387,7 +392,10 @@ impl Store {
             let pid: String = r.get(1)?;
             Ok((
                 r.get(0)?,
-                PersonId(from_json(&format!("\"{pid}\""), "meeting_speakers.person_id")?),
+                PersonId(from_json(
+                    &format!("\"{pid}\""),
+                    "meeting_speakers.person_id",
+                )?),
             ))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -580,19 +588,37 @@ mod tests {
         let c1 = SpeakerLabel::Cluster { index: 1 };
         let c2 = SpeakerLabel::Cluster { index: 2 };
         store
-            .add_segment(&seg(m.id, 2000, "第二句", c2.clone()), SegmentPass::Live, Some(2))
+            .add_segment(
+                &seg(m.id, 2000, "第二句", c2.clone()),
+                SegmentPass::Live,
+                Some(2),
+            )
             .unwrap();
         store
-            .add_segment(&seg(m.id, 0, "第一句", c1.clone()), SegmentPass::Live, Some(1))
+            .add_segment(
+                &seg(m.id, 0, "第一句", c1.clone()),
+                SegmentPass::Live,
+                Some(1),
+            )
             .unwrap();
         let live = store.transcript(m.id).unwrap();
         assert_eq!(live[0].text, "第一句");
 
         assert_eq!(store.relabel_segments(m.id, &c2, &c1).unwrap(), 1);
-        assert!(store.transcript(m.id).unwrap().iter().all(|s| s.speaker == c1));
+        assert!(
+            store
+                .transcript(m.id)
+                .unwrap()
+                .iter()
+                .all(|s| s.speaker == c1)
+        );
 
         store
-            .replace_segments(m.id, SegmentPass::Final, &[seg(m.id, 0, "精修", c1.clone())])
+            .replace_segments(
+                m.id,
+                SegmentPass::Final,
+                &[seg(m.id, 0, "精修", c1.clone())],
+            )
             .unwrap();
         let best = store.transcript(m.id).unwrap();
         assert_eq!(best.len(), 1);

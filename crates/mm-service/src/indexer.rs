@@ -36,7 +36,9 @@ pub enum IndexerMsg {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexerEvent {
     /// Notes or chunks changed; refresh counters.
-    Updated { embedded: usize },
+    Updated {
+        embedded: usize,
+    },
     Error(String),
 }
 
@@ -51,7 +53,10 @@ impl Indexer {
     ///
     /// Params: `store` – shared store; `vault` – initial vault.
     /// Returns: the handle and an event stream for the UI.
-    pub fn start(store: Arc<Mutex<Store>>, vault: Option<PathBuf>) -> (Self, async_channel::Receiver<IndexerEvent>) {
+    pub fn start(
+        store: Arc<Mutex<Store>>,
+        vault: Option<PathBuf>,
+    ) -> (Self, async_channel::Receiver<IndexerEvent>) {
         let (tx, rx) = async_channel::unbounded();
         let (ev_tx, ev_rx) = async_channel::unbounded();
         let watcher_tx = tx.clone();
@@ -71,7 +76,10 @@ impl Indexer {
 }
 
 /// Builds a recursive FSEvents watcher feeding `Touch` messages.
-fn watch(vault: &Path, tx: async_channel::Sender<IndexerMsg>) -> Result<notify::RecommendedWatcher, ServiceError> {
+fn watch(
+    vault: &Path,
+    tx: async_channel::Sender<IndexerMsg>,
+) -> Result<notify::RecommendedWatcher, ServiceError> {
     let root = vault.to_path_buf();
     let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
         Ok(ev) => {
@@ -80,7 +88,10 @@ fn watch(vault: &Path, tx: async_channel::Sender<IndexerMsg>) -> Result<notify::
                 // Only folders *inside* the vault count (.obsidian, .trash); the vault itself may live under a dot folder.
                 let hidden = p
                     .strip_prefix(&root)
-                    .map(|rel| rel.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')))
+                    .map(|rel| {
+                        rel.components()
+                            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+                    })
                     .unwrap_or(true);
                 if is_note && !hidden {
                     let _ = tx.send_blocking(IndexerMsg::Touch(p, Priority::Interactive));
@@ -107,7 +118,8 @@ fn run(
         tracing::warn!("indexer: {e}");
         let _ = events.send_blocking(IndexerEvent::Error(e));
     };
-    let mut debouncer: Debouncer<PathBuf> = Debouncer::new(Duration::from_millis(1500), Duration::from_secs(10));
+    let mut debouncer: Debouncer<PathBuf> =
+        Debouncer::new(Duration::from_millis(1500), Duration::from_secs(10));
     let mut embedder: Option<Arc<dyn Embedder + Send + Sync>> = None;
     let mut live = false;
     let mut watcher = None;
@@ -137,7 +149,11 @@ fn run(
         let timeout = debouncer
             .next_deadline()
             .map(|d| d.saturating_duration_since(Instant::now()))
-            .unwrap_or(Duration::from_secs(if embedder.is_some() && !live { 2 } else { 3600 }));
+            .unwrap_or(Duration::from_secs(if embedder.is_some() && !live {
+                2
+            } else {
+                3600
+            }));
         let msg = match recv_timeout(&rx, timeout) {
             Ok(m) => Some(m),
             Err(true) => None,
@@ -166,7 +182,12 @@ fn run(
         if let Some(emb) = &embedder {
             // During a meeting, embed only small text batches so captions keep the GPU.
             let batch = if live { 4 } else { 16 };
-            match embed_pending(&mut store.lock().expect("store lock"), emb.as_ref(), &stamp, batch) {
+            match embed_pending(
+                &mut store.lock().expect("store lock"),
+                emb.as_ref(),
+                &stamp,
+                batch,
+            ) {
                 Ok(0) => {}
                 Ok(n) => {
                     let _ = events.send_blocking(IndexerEvent::Updated { embedded: n });
@@ -201,10 +222,22 @@ mod tests {
 
     struct OneHot;
     impl Embedder for OneHot {
-        fn embed_documents(&self, items: &[mm_index::pipeline::EmbedItem]) -> Result<Vec<Vec<f32>>, String> {
-            Ok(items.iter().map(|_| { let mut v = vec![0.0; mm_store::EMBEDDING_DIMS]; v[0] = 1.0; v }).collect())
+        fn embed_documents(
+            &self,
+            items: &[mm_index::pipeline::EmbedItem],
+        ) -> Result<Vec<Vec<f32>>, String> {
+            Ok(items
+                .iter()
+                .map(|_| {
+                    let mut v = vec![0.0; mm_store::EMBEDDING_DIMS];
+                    v[0] = 1.0;
+                    v
+                })
+                .collect())
         }
-        fn modalities(&self) -> Vec<String> { vec!["text".into()] }
+        fn modalities(&self) -> Vec<String> {
+            vec!["text".into()]
+        }
     }
 
     #[test]

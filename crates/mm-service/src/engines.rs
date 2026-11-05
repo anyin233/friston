@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use mm_core::{
     AudioInput, AudioLevels, CalendarEvent, CaptionFinal, CaptionPartial, CapturePreset,
-    CaptureSources, CaptureStarted, CaptureStateEvent, CaptureStopped, ClipRequest,
-    FileTranscript, SpeakerRelabel, VoiceprintSample,
+    CaptureSources, CaptureStarted, CaptureStateEvent, CaptureStopped, ClipRequest, FileTranscript,
+    SpeakerRelabel, VoiceprintSample,
 };
 use mm_engine::methods::{common, embed, meeting};
 use mm_engine::{EngineClient, EngineEvent, RpcError};
@@ -74,7 +74,10 @@ pub enum MeetingNotice {
     Levels(AudioLevels),
     State(CaptureStateEvent),
     /// `spatial/cue` and anything newer than this build.
-    Other { method: String, params: Value },
+    Other {
+        method: String,
+        params: Value,
+    },
 }
 
 /// Decodes one notification.
@@ -106,7 +109,9 @@ impl MeetingEngine {
     ///
     /// Params: `path` – executable.
     /// Returns: the engine and its event stream.
-    pub fn spawn(path: &Path) -> Result<(Self, async_channel::Receiver<EngineEvent>), ServiceError> {
+    pub fn spawn(
+        path: &Path,
+    ) -> Result<(Self, async_channel::Receiver<EngineEvent>), ServiceError> {
         let (client, events) = EngineClient::spawn(path, &[])
             .map_err(|e| ServiceError::Engine(format!("starting {}: {e}", path.display())))?;
         Ok((Self { client }, events))
@@ -118,7 +123,10 @@ impl MeetingEngine {
     }
 
     fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, ServiceError> {
-        let v = self.client.call_blocking(method, params).map_err(|e| rpc(method, e))?;
+        let v = self
+            .client
+            .call_blocking(method, params)
+            .map_err(|e| rpc(method, e))?;
         decode(method, v)
     }
 
@@ -138,7 +146,11 @@ impl MeetingEngine {
     }
 
     /// Calendar events in `[from, to)`.
-    pub fn calendar_events(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CalendarEvent>, ServiceError> {
+    pub fn calendar_events(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<CalendarEvent>, ServiceError> {
         self.call(
             meeting::CALENDAR_EVENTS,
             json!({"from": from.to_rfc3339(), "to": to.to_rfc3339()}),
@@ -159,7 +171,10 @@ impl MeetingEngine {
     }
 
     /// Speaker embedding from a slice of a recording.
-    pub fn voiceprint_from_clip(&self, req: &ClipRequest) -> Result<VoiceprintSample, ServiceError> {
+    pub fn voiceprint_from_clip(
+        &self,
+        req: &ClipRequest,
+    ) -> Result<VoiceprintSample, ServiceError> {
         self.call(
             meeting::VOICEPRINT_FROM_CLIP,
             serde_json::to_value(req).expect("clip request serializes"),
@@ -167,7 +182,11 @@ impl MeetingEngine {
     }
 
     /// Records `seconds` from the microphone and returns a speaker embedding.
-    pub fn voiceprint_enroll(&self, microphone_uid: Option<&str>, seconds: u32) -> Result<VoiceprintSample, ServiceError> {
+    pub fn voiceprint_enroll(
+        &self,
+        microphone_uid: Option<&str>,
+        seconds: u32,
+    ) -> Result<VoiceprintSample, ServiceError> {
         let mut params = json!({"seconds": seconds});
         if let Some(uid) = microphone_uid {
             params["microphoneUID"] = json!(uid);
@@ -176,7 +195,11 @@ impl MeetingEngine {
     }
 
     /// Offline transcription + diarization of one file.
-    pub fn transcribe_file(&self, path: &Path, language: Option<&str>) -> Result<FileTranscript, ServiceError> {
+    pub fn transcribe_file(
+        &self,
+        path: &Path,
+        language: Option<&str>,
+    ) -> Result<FileTranscript, ServiceError> {
         let mut params = json!({"path": path});
         if let Some(l) = language {
             params["language"] = json!(l);
@@ -211,7 +234,9 @@ pub struct EmbedStatus {
 
 impl EmbedEngine {
     /// Starts the engine process.
-    pub fn spawn(path: &Path) -> Result<(Self, async_channel::Receiver<EngineEvent>), ServiceError> {
+    pub fn spawn(
+        path: &Path,
+    ) -> Result<(Self, async_channel::Receiver<EngineEvent>), ServiceError> {
         let (client, events) = EngineClient::spawn(path, &[])
             .map_err(|e| ServiceError::Engine(format!("starting {}: {e}", path.display())))?;
         Ok((Self::from_client(client), events))
@@ -226,21 +251,26 @@ impl EmbedEngine {
     }
 
     fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, ServiceError> {
-        let v = self.client.call_blocking(method, params).map_err(|e| rpc(method, e))?;
+        let v = self
+            .client
+            .call_blocking(method, params)
+            .map_err(|e| rpc(method, e))?;
         decode(method, v)
     }
 
     /// Loads a checkpoint folder.
     pub fn load(&self, dir: &Path) -> Result<EmbedStatus, ServiceError> {
         let status: EmbedStatus = self.call(embed::MODEL_LOAD, json!({"directory": dir}))?;
-        *self.modalities.lock().expect("modalities lock") = normalise_modalities(&status.modalities);
+        *self.modalities.lock().expect("modalities lock") =
+            normalise_modalities(&status.modalities);
         Ok(status)
     }
 
     /// Reports what is loaded.
     pub fn status(&self) -> Result<EmbedStatus, ServiceError> {
         let status: EmbedStatus = self.call(embed::MODEL_STATUS, Value::Null)?;
-        *self.modalities.lock().expect("modalities lock") = normalise_modalities(&status.modalities);
+        *self.modalities.lock().expect("modalities lock") =
+            normalise_modalities(&status.modalities);
         Ok(status)
     }
 
@@ -286,7 +316,10 @@ impl EmbedEngine {
     ///
     /// Params: `input` – meeting material.
     /// Returns: parsed minutes.
-    pub fn local_minutes(&self, input: &mm_llm::MinutesInput) -> Result<mm_llm::Minutes, mm_llm::LlmError> {
+    pub fn local_minutes(
+        &self,
+        input: &mm_llm::MinutesInput,
+    ) -> Result<mm_llm::Minutes, mm_llm::LlmError> {
         let v = self
             .client
             .call_blocking(
@@ -299,9 +332,9 @@ impl EmbedEngine {
                 }),
             )
             .map_err(|e| mm_llm::LlmError::Local(format!("llm/generate: {}", e.message)))?;
-        let text = v["text"]
-            .as_str()
-            .ok_or_else(|| mm_llm::LlmError::Local(format!("llm/generate returned no text: {v}")))?;
+        let text = v["text"].as_str().ok_or_else(|| {
+            mm_llm::LlmError::Local(format!("llm/generate returned no text: {v}"))
+        })?;
         mm_llm::byok::parse_minutes(text)
     }
 
@@ -378,7 +411,14 @@ mod tests {
 
     #[test]
     fn permission_errors_are_distinguished() {
-        let e = rpc("capture/start", RpcError { code: -32012, message: "denied".into(), data: None });
+        let e = rpc(
+            "capture/start",
+            RpcError {
+                code: -32012,
+                message: "denied".into(),
+                data: None,
+            },
+        );
         assert!(matches!(e, ServiceError::Permission(m) if m.contains("麦克风")));
     }
 

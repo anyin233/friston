@@ -92,7 +92,10 @@ impl AppConfig {
             Ok(text) => serde_json::from_str(&text)
                 .map_err(|e| ServiceError::Config(format!("parsing {}: {e}", path.display()))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(ServiceError::Config(format!("reading {}: {e}", path.display()))),
+            Err(e) => Err(ServiceError::Config(format!(
+                "reading {}: {e}",
+                path.display()
+            ))),
         }
     }
 
@@ -159,6 +162,11 @@ mod tests {
         assert_eq!(cfg.fps, 30);
         assert!(cfg.system_audio);
         std::fs::write(dir.path().join("config.json"), "{").unwrap();
-        assert!(AppConfig::load(dir.path()).unwrap_err().to_string().contains("config.json"));
+        assert!(
+            AppConfig::load(dir.path())
+                .unwrap_err()
+                .to_string()
+                .contains("config.json")
+        );
     }
 }

@@ -15,9 +15,9 @@ use mm_llm::{Minutes, MinutesInput, TranscriptLine, render_minutes};
 use mm_store::{SegmentPass, Store};
 use mm_vault::{MeetingNote, replace_managed_block, write_atomic};
 
+use crate::ServiceError;
 use crate::config::AppConfig;
 use crate::live::SpeakerDirectory;
-use crate::ServiceError;
 
 /// URL scheme registered by the app; `open?meeting=<id>&t=<ms>` seeks a recording.
 pub const URL_SCHEME: &str = "meeting-master";
@@ -85,7 +85,9 @@ pub fn ensure_note(
     // MeetingNote paths start with `Meetings/`; honour a custom folder name.
     let rel = note.relative_path();
     let rel = match rel.strip_prefix("Meetings/") {
-        Some(rest) if cfg.meetings_folder != "Meetings" => format!("{}/{rest}", cfg.meetings_folder.trim_matches('/')),
+        Some(rest) if cfg.meetings_folder != "Meetings" => {
+            format!("{}/{rest}", cfg.meetings_folder.trim_matches('/'))
+        }
         _ => rel,
     };
     let abs = vault.join(&rel);
@@ -177,7 +179,11 @@ pub fn build_preset(
 ///
 /// Params: `store`; `meeting` – updated in place; `started` – engine result.
 /// Returns: `Ok(())`.
-pub fn mark_live(store: &Store, meeting: &mut Meeting, started: &CaptureStarted) -> Result<(), ServiceError> {
+pub fn mark_live(
+    store: &Store,
+    meeting: &mut Meeting,
+    started: &CaptureStarted,
+) -> Result<(), ServiceError> {
     meeting.recording_dir = Some(started.directory.display().to_string());
     if meeting.status == MeetingStatus::Scheduled {
         meeting.status = MeetingStatus::Live;
@@ -190,7 +196,11 @@ pub fn mark_live(store: &Store, meeting: &mut Meeting, started: &CaptureStarted)
 ///
 /// Params: `store`; `meeting` – updated in place; `stopped` – engine result.
 /// Returns: `Ok(())`.
-pub fn mark_stopped(store: &Store, meeting: &mut Meeting, stopped: &CaptureStopped) -> Result<(), ServiceError> {
+pub fn mark_stopped(
+    store: &Store,
+    meeting: &mut Meeting,
+    stopped: &CaptureStopped,
+) -> Result<(), ServiceError> {
     let _ = stopped;
     meeting.ends_at = Some(Utc::now());
     if meeting.status == MeetingStatus::Live {
@@ -225,7 +235,11 @@ fn speaker_display(dir: &SpeakerDirectory, label: &SpeakerLabel, origin: AudioOr
 ///
 /// Params: `meeting`; `segments`; `dir`.
 /// Returns: block body.
-pub fn render_transcript(meeting: MeetingId, segments: &[TranscriptSegment], dir: &SpeakerDirectory) -> String {
+pub fn render_transcript(
+    meeting: MeetingId,
+    segments: &[TranscriptSegment],
+    dir: &SpeakerDirectory,
+) -> String {
     if segments.is_empty() {
         return "_暂无转写_".into();
     }
@@ -248,7 +262,12 @@ pub fn render_transcript(meeting: MeetingId, segments: &[TranscriptSegment], dir
 ///
 /// Params: `cfg`; `meeting`; `block` – block name; `body` – new content.
 /// Returns: `Ok(false)` when the meeting has no note.
-pub fn write_block(cfg: &AppConfig, meeting: &Meeting, block: &str, body: &str) -> Result<bool, ServiceError> {
+pub fn write_block(
+    cfg: &AppConfig,
+    meeting: &Meeting,
+    block: &str,
+    body: &str,
+) -> Result<bool, ServiceError> {
     let Some(path) = note_path(cfg, meeting) else {
         return Ok(false);
     };
@@ -265,10 +284,19 @@ pub fn write_block(cfg: &AppConfig, meeting: &Meeting, block: &str, body: &str) 
 ///
 /// Params: `cfg`; `store`; `meeting`.
 /// Returns: `Ok(())`.
-pub fn sync_transcript(cfg: &AppConfig, store: &mut Store, meeting: &Meeting) -> Result<(), ServiceError> {
+pub fn sync_transcript(
+    cfg: &AppConfig,
+    store: &mut Store,
+    meeting: &Meeting,
+) -> Result<(), ServiceError> {
     let segments = store.transcript(meeting.id)?;
     let dir = directory_for(store, meeting.id)?;
-    write_block(cfg, meeting, "transcript", &render_transcript(meeting.id, &segments, &dir))?;
+    write_block(
+        cfg,
+        meeting,
+        "transcript",
+        &render_transcript(meeting.id, &segments, &dir),
+    )?;
     let names = |l: &SpeakerLabel| dir.name(l);
     mm_index::pipeline::index_transcript(store, meeting.id, &meeting.title, &segments, &names)?;
     Ok(())
@@ -281,16 +309,25 @@ pub fn sync_transcript(cfg: &AppConfig, store: &mut Store, meeting: &Meeting) ->
 ///
 /// Params: `meeting`; `parts` – `(origin, transcript)` per recorded file.
 /// Returns: segments sorted by start time.
-pub fn merge_file_transcripts(meeting: MeetingId, parts: &[(AudioOrigin, FileTranscript)]) -> Vec<TranscriptSegment> {
+pub fn merge_file_transcripts(
+    meeting: MeetingId,
+    parts: &[(AudioOrigin, FileTranscript)],
+) -> Vec<TranscriptSegment> {
     let mut out = Vec::new();
     for (origin, t) in parts {
-        let shift = if *origin == AudioOrigin::System { 100 } else { 0 };
+        let shift = if *origin == AudioOrigin::System {
+            100
+        } else {
+            0
+        };
         for s in &t.segments {
             if s.text.trim().is_empty() {
                 continue;
             }
             let speaker = match &s.speaker {
-                SpeakerLabel::Cluster { index } => SpeakerLabel::Cluster { index: index + shift },
+                SpeakerLabel::Cluster { index } => SpeakerLabel::Cluster {
+                    index: index + shift,
+                },
                 other => other.clone(),
             };
             out.push(TranscriptSegment {
@@ -313,7 +350,11 @@ pub fn merge_file_transcripts(meeting: MeetingId, parts: &[(AudioOrigin, FileTra
 ///
 /// Params: `store`; `meeting`; `segments` – from [`merge_file_transcripts`].
 /// Returns: `Ok(())`; an empty result keeps the live pass.
-pub fn store_final_transcript(store: &mut Store, meeting: MeetingId, segments: &[TranscriptSegment]) -> Result<(), ServiceError> {
+pub fn store_final_transcript(
+    store: &mut Store,
+    meeting: MeetingId,
+    segments: &[TranscriptSegment],
+) -> Result<(), ServiceError> {
     if !segments.is_empty() {
         store.replace_segments(meeting, SegmentPass::Final, segments)?;
     }
@@ -325,7 +366,10 @@ pub fn store_final_transcript(store: &mut Store, meeting: MeetingId, segments: &
 /// Params: `markdown` – note text.
 /// Returns: the section body (trimmed), or the whole body if the heading is missing.
 pub fn notes_section(markdown: &str) -> String {
-    let body = match markdown.strip_prefix("---\n").and_then(|r| r.find("\n---").map(|e| &r[e + 4..])) {
+    let body = match markdown
+        .strip_prefix("---\n")
+        .and_then(|r| r.find("\n---").map(|e| &r[e + 4..]))
+    {
         Some(rest) => rest,
         None => markdown,
     };
@@ -342,7 +386,11 @@ pub fn notes_section(markdown: &str) -> String {
             out.push(line);
         }
     }
-    let text = if seen_heading { out.join("\n") } else { body.to_string() };
+    let text = if seen_heading {
+        out.join("\n")
+    } else {
+        body.to_string()
+    };
     strip_managed_blocks(&text).trim().to_string()
 }
 
@@ -415,7 +463,11 @@ fn find_in_vault(vault: &Path, name: &str) -> Option<PathBuf> {
 ///
 /// Params: `cfg`; `store`; `meeting`.
 /// Returns: the provider input.
-pub fn minutes_input(cfg: &AppConfig, store: &Store, meeting: &Meeting) -> Result<MinutesInput, ServiceError> {
+pub fn minutes_input(
+    cfg: &AppConfig,
+    store: &Store,
+    meeting: &Meeting,
+) -> Result<MinutesInput, ServiceError> {
     let dir = directory_for(store, meeting.id)?;
     let transcript = store
         .transcript(meeting.id)?
@@ -444,11 +496,20 @@ pub fn minutes_input(cfg: &AppConfig, store: &Store, meeting: &Meeting) -> Resul
     let attendees = meeting
         .participants
         .iter()
-        .filter_map(|id| people.iter().find(|(p, _)| p.id == *id).map(|(p, _)| p.display_name.clone()))
+        .filter_map(|id| {
+            people
+                .iter()
+                .find(|(p, _)| p.id == *id)
+                .map(|(p, _)| p.display_name.clone())
+        })
         .collect();
     Ok(MinutesInput {
         title: meeting.title.clone(),
-        when: meeting.starts_at.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string(),
+        when: meeting
+            .starts_at
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
         attendees,
         notes,
         transcript,
@@ -461,8 +522,16 @@ pub fn minutes_input(cfg: &AppConfig, store: &Store, meeting: &Meeting) -> Resul
 ///
 /// Params: `cfg`; `store`; `meeting` – updated in place.
 /// Returns: `Ok(())`.
-pub fn apply_minutes(cfg: &AppConfig, store: &mut Store, meeting: &mut Meeting, minutes: &Minutes) -> Result<(), ServiceError> {
-    store.set_minutes(meeting.id, &serde_json::to_value(minutes).expect("minutes serialize"))?;
+pub fn apply_minutes(
+    cfg: &AppConfig,
+    store: &mut Store,
+    meeting: &mut Meeting,
+    minutes: &Minutes,
+) -> Result<(), ServiceError> {
+    store.set_minutes(
+        meeting.id,
+        &serde_json::to_value(minutes).expect("minutes serialize"),
+    )?;
     let id = meeting.id;
     let seek = move |ms: u64| seek_url(id, ms);
     let rendered = render_minutes(minutes, Some(&seek));
@@ -496,7 +565,13 @@ mod tests {
         (dir, cfg, Store::open_in_memory().unwrap())
     }
 
-    fn seg(m: MeetingId, start: u64, text: &str, speaker: SpeakerLabel, origin: AudioOrigin) -> TranscriptSegment {
+    fn seg(
+        m: MeetingId,
+        start: u64,
+        text: &str,
+        speaker: SpeakerLabel,
+        origin: AudioOrigin,
+    ) -> TranscriptSegment {
         TranscriptSegment {
             meeting_id: m,
             start_ms: start,
@@ -519,7 +594,12 @@ mod tests {
     #[test]
     fn full_flow_writes_note_blocks_and_keeps_user_text() {
         let (_dir, cfg, mut store) = setup();
-        let zhao = Person { id: PersonId::new(), display_name: "赵磊".into(), email: None, note_path: None };
+        let zhao = Person {
+            id: PersonId::new(),
+            display_name: "赵磊".into(),
+            email: None,
+            note_path: None,
+        };
         store.upsert_person(&zhao, None).unwrap();
         let ev = CalendarEvent {
             id: "ev1".into(),
@@ -533,11 +613,19 @@ mod tests {
         };
         let mut m = meeting_for_event(&store, &ev).unwrap();
         assert_eq!(m.participants, vec![zhao.id]);
-        assert_eq!(meeting_for_event(&store, &ev).unwrap().id, m.id, "event maps to one meeting");
+        assert_eq!(
+            meeting_for_event(&store, &ev).unwrap().id,
+            m.id,
+            "event maps to one meeting"
+        );
 
-        let note = ensure_note(&cfg, &store, &mut m, &["赵磊".into()]).unwrap().unwrap();
+        let note = ensure_note(&cfg, &store, &mut m, &["赵磊".into()])
+            .unwrap()
+            .unwrap();
         assert!(note.starts_with(cfg.vault_path.as_ref().unwrap().join("Meetings")));
-        let user = std::fs::read_to_string(&note).unwrap().replace("## 笔记 Notes\n\n", "## 笔记 Notes\n\n我关心预算\n");
+        let user = std::fs::read_to_string(&note)
+            .unwrap()
+            .replace("## 笔记 Notes\n\n", "## 笔记 Notes\n\n我关心预算\n");
         std::fs::write(&note, user).unwrap();
 
         let preset = build_preset(&cfg, &store, &m, Some(7)).unwrap();
@@ -555,15 +643,48 @@ mod tests {
         assert_eq!(m.status, MeetingStatus::Live);
 
         store.name_cluster(m.id, 1, Some(zhao.id)).unwrap();
-        store.add_segment(&seg(m.id, 0, "预算上调", SpeakerLabel::Cluster { index: 1 }, AudioOrigin::Microphone), SegmentPass::Live, Some(1)).unwrap();
-        store.add_segment(&seg(m.id, 1000, "同意", SpeakerLabel::Cluster { index: 2 }, AudioOrigin::System), SegmentPass::Live, Some(2)).unwrap();
+        store
+            .add_segment(
+                &seg(
+                    m.id,
+                    0,
+                    "预算上调",
+                    SpeakerLabel::Cluster { index: 1 },
+                    AudioOrigin::Microphone,
+                ),
+                SegmentPass::Live,
+                Some(1),
+            )
+            .unwrap();
+        store
+            .add_segment(
+                &seg(
+                    m.id,
+                    1000,
+                    "同意",
+                    SpeakerLabel::Cluster { index: 2 },
+                    AudioOrigin::System,
+                ),
+                SegmentPass::Live,
+                Some(2),
+            )
+            .unwrap();
         sync_transcript(&cfg, &mut store, &m).unwrap();
         let md = std::fs::read_to_string(&note).unwrap();
         assert!(md.contains("**赵磊**：预算上调"));
         assert!(md.contains("**远程 · 说话人 2**：同意"));
         assert!(md.contains("我关心预算"));
 
-        mark_stopped(&store, &mut m, &CaptureStopped { session_id: "s".into(), duration_ms: 1, files: Default::default() }).unwrap();
+        mark_stopped(
+            &store,
+            &mut m,
+            &CaptureStopped {
+                session_id: "s".into(),
+                duration_ms: 1,
+                files: Default::default(),
+            },
+        )
+        .unwrap();
         let input = minutes_input(&cfg, &store, &m).unwrap();
         assert_eq!(input.notes, "我关心预算");
         assert_eq!(input.attendees, vec!["赵磊"]);
@@ -578,12 +699,18 @@ mod tests {
             topics: vec![],
         };
         apply_minutes(&cfg, &mut store, &mut m, &minutes).unwrap();
-        assert_eq!(store.meeting(m.id).unwrap().unwrap().status, MeetingStatus::Done);
+        assert_eq!(
+            store.meeting(m.id).unwrap().unwrap().status,
+            MeetingStatus::Done
+        );
         let md = std::fs::read_to_string(&note).unwrap();
         assert!(md.contains("### 决定\n\n- 预算上调"));
         assert!(md.contains("我关心预算"), "user notes survive");
         assert!(store.minutes(m.id).unwrap().is_some());
-        assert!(!store.search("我关心预算", None, 5).unwrap().is_empty(), "note was indexed");
+        assert!(
+            !store.search("我关心预算", None, 5).unwrap().is_empty(),
+            "note was indexed"
+        );
     }
 
     #[test]
@@ -593,14 +720,26 @@ mod tests {
             language: Some("zh".into()),
             segments: segs
                 .into_iter()
-                .map(|(s, t)| FileSegment { start_ms: s, end_ms: s + 100, text: t.into(), speaker: SpeakerLabel::Cluster { index: 1 }, origin: None })
+                .map(|(s, t)| FileSegment {
+                    start_ms: s,
+                    end_ms: s + 100,
+                    text: t.into(),
+                    speaker: SpeakerLabel::Cluster { index: 1 },
+                    origin: None,
+                })
                 .collect(),
         };
         let merged = merge_file_transcripts(
             m,
-            &[(AudioOrigin::Microphone, ft(vec![(500, "b"), (0, " ")])), (AudioOrigin::System, ft(vec![(100, "a")]))],
+            &[
+                (AudioOrigin::Microphone, ft(vec![(500, "b"), (0, " ")])),
+                (AudioOrigin::System, ft(vec![(100, "a")])),
+            ],
         );
-        assert_eq!(merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(
+            merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
         assert_eq!(merged[0].speaker, SpeakerLabel::Cluster { index: 101 });
         assert_eq!(merged[0].origin, AudioOrigin::System);
     }
@@ -613,6 +752,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("附件")).unwrap();
         std::fs::write(dir.path().join("附件/s.png"), b"png").unwrap();
-        assert_eq!(note_images(dir.path(), "要点 ![[s.png]] ![x](/nope.png)").len(), 1);
+        assert_eq!(
+            note_images(dir.path(), "要点 ![[s.png]] ![x](/nope.png)").len(),
+            1
+        );
     }
 }

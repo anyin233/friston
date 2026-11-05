@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use mm_core::{
-    AudioOrigin, CaptionFinal, CaptionPartial, MeetingId, PersonId, SpeakerLabel,
-    SpeakerRelabel, TranscriptSegment,
+    AudioOrigin, CaptionFinal, CaptionPartial, MeetingId, PersonId, SpeakerLabel, SpeakerRelabel,
+    TranscriptSegment,
 };
 
 /// One line on the caption board.
@@ -85,7 +85,11 @@ impl CaptionBoard {
     ///
     /// Params: `f` – the notice; `meeting` – owner of the resulting segment.
     /// Returns: the segment to persist, or `None` for a foreign session or empty text.
-    pub fn apply_final(&mut self, f: &CaptionFinal, meeting: MeetingId) -> Option<TranscriptSegment> {
+    pub fn apply_final(
+        &mut self,
+        f: &CaptionFinal,
+        meeting: MeetingId,
+    ) -> Option<TranscriptSegment> {
         if !self.ours(&f.session_id) {
             return None;
         }
@@ -176,7 +180,10 @@ impl SpeakerDirectory {
     ///
     /// Params: `people` – `(person, name, stored hue)`; `named_clusters` – user assignments.
     /// Returns: the directory.
-    pub fn new(people: impl IntoIterator<Item = (PersonId, String, Option<u16>)>, named_clusters: impl IntoIterator<Item = (u32, PersonId)>) -> Self {
+    pub fn new(
+        people: impl IntoIterator<Item = (PersonId, String, Option<u16>)>,
+        named_clusters: impl IntoIterator<Item = (u32, PersonId)>,
+    ) -> Self {
         Self {
             people: people
                 .into_iter()
@@ -220,10 +227,17 @@ impl SpeakerDirectory {
     /// Returns: hue in degrees, or `None` for unknown speakers (rendered neutral).
     pub fn hue(&self, label: &SpeakerLabel) -> Option<u16> {
         if let Some(p) = self.person(label) {
-            return Some(self.people.get(&p).map(|(_, h)| *h).unwrap_or_else(|| person_hue(p)));
+            return Some(
+                self.people
+                    .get(&p)
+                    .map(|(_, h)| *h)
+                    .unwrap_or_else(|| person_hue(p)),
+            );
         }
         match label {
-            SpeakerLabel::Cluster { index } => Some(CLUSTER_HUES[*index as usize % CLUSTER_HUES.len()]),
+            SpeakerLabel::Cluster { index } => {
+                Some(CLUSTER_HUES[*index as usize % CLUSTER_HUES.len()])
+            }
             _ => None,
         }
     }
@@ -270,7 +284,10 @@ mod tests {
         let seg = b.apply_final(&fin(1, " 大家好。 "), m).unwrap();
         assert_eq!(seg.text, "大家好。");
         assert!(b.lines()[0].is_final);
-        assert!(!b.apply_partial(&partial(1, "迟到的")), "late partial ignored");
+        assert!(
+            !b.apply_partial(&partial(1, "迟到的")),
+            "late partial ignored"
+        );
         // Retraction removes the line and yields nothing to persist.
         assert!(b.apply_final(&fin(2, ""), m).is_none());
         assert_eq!(b.lines().len(), 1);
@@ -307,10 +324,20 @@ mod tests {
         d.name_cluster(3, zhao);
         assert_eq!(d.name(&c3), "赵磊");
         assert_eq!(d.hue(&c3), Some(42));
-        let known = SpeakerLabel::Known { person_id: zhao, score: 0.8 };
-        assert_eq!((d.name(&known), d.hue(&known)), ("赵磊".to_string(), Some(42)));
+        let known = SpeakerLabel::Known {
+            person_id: zhao,
+            score: 0.8,
+        };
+        assert_eq!(
+            (d.name(&known), d.hue(&known)),
+            ("赵磊".to_string(), Some(42))
+        );
         assert_eq!(d.name(&SpeakerLabel::Unknown), "未识别");
         let stranger = PersonId::new();
-        assert_eq!(person_hue(stranger), person_hue(stranger), "derived hue is stable");
+        assert_eq!(
+            person_hue(stranger),
+            person_hue(stranger),
+            "derived hue is stable"
+        );
     }
 }

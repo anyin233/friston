@@ -42,7 +42,10 @@ pub fn read_key(p: &ByokProvider) -> Result<Option<String>, LlmError> {
     match entry.get_password() {
         Ok(k) => Ok(Some(k)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(LlmError::Keychain(format!("reading {}: {e}", keychain_account(p)))),
+        Err(e) => Err(LlmError::Keychain(format!(
+            "reading {}: {e}",
+            keychain_account(p)
+        ))),
     }
 }
 
@@ -65,7 +68,12 @@ pub fn write_key(p: &ByokProvider, key: Option<&str>) -> Result<(), LlmError> {
 
 /// Guesses an image MIME type from the file extension.
 fn mime(path: &str) -> &'static str {
-    match path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
+    match path
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
@@ -79,7 +87,10 @@ fn images_b64(paths: &[String]) -> Vec<(&'static str, String)> {
         .iter()
         .take(MAX_IMAGES)
         .filter_map(|p| match std::fs::read(p) {
-            Ok(bytes) => Some((mime(p), base64::engine::general_purpose::STANDARD.encode(bytes))),
+            Ok(bytes) => Some((
+                mime(p),
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            )),
             Err(e) => {
                 tracing::warn!("skipping screenshot {p} for minutes: {e}");
                 None
@@ -144,11 +155,17 @@ pub fn openai_body(model: &str, input: &MinutesInput) -> Value {
 /// Returns: the JSON text of the first text block.
 pub fn anthropic_text(resp: &Value) -> Result<String, LlmError> {
     if resp["stop_reason"] == "refusal" {
-        let cat = resp["stop_details"]["category"].as_str().unwrap_or("unspecified");
-        return Err(LlmError::Provider(format!("Anthropic declined the request (category {cat})")));
+        let cat = resp["stop_details"]["category"]
+            .as_str()
+            .unwrap_or("unspecified");
+        return Err(LlmError::Provider(format!(
+            "Anthropic declined the request (category {cat})"
+        )));
     }
     if resp["stop_reason"] == "max_tokens" {
-        return Err(LlmError::Provider("Anthropic output hit max_tokens; minutes are incomplete".into()));
+        return Err(LlmError::Provider(
+            "Anthropic output hit max_tokens; minutes are incomplete".into(),
+        ));
     }
     resp["content"]
         .as_array()
@@ -186,7 +203,9 @@ pub fn parse_minutes(text: &str) -> Result<Minutes, LlmError> {
         .unwrap_or(t);
     serde_json::from_str(t.trim()).map_err(|e| {
         let head: String = text.chars().take(200).collect();
-        LlmError::Provider(format!("minutes JSON did not match the schema ({e}): {head}"))
+        LlmError::Provider(format!(
+            "minutes JSON did not match the schema ({e}): {head}"
+        ))
     })
 }
 
@@ -210,9 +229,12 @@ fn post_json(url: &str, headers: &[(&str, String)], body: &Value) -> Result<Valu
         .read_to_string()
         .map_err(|e| LlmError::Provider(format!("reading response from {url}: {e}")))?;
     if !status.is_success() {
-        return Err(LlmError::Provider(format!("POST {url} returned {status}: {text}")));
+        return Err(LlmError::Provider(format!(
+            "POST {url} returned {status}: {text}"
+        )));
     }
-    serde_json::from_str(&text).map_err(|e| LlmError::Provider(format!("decoding response from {url}: {e}")))
+    serde_json::from_str(&text)
+        .map_err(|e| LlmError::Provider(format!("decoding response from {url}: {e}")))
 }
 
 /// Generates minutes with a BYOK provider.
@@ -271,19 +293,35 @@ mod tests {
         let b = anthropic_body("claude-opus-5-5", &input());
         assert_eq!(b["output_config"]["format"]["type"], "json_schema");
         assert_eq!(b["fallbacks"], "default");
-        assert!(b.get("temperature").is_none(), "sampling params are rejected by the 2026-10-21 API");
-        assert!(anthropic_body("claude-haiku-5-5", &input()).get("fallbacks").is_none());
+        assert!(
+            b.get("temperature").is_none(),
+            "sampling params are rejected by the 2026-10-21 API"
+        );
+        assert!(
+            anthropic_body("claude-haiku-5-5", &input())
+                .get("fallbacks")
+                .is_none()
+        );
     }
 
     #[test]
     fn response_extraction_and_refusals() {
         let ok = json!({"stop_reason":"end_turn","content":[{"type":"thinking","thinking":""},{"type":"text","text":"{}"}]});
         assert_eq!(anthropic_text(&ok).unwrap(), "{}");
-        let refused = json!({"stop_reason":"refusal","stop_details":{"category":"cyber"},"content":[]});
-        assert!(anthropic_text(&refused).unwrap_err().to_string().contains("cyber"));
+        let refused =
+            json!({"stop_reason":"refusal","stop_details":{"category":"cyber"},"content":[]});
+        assert!(
+            anthropic_text(&refused)
+                .unwrap_err()
+                .to_string()
+                .contains("cyber")
+        );
         let oa = json!({"choices":[{"message":{"content":"{\"a\":1}"}}]});
         assert_eq!(openai_text(&oa).unwrap(), "{\"a\":1}");
-        assert_eq!(openai_body("gpt", &input())["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(
+            openai_body("gpt", &input())["response_format"]["json_schema"]["strict"],
+            true
+        );
     }
 
     #[test]

@@ -207,7 +207,10 @@ mod tests {
                 "joinURL":"https://meeting.tencent.com/x","attendees":["Alice"]}"#,
         )
         .expect("decode calendar event");
-        assert_eq!(ev.join_url.as_deref(), Some("https://meeting.tencent.com/x"));
+        assert_eq!(
+            ev.join_url.as_deref(),
+            Some("https://meeting.tencent.com/x")
+        );
 
         let src: CaptureSources = serde_json::from_str(
             r#"{"windows":[{"windowID":7,"title":"Zoom","appName":"zoom.us","bundleID":"us.zoom.xos","width":800,"height":600}],"displays":[1]}"#,
@@ -219,6 +222,9 @@ mod tests {
             r#"{"uid":"u","name":"WeMeet","channels":2,"sampleRate":48000,"isVirtual":true}"#,
         )
         .expect("decode audio input");
-        assert!(!input.supports_spatial_cues(), "virtual devices are never spatial");
+        assert!(
+            !input.supports_spatial_cues(),
+            "virtual devices are never spatial"
+        );
     }
 }

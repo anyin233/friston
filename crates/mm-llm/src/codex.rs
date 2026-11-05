@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use mm_engine::{EngineClient, EngineEvent};
 use serde_json::{Value, json};
 
-use crate::{LlmError, Minutes, MinutesInput, byok::parse_minutes, instructions, minutes_json_schema};
+use crate::{
+    LlmError, Minutes, MinutesInput, byok::parse_minutes, instructions, minutes_json_schema,
+};
 
 /// A piece of user input for a Codex turn (subset of the protocol's `UserInput`).
 #[derive(Debug, Clone, PartialEq)]
@@ -82,7 +84,9 @@ pub fn find_codex() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".local/bin"));
     }
-    dirs.into_iter().map(|d| d.join("codex")).find(|p| p.is_file())
+    dirs.into_iter()
+        .map(|d| d.join("codex"))
+        .find(|p| p.is_file())
 }
 
 /// Whether Codex is signed in, and as whom.
@@ -102,8 +106,9 @@ struct AppServer {
 impl AppServer {
     /// Spawns `codex app-server` and performs `initialize` + `initialized`.
     fn start(codex: &Path) -> Result<Self, LlmError> {
-        let (client, events) = EngineClient::spawn(codex, &["app-server"])
-            .map_err(|e| LlmError::Codex(format!("starting {} app-server: {e}", codex.display())))?;
+        let (client, events) = EngineClient::spawn(codex, &["app-server"]).map_err(|e| {
+            LlmError::Codex(format!("starting {} app-server: {e}", codex.display()))
+        })?;
         client
             .call_blocking("initialize", initialize_params(env!("CARGO_PKG_VERSION")))
             .map_err(|e| LlmError::Codex(format!("initialize: {e}")))?;
@@ -159,7 +164,9 @@ fn collect_turn(
     let mut last_message: Option<String> = None;
     loop {
         if Instant::now() > deadline {
-            return Err(LlmError::Codex("timed out waiting for turn/completed".into()));
+            return Err(LlmError::Codex(
+                "timed out waiting for turn/completed".into(),
+            ));
         }
         let ev = match events.try_recv() {
             Ok(ev) => ev,
@@ -186,8 +193,9 @@ fn collect_turn(
                     "turn/completed" => {
                         let turn = &params["turn"];
                         return match turn["status"].as_str() {
-                            Some("completed") => last_message
-                                .ok_or_else(|| LlmError::Codex("turn completed without an agent message".into())),
+                            Some("completed") => last_message.ok_or_else(|| {
+                                LlmError::Codex("turn completed without an agent message".into())
+                            }),
                             other => Err(LlmError::Codex(format!(
                                 "turn ended with status {other:?}: {}",
                                 turn["error"]
@@ -199,7 +207,9 @@ fn collect_turn(
             }
             EngineEvent::Request { id, method, .. } => on_request(id, &method),
             EngineEvent::ProtocolError(e) => tracing::warn!("codex app-server: {e}"),
-            EngineEvent::Closed => return Err(LlmError::Codex("codex app-server exited mid-turn".into())),
+            EngineEvent::Closed => {
+                return Err(LlmError::Codex("codex app-server exited mid-turn".into()));
+            }
         }
     }
 }
@@ -208,7 +218,11 @@ fn collect_turn(
 ///
 /// Params: `codex` – executable; `input` – meeting material; `timeout` – overall limit.
 /// Returns: parsed minutes.
-pub fn generate(codex: &Path, input: &MinutesInput, timeout: Duration) -> Result<Minutes, LlmError> {
+pub fn generate(
+    codex: &Path,
+    input: &MinutesInput,
+    timeout: Duration,
+) -> Result<Minutes, LlmError> {
     let deadline = Instant::now() + timeout;
     let server = AppServer::start(codex)?;
     let thread = server.call(
@@ -229,7 +243,9 @@ pub fn generate(codex: &Path, input: &MinutesInput, timeout: Duration) -> Result
     let text = collect_turn(&server.events, &thread_id, deadline, &|id, method| {
         // The thread is read-only with approvalPolicy=never, so any request is unexpected: decline it.
         tracing::warn!("declining unexpected codex request {method}");
-        if let Err(e) = client.respond_error(id, -32601, "meeting-master does not handle this request") {
+        if let Err(e) =
+            client.respond_error(id, -32601, "meeting-master does not handle this request")
+        {
             tracing::warn!("{e}");
         }
     })?;
@@ -243,19 +259,59 @@ mod tests {
     #[test]
     fn collect_turn_returns_last_agent_message_of_our_thread() {
         let (tx, rx) = async_channel::unbounded();
-        let n = |method: &str, params: Value| EngineEvent::Notification { method: method.into(), params };
-        tx.send_blocking(n("item/completed", json!({"threadId":"other","item":{"type":"agentMessage","text":"x"}}))).unwrap();
-        tx.send_blocking(n("item/completed", json!({"threadId":"t","item":{"type":"agentMessage","text":"draft"}}))).unwrap();
-        tx.send_blocking(EngineEvent::Request { id: json!(9), method: "approve".into(), params: Value::Null }).unwrap();
-        tx.send_blocking(n("item/completed", json!({"threadId":"t","item":{"type":"agentMessage","text":"{}"}}))).unwrap();
-        tx.send_blocking(n("turn/completed", json!({"threadId":"t","turn":{"status":"completed"}}))).unwrap();
+        let n = |method: &str, params: Value| EngineEvent::Notification {
+            method: method.into(),
+            params,
+        };
+        tx.send_blocking(n(
+            "item/completed",
+            json!({"threadId":"other","item":{"type":"agentMessage","text":"x"}}),
+        ))
+        .unwrap();
+        tx.send_blocking(n(
+            "item/completed",
+            json!({"threadId":"t","item":{"type":"agentMessage","text":"draft"}}),
+        ))
+        .unwrap();
+        tx.send_blocking(EngineEvent::Request {
+            id: json!(9),
+            method: "approve".into(),
+            params: Value::Null,
+        })
+        .unwrap();
+        tx.send_blocking(n(
+            "item/completed",
+            json!({"threadId":"t","item":{"type":"agentMessage","text":"{}"}}),
+        ))
+        .unwrap();
+        tx.send_blocking(n(
+            "turn/completed",
+            json!({"threadId":"t","turn":{"status":"completed"}}),
+        ))
+        .unwrap();
         let declined = std::cell::Cell::new(0);
-        let text = collect_turn(&rx, "t", Instant::now() + Duration::from_secs(5), &|_, _| declined.set(declined.get() + 1)).unwrap();
+        let text = collect_turn(
+            &rx,
+            "t",
+            Instant::now() + Duration::from_secs(5),
+            &|_, _| declined.set(declined.get() + 1),
+        )
+        .unwrap();
         assert_eq!(text, "{}");
         assert_eq!(declined.get(), 1);
 
-        tx.send_blocking(n("turn/completed", json!({"threadId":"t","turn":{"status":"failed","error":{"message":"quota"}}}))).unwrap();
-        let err = collect_turn(&rx, "t", Instant::now() + Duration::from_secs(5), &|_, _| {}).unwrap_err();
+        tx.send_blocking(n(
+            "turn/completed",
+            json!({"threadId":"t","turn":{"status":"failed","error":{"message":"quota"}}}),
+        ))
+        .unwrap();
+        let err = collect_turn(
+            &rx,
+            "t",
+            Instant::now() + Duration::from_secs(5),
+            &|_, _| {},
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("quota"));
     }
 

@@ -38,7 +38,11 @@ pub enum StoreError {
     #[error("{0} not found")]
     NotFound(String),
     #[error("meeting {id} cannot move from {from} to {to}")]
-    Transition { id: String, from: String, to: String },
+    Transition {
+        id: String,
+        from: String,
+        to: String,
+    },
     #[error("decoding stored value: {0}")]
     Decode(String),
 }
@@ -184,8 +188,10 @@ pub(crate) fn f32_bytes(v: &[f32]) -> Vec<u8> {
 
 /// Inverse of [`f32_bytes`]; a trailing partial float is ignored.
 pub(crate) fn f32_from_bytes(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+    b.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 

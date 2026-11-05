@@ -123,11 +123,8 @@ impl EngineClient {
                                 .send_blocking(EngineEvent::Notification { method, params });
                         }
                         Ok(Incoming::Request { id, method, params }) => {
-                            let _ = event_tx.send_blocking(EngineEvent::Request {
-                                id,
-                                method,
-                                params,
-                            });
+                            let _ =
+                                event_tx.send_blocking(EngineEvent::Request { id, method, params });
                         }
                         Err(e) => {
                             let _ = event_tx.send_blocking(EngineEvent::ProtocolError(e));

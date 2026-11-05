@@ -47,8 +47,12 @@ pub fn generate_minutes(
 ) -> Result<Minutes, LlmError> {
     match choice {
         ProviderChoice::Byok(p) => {
-            let key = byok::read_key(p)?
-                .ok_or_else(|| LlmError::Keychain(format!("no API key stored for {}", byok::keychain_account(p))))?;
+            let key = byok::read_key(p)?.ok_or_else(|| {
+                LlmError::Keychain(format!(
+                    "no API key stored for {}",
+                    byok::keychain_account(p)
+                ))
+            })?;
             byok::generate(p, &key, input)
         }
         ProviderChoice::Codex { codex_path } => codex::generate(

@@ -1,0 +1,28 @@
+[package]
+name = "mm-service"
+description = "Headless application services: config, engines, live captions, meeting flow, indexing and search."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mm-core.workspace = true
+mm-engine.workspace = true
+mm-store.workspace = true
+mm-index.workspace = true
+mm-vault.workspace = true
+mm-llm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+blake3.workspace = true
+async-channel.workspace = true
+notify = "8"
+
+[dev-dependencies]
+tempfile.workspace = true

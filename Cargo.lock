@@ -3870,6 +3870,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-service"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "blake3",
+ "chrono",
+ "dirs 6.0.0",
+ "mm-core",
+ "mm-engine",
+ "mm-index",
+ "mm-llm",
+ "mm-store",
+ "mm-vault",
+ "notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "mm-store"
 version = "0.1.0"
 dependencies = [

@@ -18,6 +18,7 @@ mm-store = { path = "crates/mm-store" }
 mm-index = { path = "crates/mm-index" }
 mm-vault = { path = "crates/mm-vault" }
 mm-llm = { path = "crates/mm-llm" }
+mm-service = { path = "crates/mm-service" }
 
 # GUI: GPUI Kit pins the matching GPUI release and re-exports GPUI + gpui-component.
 gpui-kit = "0.9"

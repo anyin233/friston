@@ -23,6 +23,23 @@ enum SpeechModelIDs {
     static let turnDiarizerConfig = SortformerConfig.streaming
 }
 
+/// Loads a model from the local cache without touching the network, and downloads it only
+/// on a cache miss. speech-swift otherwise asks the Hugging Face Hub on every load; on a slow
+/// or captive network that stalled `transcribe/file` for minutes while holding ``MLXGate``.
+/// - Parameters:
+///   - id: Model id, for the log line.
+///   - load: Loader taking the `offlineMode` flag.
+/// - Returns: The loaded model.
+/// - Throws: The online loader's error when the model is neither cached nor downloadable.
+func loadCacheFirst<T>(_ id: String, _ load: (Bool) async throws -> T) async throws -> T {
+    do {
+        return try await load(true)
+    } catch {
+        log("model \(id): not in the local cache (\(error)); downloading")
+        return try await load(false)
+    }
+}
+
 /// Owns a model that is not `Sendable`. Only ever used while holding ``MLXGate``.
 final class Unchecked<T>: @unchecked Sendable {
     let value: T
@@ -107,22 +124,30 @@ actor SpeechModels {
     static let shared = SpeechModels()
 
     private let live = LazyModel<Qwen3ASRModel>(id: SpeechModelIDs.liveASR) {
-        try await Qwen3ASRModel.fromPretrained(modelId: SpeechModelIDs.liveASR,
-                                               progressHandler: SpeechModels.progress(SpeechModelIDs.liveASR))
+        try await loadCacheFirst(SpeechModelIDs.liveASR) { offline in
+            try await Qwen3ASRModel.fromPretrained(modelId: SpeechModelIDs.liveASR, offlineMode: offline,
+                                                   progressHandler: SpeechModels.progress(SpeechModelIDs.liveASR))
+        }
     }
     private let silero = LazyModel<SileroVADModel>(id: SpeechModelIDs.vad) {
-        try await SileroVADModel.fromPretrained(modelId: SpeechModelIDs.vad,
-                                                progressHandler: SpeechModels.progress(SpeechModelIDs.vad))
+        try await loadCacheFirst(SpeechModelIDs.vad) { offline in
+            try await SileroVADModel.fromPretrained(modelId: SpeechModelIDs.vad, offlineMode: offline,
+                                                    progressHandler: SpeechModels.progress(SpeechModelIDs.vad))
+        }
     }
     private let wespeaker = LazyModel<WeSpeakerModel>(id: SpeechModelIDs.speakerEmbedding) {
-        try await WeSpeakerModel.fromPretrained(modelId: SpeechModelIDs.speakerEmbedding,
-                                                progressHandler: SpeechModels.progress(SpeechModelIDs.speakerEmbedding))
+        try await loadCacheFirst(SpeechModelIDs.speakerEmbedding) { offline in
+            try await WeSpeakerModel.fromPretrained(modelId: SpeechModelIDs.speakerEmbedding, offlineMode: offline,
+                                                    progressHandler: SpeechModels.progress(SpeechModelIDs.speakerEmbedding))
+        }
     }
 
     private let sortformer = LazyModel<SortformerDiarizer>(id: SpeechModelIDs.turnDiarizer) {
-        try await SortformerDiarizer.fromPretrained(modelId: SpeechModelIDs.turnDiarizer,
-                                                    config: SpeechModelIDs.turnDiarizerConfig,
-                                                    progressHandler: SpeechModels.progress(SpeechModelIDs.turnDiarizer))
+        try await loadCacheFirst(SpeechModelIDs.turnDiarizer) { offline in
+            try await SortformerDiarizer.fromPretrained(modelId: SpeechModelIDs.turnDiarizer, offlineMode: offline,
+                                                        config: SpeechModelIDs.turnDiarizerConfig,
+                                                        progressHandler: SpeechModels.progress(SpeechModelIDs.turnDiarizer))
+        }
     }
 
     /// Logs download/load progress at most every 10 %, on stderr.
@@ -181,8 +206,10 @@ actor SpeechModels {
     func diarizer() async throws -> Unchecked<PyannoteDiarizationPipeline> {
         do {
             return try await MLXGate.shared.load {
-                Unchecked(try await PyannoteDiarizationPipeline.fromPretrained(
-                    useVADFilter: true, progressHandler: Self.progress(SpeechModelIDs.segmentation)))
+                Unchecked(try await loadCacheFirst(SpeechModelIDs.segmentation) { offline in
+                    try await PyannoteDiarizationPipeline.fromPretrained(
+                        useVADFilter: true, offlineMode: offline, progressHandler: Self.progress(SpeechModelIDs.segmentation))
+                })
             }
         } catch {
             throw SpeechModelError.load(model: SpeechModelIDs.segmentation, underlying: error)

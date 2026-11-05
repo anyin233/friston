@@ -27,7 +27,8 @@ const SCRIPT: &str = "大家好，我们开始周会。第一项，下季度预�
 #[test]
 #[ignore = "records the microphone, plays audio and uses the Codex account"]
 fn e2e_record_stop_refine_minutes() {
-    let engine_path = std::env::var("MM_E2E_ENGINE").expect("set MM_E2E_ENGINE to the mm-meetingd binary");
+    let engine_path =
+        std::env::var("MM_E2E_ENGINE").expect("set MM_E2E_ENGINE to the mm-meetingd binary");
     let tmp = tempfile::tempdir().expect("temp dir");
     let vault = tmp.path().join("vault");
     std::fs::create_dir_all(&vault).expect("vault dir");
@@ -39,30 +40,46 @@ fn e2e_record_stop_refine_minutes() {
         caption_language: Some("zh".into()),
         ..Default::default()
     };
-    let store = Arc::new(Mutex::new(Store::open(&tmp.path().join("db.sqlite")).expect("open store")));
+    let store = Arc::new(Mutex::new(
+        Store::open(&tmp.path().join("db.sqlite")).expect("open store"),
+    ));
     let (indexer, _ix_events) = Indexer::start(store.clone(), Some(vault.clone()));
     let (writer, _writer_errors) = LiveWriter::start(store.clone(), indexer);
-    let (engine, events) = MeetingEngine::spawn(std::path::Path::new(&engine_path)).expect("spawn engine");
+    let (engine, events) =
+        MeetingEngine::spawn(std::path::Path::new(&engine_path)).expect("spawn engine");
     engine.initialize().expect("initialize");
 
-    let mic = default_microphone(&engine.probe_inputs().expect("probe inputs")).expect("a microphone");
+    let mic =
+        default_microphone(&engine.probe_inputs().expect("probe inputs")).expect("a microphone");
     let mut meeting = {
         let s = store.lock().unwrap();
         let mut m = flow::quick_meeting(&s, "端到端测试周会").expect("meeting");
-        flow::ensure_note(&cfg, &s, &mut m, &[]).expect("note").expect("vault configured");
+        flow::ensure_note(&cfg, &s, &mut m, &[])
+            .expect("note")
+            .expect("vault configured");
         m
     };
-    let mut preset = flow::build_preset(&cfg, &store.lock().unwrap(), &meeting, None).expect("preset");
+    let mut preset =
+        flow::build_preset(&cfg, &store.lock().unwrap(), &meeting, None).expect("preset");
     preset.microphone_uid = Some(mic);
     let started = engine.capture_start(&preset).expect("capture/start");
     flow::mark_live(&store.lock().unwrap(), &mut meeting, &started).expect("mark live");
 
     // Speak through the speakers while recording; the built-in mic picks it up.
     let speech = tmp.path().join("script.aiff");
-    let ok = std::process::Command::new("say").args(["-v", "Tingting", "-o"]).arg(&speech).arg(SCRIPT).status().expect("say");
+    let ok = std::process::Command::new("say")
+        .args(["-v", "Tingting", "-o"])
+        .arg(&speech)
+        .arg(SCRIPT)
+        .status()
+        .expect("say");
     assert!(ok.success());
     std::thread::sleep(Duration::from_secs(4)); // models finish loading
-    let player = std::process::Command::new("afplay").args(["-v", "1"]).arg(&speech).spawn().expect("afplay");
+    let player = std::process::Command::new("afplay")
+        .args(["-v", "1"])
+        .arg(&speech)
+        .spawn()
+        .expect("afplay");
 
     let mut board = CaptionBoard::default();
     board.begin(&started.session_id);
@@ -117,7 +134,8 @@ fn e2e_record_stop_refine_minutes() {
     let s = store.lock().unwrap();
     let transcript = s.transcript(report.meeting.id).expect("transcript");
     let joined: String = transcript.iter().map(|t| t.text.as_str()).collect();
-    let note = std::fs::read_to_string(flow::note_path(&cfg, &report.meeting).expect("note path")).expect("read note");
+    let note = std::fs::read_to_string(flow::note_path(&cfg, &report.meeting).expect("note path"))
+        .expect("read note");
     println!(
         "final transcript: {} segments; heard budget line: {}; status {:?}; minutes block filled: {}",
         transcript.len(),
@@ -127,10 +145,17 @@ fn e2e_record_stop_refine_minutes() {
     );
     // The microphone also captured the room: never keep the recording.
     if let Err(e) = std::fs::remove_dir_all(&started.directory) {
-        println!("could not delete recording {}: {e}", started.directory.display());
+        println!(
+            "could not delete recording {}: {e}",
+            started.directory.display()
+        );
     }
     assert!(finals > 0, "no live captions arrived");
-    assert!(report.minutes_done, "minutes were not generated: {:?}", report.warnings);
+    assert!(
+        report.minutes_done,
+        "minutes were not generated: {:?}",
+        report.warnings
+    );
     assert_eq!(report.meeting.status, mm_core::MeetingStatus::Done);
     assert!(note.contains("### 摘要") && note.contains("<!-- mm:transcript:start -->"));
 }

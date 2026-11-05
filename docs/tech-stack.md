@@ -79,8 +79,21 @@
 
 已下载到 Hugging Face 缓存（`~/.cache/huggingface/hub`）：`mlx-community/embeddinggemma-2-bf16`（1.5 GB）、`mlx-community/Qwen3-4B-Instruct-2507-4bit`（离线纪要，约 2.3 GB）。在“设置”里选择对应的 snapshot 文件夹即可加载。
 
+## 实测（2026-11-05，M5 Pro）
+
+| 项目 | 结果 | 复跑 |
+| --- | --- | --- |
+| 实时字幕中文准确率（Qwen3-ASR 0.6B 4bit，合成语音 58 秒、8 句） | 字错误率 2.4% | 测试脚本见会话记录：`caption/simulateFile` 以实时速度回放，与参考文本按字比对 |
+| 定稿字幕延迟（从一句话结束到字幕定稿） | 中位数 3.2 秒，p90 4.0 秒；其中约 1 秒是等 Sortformer 确认说话人 | 同上 |
+| 会后精转写速度（Qwen3-ASR 1.7B 8bit） | 约 0.2–0.3 倍实时（50 秒录音 14–15 秒） | `transcribe/file` |
+| 说话人分离 | 见 [speaker-identification.md](speaker-identification.md) 的 AMI 评测 | `scripts/eval-diarization.py` |
+| 内存：`mm-meetingd` 实时字幕模型（0.6B + VAD + WeSpeaker + Sortformer） | 约 1.0 GB | `footprint` |
+| 内存：`mm-embedd` 加载 EmbeddingGemma 2 | 约 0.75 GB；再加载本地 Qwen3-4B 纪要模型后约 2.9 GB | `footprint` |
+| 会后 1.7B 模型 | 用完即释放；MLX 缓存会占住约 1 GB，现在转写结束后主动清空（MLX 活跃内存回到 0.7 GB） | 引擎日志 `MLX active … cache … → 0 MB` |
+
+两个 MLX 进程同时运行时合计约 2–4 GB，取决于是否加载本地纪要模型，对 32 GB 以上的机器没有压力。
+
 ## 待验证
 
-- DJI Mic Mini（2 TX + 1 RX）接 Mac 时是否输出 2 个独立声道，以及两路之间的时延是否稳定（抖动 < 0.3 样本），清单见 spatial-feasibility.md 2.4 节。
-- Qwen3-ASR 0.6B 在 M5 Pro 上的流式延迟和中文准确率，需要下载模型后实测。
-- 两个 MLX 进程同时运行时的显存占用。
+- DJI Mic Mini（2 TX + 1 RX）接 Mac 时是否输出 2 个独立声道，以及两路之间的时延是否稳定（抖动 < 0.3 样本），清单见 spatial-feasibility.md 2.4 节。需要外接硬件，本机目前没有接入。
+- XREAL One Pro 双麦的方位判型阈值校准，同样需要接入设备录一段真实会议。

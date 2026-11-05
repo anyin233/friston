@@ -1159,9 +1159,25 @@ impl AppState {
                     let dir = flow::directory_for(&s, meeting.id).map_err(|e| e.to_string())?;
                     (note, preset, dir)
                 };
-                let started = engine
-                    .capture_start(&preset)
-                    .map_err(|e| format!("开始录制失败：{e}"))?;
+                // Without Screen Recording permission, keep the meeting going on the microphone
+                // alone rather than failing the whole start.
+                let (started, degraded) = match engine.capture_start(&preset) {
+                    Ok(s) => (s, None),
+                    Err(mm_service::ServiceError::Permission(why)) => {
+                        match flow::without_screen_capture(&preset) {
+                            Some(reduced) => (
+                                engine
+                                    .capture_start(&reduced)
+                                    .map_err(|e| format!("开始录制失败：{e}"))?,
+                                Some(format!(
+                                    "没有屏幕录制权限，只录麦克风（不录窗口和系统声音）。在系统设置 › 隐私与安全性 › 屏幕与系统录音中允许后即可恢复。（{why}）"
+                                )),
+                            ),
+                            None => return Err(format!("开始录制失败：{why}")),
+                        }
+                    }
+                    Err(e) => return Err(format!("开始录制失败：{e}")),
+                };
                 flow::mark_live(&*lock(&store)?, &mut meeting, &started)
                     .map_err(|e| format!("更新会议状态失败：{e}"))?;
                 let notes = note
@@ -1169,12 +1185,15 @@ impl AppState {
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .map(|md| flow::notes_section(&md))
                     .unwrap_or_default();
-                Ok((meeting, note, started, directory, notes))
+                Ok((meeting, note, started, directory, notes, degraded))
             },
             move |this, res, cx| {
                 this.live_starting = false;
                 match res {
-                    Ok((meeting, note_path, started, directory, notes)) => {
+                    Ok((meeting, note_path, started, directory, notes, degraded)) => {
+                        if let Some(warning) = degraded {
+                            this.notify(NoticeKind::Warning, warning, cx);
+                        }
                         let mut board = CaptionBoard::default();
                         board.begin(&started.session_id);
                         if note_path.is_none() {

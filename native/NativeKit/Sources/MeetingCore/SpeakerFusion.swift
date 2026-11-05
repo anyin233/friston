@@ -13,16 +13,19 @@ public struct SpeechObservation: Sendable {
     /// L2-normalised speaker embedding (WeSpeaker / CAM++ / ReDimNet).
     public var embedding: [Float]
     public var origin: AudioOrigin
-    /// Direction of arrival, when the input has ≥ 2 channels.
-    public var azimuthDeg: Float?
-    /// 0…1 reliability of `azimuthDeg` (GCC-PHAT confidence).
-    public var spatialConfidence: Float
+    /// Where the speech came from, when the input has ≥ 2 real channels.
+    /// Usually relative (``StereoCueAnalyzer``), so no mic geometry is needed.
+    public var spatial: SpatialCue?
 
-    public init(embedding: [Float], origin: AudioOrigin, azimuthDeg: Float? = nil, spatialConfidence: Float = 0) {
+    /// Creates an observation.
+    /// - Parameters:
+    ///   - embedding: L2-normalised speaker embedding.
+    ///   - origin: Microphone or system audio.
+    ///   - spatial: Position cue, or `nil` for mono input.
+    public init(embedding: [Float], origin: AudioOrigin, spatial: SpatialCue? = nil) {
         self.embedding = embedding
         self.origin = origin
-        self.azimuthDeg = azimuthDeg
-        self.spatialConfidence = spatialConfidence
+        self.spatial = spatial
     }
 }
 
@@ -65,8 +68,9 @@ public struct SpeakerFusionConfig: Sendable {
     public var clusterThreshold: Float = 0.55
     /// Maximum influence of direction on the fused score (± this value).
     public var spatialWeight: Float = 0.25
-    /// Angular distance at which spatial similarity has fallen to 1/e.
-    public var spatialScaleDeg: Float = 30
+    /// Distance in ``SpatialCue`` units at which spatial similarity has fallen to 1/e.
+    /// Cues span about −1…1, so 0.33 is roughly 30° for a calibrated array.
+    public var spatialScale: Float = 0.33
     /// Spatial evidence below this confidence is ignored.
     public var minSpatialConfidence: Float = 0.3
 
@@ -86,7 +90,7 @@ public final class OnlineSpeakerTracker {
         var origin: AudioOrigin
         var centroid: [Float]
         var count: Int
-        var azimuth: Float?
+        var position: [Float]?
         var personId: String?
     }
 
@@ -132,16 +136,18 @@ public final class OnlineSpeakerTracker {
 
     private func fusedScore(_ c: Cluster, _ obs: SpeechObservation) -> Float {
         let timbre = cosine(c.centroid, obs.embedding)
-        guard let a = c.azimuth, let b = obs.azimuthDeg, obs.spatialConfidence >= config.minSpatialConfidence
+        guard let a = c.position, let cue = obs.spatial, cue.confidence >= config.minSpatialConfidence,
+              a.count == cue.position.count
         else { return timbre }
-        let delta = abs(a - b) / config.spatialScaleDeg
+        let distance = zip(a, cue.position).reduce(0) { $0 + ($1.0 - $1.1) * ($1.0 - $1.1) }.squareRoot()
+        let delta = distance / config.spatialScale
         let spatialSimilarity = exp(-delta * delta)
-        return timbre + config.spatialWeight * obs.spatialConfidence * (2 * spatialSimilarity - 1)
+        return timbre + config.spatialWeight * cue.confidence * (2 * spatialSimilarity - 1)
     }
 
     private func newCluster(_ obs: SpeechObservation, personId: String?) -> Int {
         clusters.append(Cluster(index: clusters.count, origin: obs.origin, centroid: obs.embedding, count: 0,
-                                azimuth: nil, personId: personId))
+                                position: nil, personId: personId))
         return clusters.count - 1
     }
 
@@ -149,9 +155,14 @@ public final class OnlineSpeakerTracker {
         var c = clusters[i]
         let n = Float(c.count)
         c.centroid = normalized(zip(c.centroid, obs.embedding).map { ($0 * n + $1) / (n + 1) })
-        if let az = obs.azimuthDeg, obs.spatialConfidence >= config.minSpatialConfidence {
-            // Exponential moving average: follows a person who shifts in their seat.
-            c.azimuth = c.azimuth.map { 0.8 * $0 + 0.2 * az } ?? az
+        if let cue = obs.spatial, cue.confidence >= config.minSpatialConfidence {
+            // Exponential moving average: follows a person who shifts in their seat, and slow
+            // drift of the cue scale. A cue of a different shape (input changed) restarts it.
+            if let old = c.position, old.count == cue.position.count {
+                c.position = zip(old, cue.position).map { 0.8 * $0 + 0.2 * $1 }
+            } else {
+                c.position = cue.position
+            }
         }
         c.count += 1
         clusters[i] = c

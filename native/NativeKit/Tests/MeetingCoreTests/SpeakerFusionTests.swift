@@ -29,9 +29,29 @@ private func near0(_ c: Float, towards j: Int) -> [Float] {
     #expect(withoutSpace.assign(.init(embedding: similar, origin: .microphone)) == .cluster(index: 0))
 
     let withSpace = OnlineSpeakerTracker(bank: VoiceprintBank())
-    _ = withSpace.assign(.init(embedding: basis(0), origin: .microphone, azimuthDeg: -60, spatialConfidence: 0.9))
-    let other = withSpace.assign(.init(embedding: similar, origin: .microphone, azimuthDeg: 60, spatialConfidence: 0.9))
+    _ = withSpace.assign(.init(embedding: basis(0), origin: .microphone,
+                               spatial: SpatialCue(position: [-0.7, 0], confidence: 0.9)))
+    let other = withSpace.assign(.init(embedding: similar, origin: .microphone,
+                                       spatial: SpatialCue(position: [0.7, 0], confidence: 0.9)))
     #expect(other == .cluster(index: 1))
+}
+
+@Test func azimuthWithKnownSpacingMapsOntoTheSameScale() {
+    // −60° and +60° from a calibrated array must be as far apart as relative cues ±0.67.
+    let tracker = OnlineSpeakerTracker(bank: VoiceprintBank())
+    let similar = near0(0.6, towards: 3)
+    _ = tracker.assign(.init(embedding: basis(0), origin: .microphone, spatial: .init(azimuthDeg: -60, confidence: 0.9)))
+    #expect(tracker.assign(.init(embedding: similar, origin: .microphone,
+                                 spatial: .init(azimuthDeg: 60, confidence: 0.9))) == .cluster(index: 1))
+}
+
+@Test func spatialCuesOfDifferentShapeAreIgnored() {
+    let tracker = OnlineSpeakerTracker(bank: VoiceprintBank())
+    let similar = near0(0.6, towards: 3)
+    _ = tracker.assign(.init(embedding: basis(0), origin: .microphone, spatial: .init(position: [-0.7], confidence: 0.9)))
+    let other = tracker.assign(.init(embedding: similar, origin: .microphone,
+                                     spatial: .init(position: [0.7, 0], confidence: 0.9)))
+    #expect(other == .cluster(index: 0), "a 1-D and a 2-D cue are not comparable, so timbre decides")
 }
 
 @Test func enrolledVoicesAreNamedAndOriginIsAHardPartition() {

@@ -9,10 +9,19 @@ use std::sync::Once;
 
 use rusqlite::{Connection, params};
 
+pub mod index;
+pub mod meetings;
+
+pub use index::{IndexStats, NewChunk, PendingChunk, SearchHit, SourceKind};
+pub use meetings::{SegmentPass, new_meeting};
+
 /// Embedding width stored in `chunk_vec` (EmbeddingGemma 2 native output).
 pub const EMBEDDING_DIMS: usize = 768;
 
-const MIGRATIONS: &[(&str, &str)] = &[("0001_init", include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("../migrations/0001_init.sql")),
+    ("0002_app", include_str!("../migrations/0002_app.sql")),
+];
 
 /// Errors raised by the store.
 #[derive(Debug, thiserror::Error)]
@@ -26,11 +35,17 @@ pub enum StoreError {
     },
     #[error("vector has {got} dims, store expects {expected}")]
     Dims { got: usize, expected: usize },
+    #[error("{0} not found")]
+    NotFound(String),
+    #[error("meeting {id} cannot move from {from} to {to}")]
+    Transition { id: String, from: String, to: String },
+    #[error("decoding stored value: {0}")]
+    Decode(String),
 }
 
 /// Handle to the workbench database.
 pub struct Store {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 /// Registers sqlite-vec for every connection opened by this process (idempotent).
@@ -163,8 +178,15 @@ impl Store {
 }
 
 /// Serialises a vector the way sqlite-vec expects (packed little-endian f32).
-fn f32_bytes(v: &[f32]) -> Vec<u8> {
+pub(crate) fn f32_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Inverse of [`f32_bytes`]; a trailing partial float is ignored.
+pub(crate) fn f32_from_bytes(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 #[cfg(test)]

@@ -30,7 +30,8 @@ pub struct Minutes {
 /// Returns: a strict draft-07 schema matching [`Minutes`].
 pub fn minutes_json_schema() -> Value {
     let strings = json!({"type": "array", "items": {"type": "string"}});
-    let nullable_string = json!({"type": ["string", "null"]});
+    // anyOf instead of a type array: every provider's constrained decoder accepts it.
+    let nullable_string = json!({"anyOf": [{"type": "string"}, {"type": "null"}]});
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -51,7 +52,7 @@ pub fn minutes_json_schema() -> Value {
                         "owner": nullable_string,
                         "task": {"type": "string"},
                         "due": nullable_string,
-                        "evidence_ms": {"type": ["integer", "null"]}
+                        "evidence_ms": {"anyOf": [{"type": "integer"}, {"type": "null"}]}
                     }
                 }
             }

@@ -13,6 +13,8 @@ public enum Methods {
         public static let voiceprintFromClip = "voiceprint/fromClip"
         public static let transcribeFile = "transcribe/file"
         public static let calendarEvents = "calendar/events"
+        /// Runs the live caption pipeline over an audio file (testing without capture permissions).
+        public static let captionSimulateFile = "caption/simulateFile"
 
         public static let nCaptionPartial = "caption/partial"
         public static let nCaptionFinal = "caption/final"

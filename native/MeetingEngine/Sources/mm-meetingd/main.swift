@@ -36,7 +36,7 @@ await server.register(Methods.initialize) { _ in
             "windowCapture": .bool(true),
             "capture": .string("window/display HEVC + multichannel mic + system audio"),
             "liveCaptions": .string("Qwen3-ASR 0.6B per Silero-VAD utterance, partials every 1 s"),
-            "diarization": .string("live: WeSpeaker embeddings + spatial fusion; file: Pyannote + WeSpeaker clustering"),
+            "diarization": .string("live: Sortformer streaming turns + WeSpeaker embeddings + spatial fusion; file: Pyannote + WeSpeaker clustering"),
             "models": .object([
                 "liveASR": .string(SpeechModelIDs.liveASR),
                 "offlineASR": .string(HubCacheLocator.snapshot(repo: SpeechModelIDs.offlineASRHub) != nil
@@ -44,6 +44,7 @@ await server.register(Methods.initialize) { _ in
                 "vad": .string(SpeechModelIDs.vad),
                 "speakerEmbedding": .string(SpeechModelIDs.speakerEmbedding),
                 "segmentation": .string(SpeechModelIDs.segmentation),
+                "liveDiarization": .string(SpeechModelIDs.turnDiarizer),
             ]),
             "speakerEmbeddingModel": .string(SpeechModelIDs.speakerEmbedding),
             "spatialInputs": .array(inputs.filter(\.supportsSpatialCues).map { .string($0.name) }),
@@ -90,6 +91,13 @@ await server.register(Methods.Meeting.voiceprintEnroll) { params in
 await server.register(Methods.Meeting.transcribeFile) { params in
     let p = try (params ?? .object([:])).decode(TranscribeFileParams.self)
     return try JSONValue.from(try await SpeechRequests.transcribeFile(p))
+}
+
+await server.register(Methods.Meeting.captionSimulateFile) { params in
+    let p = try (params ?? .object([:])).decode(SimulateFileParams.self)
+    return try JSONValue.from(try await CaptionSimulator.run(p, notify: { method, params in
+        Task { await server.notify(method, params) }
+    }))
 }
 
 await server.register(Methods.shutdown) { _ in

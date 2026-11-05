@@ -21,6 +21,8 @@ pub mod meeting {
     pub const VOICEPRINT_FROM_CLIP: &str = "voiceprint/fromClip";
     pub const TRANSCRIBE_FILE: &str = "transcribe/file";
     pub const CALENDAR_EVENTS: &str = "calendar/events";
+    /// Runs the live caption pipeline over an audio file (testing without capture permissions).
+    pub const CAPTION_SIMULATE_FILE: &str = "caption/simulateFile";
 
     // Notifications (engine → app)
     pub const N_CAPTION_PARTIAL: &str = "caption/partial";

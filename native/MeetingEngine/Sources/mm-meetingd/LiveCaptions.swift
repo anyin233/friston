@@ -87,6 +87,17 @@ struct LiveModels: @unchecked Sendable {
     let vad: SileroVADModel
     /// `nil` when the embedding model failed to load: captions continue with `unknown` speakers.
     let speaker: WeSpeakerModel?
+    /// `nil` when Sortformer failed to load: speakers then come from embeddings (and direction) only.
+    let turns: SortformerDiarizer?
+}
+
+/// A caption work item for ``LiveCaptioner``, after Sortformer has had its say.
+enum CaptionWork: Equatable {
+    /// Transcribe `start..<end` as a replaceable caption.
+    case partial(id: Int, start: Int, end: Int)
+    /// Transcribe `start..<end` as the stable text of `id`. `cuts` are the Sortformer speaker
+    /// changes inside it (ascending, usually empty); fusion decides whether each cut stands.
+    case final(id: Int, start: Int, end: Int, hadPartial: Bool, cuts: [Int])
 }
 
 /// Per-stream caption state. Only touched by ``LiveCaptioner``'s loop, inside ``MLXGate``.
@@ -111,7 +122,26 @@ final class CaptionStream: @unchecked Sendable {
     private var stereoFrames = 0
     private var frameCues: [(sample: Int, cue: StereoFrameCue)] = []
 
+    // Sortformer speaker turns: a second timbre/turn signal next to the per-utterance embeddings.
+    private let ids: UtteranceIDAllocator
+    private var turnSession: SortformerStreamingSession?
+    private var turnsFailed = false
+    private var timeline = SortformerTimeline()
+    /// Last snapshot shape, to skip re-mapping when no new frames were confirmed.
+    private var lastSnapshot: (count: Int, end: Float) = (0, 0)
+    /// Finals waiting for Sortformer to confirm their audio, so their speaker and split points
+    /// use the turn signal. Partials are never held.
+    private var held: [UtteranceSegmenter.Action] = []
+
     static let rate = 16_000
+    /// 16 kHz samples Sortformer needs beyond a frame before that frame is confirmed: one
+    /// 480 ms core chunk plus its 560 ms lookahead and the mel extraction margin.
+    static let turnLag: Int = {
+        let c = SpeechModelIDs.turnDiarizerConfig
+        return (Int(c.chunkLenSeconds) + Int(c.rightContextSeconds)) * c.subsamplingFactor * c.hopLength + 2 * c.hopLength
+    }()
+    /// Longest a final waits for Sortformer; beyond this the caption is sent with whatever is confirmed.
+    static let maxHold = rate * 5 / 2
 
     /// Creates a stream.
     /// - Parameters:
@@ -122,6 +152,7 @@ final class CaptionStream: @unchecked Sendable {
     init(origin: AudioOrigin, inbox: CaptionInbox, ids: UtteranceIDAllocator, spatial: SpatialArrayProfile?) {
         self.origin = origin
         self.inbox = inbox
+        self.ids = ids
         resampler = StreamingResampler(inputRate: inbox.sampleRate, outputRate: Double(Self.rate))
         segmenter = UtteranceSegmenter(config: .init(sampleRate: Self.rate), ids: ids)
         self.spatial = spatial
@@ -137,7 +168,7 @@ final class CaptionStream: @unchecked Sendable {
     ///   - batch: Audio taken from the inbox.
     ///   - models: Loaded models (for the VAD).
     /// - Returns: Work items, at most one partial per utterance.
-    func ingest(_ batch: CaptionInbox.Batch, models: LiveModels) -> [UtteranceSegmenter.Action] {
+    func ingest(_ batch: CaptionInbox.Batch, models: LiveModels) -> [CaptionWork] {
         guard !batch.mono.isEmpty else { return [] }
         if clock == nil, let first = batch.firstMs {
             clock = CaptionClock(sampleRate: Self.rate, offsetMs: Int(first.rounded()))
@@ -166,12 +197,13 @@ final class CaptionStream: @unchecked Sendable {
             actions += segmenter.advance(to: processed)
             offset = end
         }
-        return Self.coalesce(actions)
+        pushTurns(samples, models: models)
+        return releaseFinals(Self.coalesce(actions), flushing: false)
     }
 
     /// Ends the stream: closes any open utterance.
     /// - Returns: The last final, if any.
-    func flush() -> [UtteranceSegmenter.Action] {
+    func flush() -> [CaptionWork] {
         guard let vad else { return [] }
         var actions: [UtteranceSegmenter.Action] = []
         for case .speechEnded(let segment) in vad.flush() {
@@ -179,7 +211,79 @@ final class CaptionStream: @unchecked Sendable {
         }
         // The VAD may have closed already while our segmenter still holds an utterance.
         actions += segmenter.speechEnded(endSample: processed)
-        return Self.coalesce(actions)
+        if let session = turnSession {
+            do { applySnapshot(try session.finish(), confirmedUntil: processed) } catch {
+                log("captions \(origin.rawValue): Sortformer finish failed: \(error)")
+            }
+        }
+        return releaseFinals(Self.coalesce(actions), flushing: true)
+    }
+
+    // MARK: Speaker turns (Sortformer)
+
+    /// Feeds the 16 kHz samples the VAD just saw to this stream's Sortformer session.
+    /// - Parameters:
+    ///   - samples: New resampled audio, contiguous with everything pushed before.
+    ///   - models: Loaded models; Sortformer is optional.
+    private func pushTurns(_ samples: [Float], models: LiveModels) {
+        guard !turnsFailed, let diarizer = models.turns else { return }
+        if turnSession == nil { turnSession = diarizer.makeStreamingSession() }
+        guard let session = turnSession else { return }
+        do {
+            let snapshot = try session.push(audio: samples)
+            applySnapshot(snapshot, confirmedUntil: max(0, processed - Self.turnLag))
+        } catch {
+            // Degrade to embeddings only; held finals are released on this pass.
+            log("captions \(origin.rawValue): Sortformer disabled after error: \(error)")
+            turnsFailed = true
+            turnSession = nil
+        }
+    }
+
+    /// Converts a whole-stream Sortformer snapshot into stream samples and updates the timeline.
+    private func applySnapshot(_ result: DiarizationResult, confirmedUntil: Int) {
+        let shape = (result.segments.count, result.segments.last?.endTime ?? 0)
+        guard shape != lastSnapshot || confirmedUntil > timeline.confirmedUntil else { return }
+        lastSnapshot = shape
+        let turns = result.segments.map {
+            SortformerTurn(start: Int(($0.startTime * Float(Self.rate)).rounded()),
+                           end: Int(($0.endTime * Float(Self.rate)).rounded()), slot: $0.speakerId)
+        }
+        timeline.update(snapshot: turns, confirmedUntil: confirmedUntil)
+    }
+
+    /// Whether Sortformer output can still arrive for this stream.
+    private var turnsActive: Bool { turnSession != nil && !turnsFailed }
+
+    /// Holds finals until Sortformer has confirmed their audio, then splits them at speaker changes.
+    /// - Parameters:
+    ///   - actions: New work items in order.
+    ///   - flushing: Release everything (end of stream).
+    /// - Returns: Partials as they come, and the finals that are ready.
+    private func releaseFinals(_ actions: [UtteranceSegmenter.Action], flushing: Bool) -> [CaptionWork] {
+        var out: [CaptionWork] = []
+        for action in actions {
+            switch action {
+            case .final: held.append(action)
+            case .partial(let id, let start, let end): out.append(.partial(id: id, start: start, end: end))
+            }
+        }
+        while let first = held.first, case .final(let id, let start, let end, let hadPartial) = first {
+            let confirmed = timeline.confirmedUntil >= end
+            guard flushing || !turnsActive || confirmed || processed - end >= Self.maxHold else { break }
+            held.removeFirst()
+            out.append(.final(id: id, start: start, end: end, hadPartial: hadPartial,
+                              cuts: timeline.splitPoints(start: start, end: end)))
+        }
+        return out
+    }
+
+    /// A fresh utterance id, for the later pieces of a split final.
+    func nextUtteranceId() -> Int { ids.next() }
+
+    /// The Sortformer slot that dominates `start..<end`, if Sortformer is running and decided.
+    func turnSlot(_ start: Int, _ end: Int) -> Int? {
+        timeline.dominantSlot(start: start, end: end)
     }
 
     /// Keeps only the newest partial per utterance, and none for utterances already final:
@@ -214,14 +318,19 @@ final class CaptionStream: @unchecked Sendable {
     /// Drops audio no utterance can need any more.
     func trim() {
         // Keep 1 s before the VAD position: speech onset is confirmed ~0.25 s after it starts.
-        let keepFrom = min(segmenter.activeStart ?? processed, processed - Self.rate) - Self.rate / 10
+        // Held finals still need their audio.
+        let heldStart = held.compactMap { action -> Int? in
+            if case .final(_, let start, _, _) = action { return start } else { return nil }
+        }.min() ?? processed
+        let keepFrom = min(segmenter.activeStart ?? processed, processed - Self.rate, heldStart) - Self.rate / 10
         let drop = min(keepFrom - audioBase, audio.count)
         if drop > 0 {
             audio.removeFirst(drop)
             audioBase += drop
         }
-        let cueFloor = (segmenter.activeStart ?? processed) - Self.rate
+        let cueFloor = min(segmenter.activeStart ?? processed, heldStart) - Self.rate
         frameCues.removeAll { $0.sample < cueFloor }
+        timeline.trim(before: cueFloor)
     }
 
     /// Capture-relative milliseconds of a 16 kHz stream sample.
@@ -271,6 +380,8 @@ final class LiveCaptioner: @unchecked Sendable {
     private let notify: Notify
     private let stopping = LockedValue(false)
     private let ready = LockedValue(false)
+    /// Set once model loading has either succeeded or failed.
+    private let settled = LockedValue(false)
     private var loop: Task<Void, Never>?
 
     /// Creates the captioner; nothing runs until ``start()``.
@@ -280,16 +391,32 @@ final class LiveCaptioner: @unchecked Sendable {
     ///   - micRate: Microphone device rate, when recording the mic.
     ///   - systemRate: System-audio rate, when recording it.
     ///   - notify: Notification sink.
-    init(sessionId: String, plan: CapturePlan, micRate: Double?, systemRate: Double?, notify: @escaping Notify) {
+    convenience init(sessionId: String, plan: CapturePlan, micRate: Double?, systemRate: Double?,
+                     notify: @escaping Notify) {
+        self.init(sessionId: sessionId, preset: plan.preset, microphone: plan.microphone, micRate: micRate,
+                  systemRate: systemRate, notify: notify)
+    }
+
+    /// Creates the captioner from its parts (also used by `caption/simulateFile`, which has no plan).
+    /// - Parameters:
+    ///   - sessionId: Session id for the notifications.
+    ///   - preset: Language and voiceprints.
+    ///   - microphone: The mic device, for direction cues; `nil` when unknown (no direction).
+    ///   - micRate: Rate of the microphone stream, or `nil` for none.
+    ///   - systemRate: Rate of the system-audio stream, or `nil` for none.
+    ///   - maxBacklogSeconds: Audio an inbox keeps while the loop is busy or models load.
+    ///   - notify: Notification sink.
+    init(sessionId: String, preset: CapturePreset, microphone mic: AudioInputInfo?, micRate: Double?,
+         systemRate: Double?, maxBacklogSeconds: Double = 60, notify: @escaping Notify) {
         self.sessionId = sessionId
         self.notify = notify
         let ids = UtteranceIDAllocator()
         var streams: [CaptionStream] = []
         var micSpatial: SpatialArrayProfile?
         if let micRate {
-            let inbox = CaptionInbox(sampleRate: micRate)
+            let inbox = CaptionInbox(sampleRate: micRate, maxSeconds: maxBacklogSeconds)
             // Virtual/aggregate devices and multichannel devices without a preset give no pair.
-            let spatial = plan.microphone.flatMap { try? SpatialArrayProfile.resolve(for: $0) } ?? nil
+            let spatial = mic.flatMap { try? SpatialArrayProfile.resolve(for: $0) } ?? nil
             micSpatial = spatial
             streams.append(CaptionStream(origin: .microphone, inbox: inbox, ids: ids, spatial: spatial))
             microphone = inbox
@@ -297,7 +424,7 @@ final class LiveCaptioner: @unchecked Sendable {
             microphone = nil
         }
         if let systemRate {
-            let inbox = CaptionInbox(sampleRate: systemRate)
+            let inbox = CaptionInbox(sampleRate: systemRate, maxSeconds: maxBacklogSeconds)
             streams.append(CaptionStream(origin: .system, inbox: inbox, ids: ids, spatial: nil))
             system = inbox
         } else {
@@ -305,14 +432,14 @@ final class LiveCaptioner: @unchecked Sendable {
         }
         self.streams = streams
         microphoneSpatial = micSpatial
-        let samples = plan.preset.voiceprints ?? []
+        let samples = preset.voiceprints ?? []
         let bank = VoiceprintBank(samples: samples, model: SpeechModelIDs.speakerEmbedding)
         if !samples.isEmpty {
             log("captions \(sessionId): \(bank.personCount) enrolled people (\(samples.count) samples, model \(SpeechModelIDs.speakerEmbedding))")
         }
         tracker = OnlineSpeakerTracker(bank: bank)
-        languageName = ASRLanguage.qwenName(for: plan.preset.captionLanguage)
-        languageCode = ASRLanguage.primaryCode(for: plan.preset.captionLanguage)
+        languageName = ASRLanguage.qwenName(for: preset.captionLanguage)
+        languageCode = ASRLanguage.primaryCode(for: preset.captionLanguage)
     }
 
     /// The mic channels the direction analysis uses; the recorder copies them out of each buffer.
@@ -322,6 +449,13 @@ final class LiveCaptioner: @unchecked Sendable {
     func start() {
         guard !streams.isEmpty else { return }
         loop = Task.detached(priority: .userInitiated) { [self] in await run() }
+    }
+
+    /// Waits until model loading has finished, successfully or not.
+    /// - Returns: Whether captions are running.
+    func waitUntilSettled() async -> Bool {
+        while !settled.get() { try? await Task.sleep(for: .milliseconds(20)) }
+        return ready.get()
     }
 
     /// Stops captioning, finalizing open utterances when the models are loaded.
@@ -345,16 +479,19 @@ final class LiveCaptioner: @unchecked Sendable {
             async let asr = SpeechModels.shared.liveASR()
             async let vad = SpeechModels.shared.vad()
             async let speaker = try? SpeechModels.shared.speaker()
-            let loaded = (try await asr, try await vad, await speaker)
+            async let turns = Self.loadTurnDiarizer(sessionId)
+            let loaded = (try await asr, try await vad, await speaker, await turns)
             if loaded.2 == nil { log("captions \(sessionId): speaker embeddings unavailable; speakers will be unknown") }
-            models = LiveModels(asr: loaded.0.value, vad: loaded.1.value, speaker: loaded.2?.value)
+            models = LiveModels(asr: loaded.0.value, vad: loaded.1.value, speaker: loaded.2?.value, turns: loaded.3?.value)
         } catch {
             log("captions \(sessionId): disabled, models unavailable: \(error)")
             microphone?.close()
             system?.close()
+            _ = settled.exchange(true)
             return
         }
         _ = ready.exchange(true)
+        _ = settled.exchange(true)
         log("captions \(sessionId): running (language \(languageName ?? "auto"))")
         while true {
             let last = stopping.get()
@@ -363,9 +500,9 @@ final class LiveCaptioner: @unchecked Sendable {
                 let behind = Double(batch.mono.count) / stream.inbox.sampleRate > 1.5
                 do {
                     try await MLXGate.shared.run { [self] in
-                        var actions = stream.ingest(batch, models: models)
-                        if last { actions += stream.flush() }
-                        for action in actions { self.perform(action, on: stream, models: models, skipPartials: behind) }
+                        var work = stream.ingest(batch, models: models)
+                        if last { work += stream.flush() }
+                        for item in work { self.perform(item, on: stream, models: models, skipPartials: behind) }
                         stream.trim()
                     }
                 } catch {
@@ -378,10 +515,19 @@ final class LiveCaptioner: @unchecked Sendable {
         log("captions \(sessionId): stopped")
     }
 
+    /// Loads Sortformer, logging instead of failing: captions work without it.
+    /// - Parameter sessionId: For the log line.
+    /// - Returns: The diarizer, or `nil` when it cannot be downloaded or loaded.
+    private static func loadTurnDiarizer(_ sessionId: String) async -> Unchecked<SortformerDiarizer>? {
+        do { return try await SpeechModels.shared.turnDiarizer() } catch {
+            log("captions \(sessionId): Sortformer unavailable, speakers from embeddings only: \(error)")
+            return nil
+        }
+    }
+
     /// Transcribes one work item and sends its notifications (runs inside ``MLXGate``).
-    private func perform(_ action: UtteranceSegmenter.Action, on stream: CaptionStream, models: LiveModels,
-                         skipPartials: Bool) {
-        switch action {
+    private func perform(_ work: CaptionWork, on stream: CaptionStream, models: LiveModels, skipPartials: Bool) {
+        switch work {
         case .partial(let id, let start, let end):
             guard !skipPartials else { return }
             let audio = stream.slice(start, end)
@@ -389,38 +535,76 @@ final class LiveCaptioner: @unchecked Sendable {
             guard !text.isEmpty else { return }
             var speaker = SpeakerLabel.unknown
             if audio.count >= CaptionStream.rate * 3 / 2, let embedding = embed(audio, models) {
-                speaker = tracker.peek(SpeechObservation(embedding: embedding, origin: stream.origin))
+                speaker = tracker.peek(SpeechObservation(embedding: embedding, origin: stream.origin,
+                                                         turnSlot: stream.turnSlot(start, end)))
             }
             send(Methods.Meeting.nCaptionPartial, CaptionPartialEvent(
                 sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: stream.ms(start),
                 text: text, speaker: speaker))
 
-        case .final(let id, let start, let end, let hadPartial):
+        case .final(let id, let start, let end, let hadPartial, let cuts) where cuts.isEmpty:
             let audio = stream.slice(start, end)
             let text = transcribe(audio, models)
             guard !text.isEmpty || hadPartial else { return }
-            let (cue, wireCue) = stream.spatialCue(start, end)
-            var speaker = SpeakerLabel.unknown
-            if !text.isEmpty, let embedding = audio.count >= CaptionStream.rate * 2 / 5 ? embed(audio, models) : nil {
-                let observation = SpeechObservation(embedding: embedding, origin: stream.origin, spatial: cue)
-                // Embeddings of short utterances scatter widely; letting them found clusters
-                // splits one person into many "说话人 N".
-                if audio.count >= CaptionStream.rate * 3 / 2 {
-                    let (label, relabels) = tracker.assignReportingRelabels(observation)
-                    speaker = label
-                    for r in relabels {
-                        send(Methods.Meeting.nSpeakerRelabel, SpeakerRelabelEvent(sessionId: sessionId, from: r.from, to: r.to))
-                    }
-                } else {
-                    // Too short to shape a cluster centroid, but enough to guess.
-                    speaker = tracker.peek(observation)
-                }
+            let speaker = text.isEmpty ? SpeakerLabel.unknown : attribute(audio, start, end, on: stream, models: models)
+            sendFinal(id: id, start, end, text: text, speaker: speaker, on: stream)
+
+        case .final(let id, let start, let end, let hadPartial, let cuts):
+            // Attribute each Sortformer piece first: where fusion hears the same person on both
+            // sides of a cut, the cut is Sortformer slot jitter and the caption stays whole.
+            let bounds = [start] + cuts + [end]
+            let labels = (0..<bounds.count - 1).map { i in
+                attribute(stream.slice(bounds[i], bounds[i + 1]), bounds[i], bounds[i + 1], on: stream, models: models)
             }
-            send(Methods.Meeting.nCaptionFinal, CaptionFinalEvent(
-                sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: stream.ms(start),
-                endMs: stream.ms(end), text: text, language: languageCode ?? ASRLanguage.guess(fromText: text),
-                speaker: speaker, spatial: wireCue))
+            let pieces = SortformerTimeline.joinPieces(bounds: bounds, labels: labels)
+            if pieces.count > 1 {
+                log("captions \(stream.origin.rawValue): utterance \(id) split at "
+                    + "\(pieces.dropFirst().map { stream.ms($0.start) }) ms (speaker change)")
+            }
+            for (k, piece) in pieces.enumerated() {
+                let text = transcribe(stream.slice(piece.start, piece.end), models)
+                // The first piece keeps the id, so it retires the partial on screen even when empty.
+                guard !text.isEmpty || (k == 0 && hadPartial) else { continue }
+                sendFinal(id: k == 0 ? id : stream.nextUtteranceId(), piece.start, piece.end, text: text,
+                          speaker: text.isEmpty ? .unknown : piece.label, on: stream)
+            }
         }
+    }
+
+    /// Decides who spoke `start..<end`, updating the tracker and broadcasting relabels.
+    /// - Parameters:
+    ///   - audio: The 16 kHz audio of the span.
+    ///   - start: Span start (stream samples), for direction and Sortformer lookups.
+    ///   - end: Span end.
+    ///   - stream: The stream it came from.
+    ///   - models: Loaded models.
+    /// - Returns: The label; `unknown` below 0.4 s or without an embedding model.
+    private func attribute(_ audio: [Float], _ start: Int, _ end: Int, on stream: CaptionStream,
+                           models: LiveModels) -> SpeakerLabel {
+        guard audio.count >= CaptionStream.rate * 2 / 5, let embedding = embed(audio, models) else { return .unknown }
+        let (cue, _) = stream.spatialCue(start, end)
+        let observation = SpeechObservation(embedding: embedding, origin: stream.origin, spatial: cue,
+                                            turnSlot: stream.turnSlot(start, end))
+        // Embeddings of short utterances scatter widely; letting them found clusters
+        // splits one person into many "说话人 N".
+        guard audio.count >= CaptionStream.rate * 3 / 2 else {
+            // Too short to shape a cluster centroid, but enough to guess.
+            return tracker.peek(observation)
+        }
+        let (label, relabels) = tracker.assignReportingRelabels(observation)
+        for r in relabels {
+            send(Methods.Meeting.nSpeakerRelabel, SpeakerRelabelEvent(sessionId: sessionId, from: r.from, to: r.to))
+        }
+        return label
+    }
+
+    /// Sends one `caption/final`.
+    private func sendFinal(id: Int, _ start: Int, _ end: Int, text: String, speaker: SpeakerLabel,
+                           on stream: CaptionStream) {
+        send(Methods.Meeting.nCaptionFinal, CaptionFinalEvent(
+            sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: stream.ms(start),
+            endMs: stream.ms(end), text: text, language: languageCode ?? ASRLanguage.guess(fromText: text),
+            speaker: speaker, spatial: stream.spatialCue(start, end).1))
     }
 
     /// Runs Qwen3-ASR on 16 kHz audio.

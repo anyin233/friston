@@ -17,6 +17,10 @@ enum SpeechModelIDs {
     /// Voiceprints carry this id; vectors from other models are never compared.
     static let speakerEmbedding = WeSpeakerModel.defaultModelId
     static let segmentation = PyannoteVADModel.defaultModelId
+    /// Live speaker turns: Sortformer streaming (Core ML, 480 ms chunks, up to 4 speakers).
+    static let turnDiarizer = SortformerDiarizer.defaultModelId
+    /// Chunk shape of the live Sortformer; its lookahead decides how late turns are confirmed.
+    static let turnDiarizerConfig = SortformerConfig.streaming
 }
 
 /// Owns a model that is not `Sendable`. Only ever used while holding ``MLXGate``.
@@ -115,6 +119,12 @@ actor SpeechModels {
                                                 progressHandler: SpeechModels.progress(SpeechModelIDs.speakerEmbedding))
     }
 
+    private let sortformer = LazyModel<SortformerDiarizer>(id: SpeechModelIDs.turnDiarizer) {
+        try await SortformerDiarizer.fromPretrained(modelId: SpeechModelIDs.turnDiarizer,
+                                                    config: SpeechModelIDs.turnDiarizerConfig,
+                                                    progressHandler: SpeechModels.progress(SpeechModelIDs.turnDiarizer))
+    }
+
     /// Logs download/load progress at most every 10 %, on stderr.
     /// - Parameter model: Model id for the log line.
     /// - Returns: A progress handler for `fromPretrained`.
@@ -140,6 +150,12 @@ actor SpeechModels {
     /// - Returns: The shared model.
     /// - Throws: ``SpeechModelError``.
     func speaker() async throws -> Unchecked<WeSpeakerModel> { try await wespeaker.get() }
+
+    /// Sortformer with the streaming chunk shape; callers open one
+    /// `makeStreamingSession()` per audio stream (sessions share the Core ML model).
+    /// - Returns: The shared diarizer.
+    /// - Throws: ``SpeechModelError``.
+    func turnDiarizer() async throws -> Unchecked<SortformerDiarizer> { try await sortformer.get() }
 
     /// Loads Qwen3-ASR 1.7B, preferring an existing `huggingface_hub` copy.
     /// - Returns: A fresh model owned by the caller, and the id actually used.

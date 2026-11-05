@@ -74,6 +74,9 @@ pub struct Meeting {
     /// Vault-relative path of the Obsidian note that holds notes + minutes.
     pub note_path: Option<String>,
     pub tags: Vec<String>,
+    /// Folder holding `screen.mov` / `mic.caf` / `system.caf` once recorded.
+    #[serde(default)]
+    pub recording_dir: Option<String>,
 }
 
 #[cfg(test)]

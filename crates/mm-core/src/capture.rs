@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// What one recording session should capture (`capture/start` params).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapturePreset {
     /// Meeting title; names the recording folder.
@@ -41,6 +41,9 @@ pub struct CapturePreset {
     /// Overrides `~/Movies/Meeting Master`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_directory: Option<PathBuf>,
+    /// Enrolled voiceprints so live captions can name known people.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voiceprints: Vec<crate::PresetVoiceprint>,
 }
 
 /// Files of one session; one per source so ASR can keep stream origin apart.

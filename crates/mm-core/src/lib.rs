@@ -5,6 +5,7 @@
 
 pub mod capture;
 pub mod ids;
+pub mod live;
 pub mod media;
 pub mod meeting;
 pub mod speaker;
@@ -12,6 +13,7 @@ pub mod transcript;
 
 pub use capture::*;
 pub use ids::*;
+pub use live::*;
 pub use media::*;
 pub use meeting::*;
 pub use speaker::*;

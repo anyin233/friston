@@ -166,7 +166,12 @@ pub fn build_preset(
         title: Some(meeting.title.clone()),
         window_id: if cfg.record_screen { window_id } else { None },
         display_id: None,
-        microphone_uid: cfg.microphone_uid.clone(),
+        // "default" lets the engine resolve the system default input at start time.
+        microphone_uid: Some(
+            cfg.microphone_uid
+                .clone()
+                .unwrap_or_else(|| "default".into()),
+        ),
         system_audio: cfg.system_audio,
         caption_language: cfg.caption_language.clone(),
         fps: Some(cfg.fps),
@@ -630,6 +635,7 @@ mod tests {
 
         let preset = build_preset(&cfg, &store, &m, Some(7)).unwrap();
         assert_eq!(preset.window_id, Some(7));
+        assert_eq!(preset.microphone_uid.as_deref(), Some("default"));
         assert_eq!(preset.caption_language.as_deref(), Some("zh"));
 
         let started = CaptureStarted {

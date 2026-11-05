@@ -180,6 +180,25 @@ pub fn build_preset(
     })
 }
 
+/// Microphone-only fallback for a preset whose screen/system-audio part needs the
+/// Screen Recording permission (ScreenCaptureKit carries both).
+///
+/// Params: `preset` – the preset that failed.
+/// Returns: the reduced preset, or `None` when it used no ScreenCaptureKit source or
+/// has no microphone to fall back to.
+pub fn without_screen_capture(preset: &CapturePreset) -> Option<CapturePreset> {
+    let uses_sck = preset.window_id.is_some() || preset.display_id.is_some() || preset.system_audio;
+    if !uses_sck || preset.microphone_uid.is_none() {
+        return None;
+    }
+    Some(CapturePreset {
+        window_id: None,
+        display_id: None,
+        system_audio: false,
+        ..preset.clone()
+    })
+}
+
 /// Records that capture started: status Live, recording folder.
 ///
 /// Params: `store`; `meeting` – updated in place; `started` – engine result.
@@ -587,6 +606,28 @@ mod tests {
             origin,
             spatial: None,
         }
+    }
+
+    #[test]
+    fn screen_capture_fallback_keeps_the_microphone() {
+        let full = CapturePreset {
+            window_id: Some(3),
+            system_audio: true,
+            microphone_uid: Some("default".into()),
+            ..Default::default()
+        };
+        let reduced = without_screen_capture(&full).unwrap();
+        assert_eq!((reduced.window_id, reduced.system_audio), (None, false));
+        assert_eq!(reduced.microphone_uid.as_deref(), Some("default"));
+        assert!(
+            without_screen_capture(&reduced).is_none(),
+            "nothing left to drop"
+        );
+        let no_mic = CapturePreset {
+            microphone_uid: None,
+            ..full
+        };
+        assert!(without_screen_capture(&no_mic).is_none());
     }
 
     #[test]

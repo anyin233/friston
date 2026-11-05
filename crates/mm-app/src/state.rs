@@ -235,6 +235,8 @@ pub struct AppState {
     pub events: Loadable<Vec<CalendarEvent>>,
     pub inputs: Loadable<Vec<AudioInput>>,
     pub sources: Loadable<CaptureSources>,
+    /// macOS privacy grants (screen & system audio, microphone, calendar).
+    pub permissions: Loadable<mm_core::PermissionStatus>,
     pub codex: Loadable<CodexStatus>,
     pub embed_status: Loadable<EmbedStatus>,
     pub llm_status: Loadable<LlmStatus>,
@@ -348,6 +350,7 @@ impl AppState {
             events: Loadable::Loading,
             inputs: Loadable::Idle,
             sources: Loadable::Idle,
+            permissions: Loadable::Idle,
             codex: Loadable::Loading,
             embed_status: Loadable::Idle,
             llm_status: Loadable::Idle,
@@ -453,6 +456,7 @@ impl AppState {
                         this.drain_meeting_events(rx, cx);
                         this.refresh_calendar(cx);
                         this.refresh_inputs(cx);
+                        this.refresh_permissions(cx);
                     }
                     Err(state) => {
                         let msg = state.describe("字幕引擎 mm-meetingd ");
@@ -884,6 +888,60 @@ impl AppState {
                     Ok(ev) => Loadable::Ready(ev),
                     Err(e) => Loadable::Failed(e.into()),
                 };
+                cx.notify();
+            },
+        );
+    }
+
+    /// Reads the app's privacy grants from the engine (no prompts).
+    ///
+    /// Params: `cx`.
+    pub fn refresh_permissions(&mut self, cx: &mut Context<Self>) {
+        let engine = match self.meeting_engine() {
+            Ok(e) => e,
+            Err(msg) => {
+                self.permissions = Loadable::Failed(msg.into());
+                cx.notify();
+                return;
+            }
+        };
+        self.permissions = Loadable::Loading;
+        bg(
+            cx,
+            move || engine.permissions(),
+            |this, res, cx| {
+                this.permissions = match res {
+                    Ok(p) => Loadable::Ready(p),
+                    Err(e) => Loadable::Failed(e.into()),
+                };
+                cx.notify();
+            },
+        );
+    }
+
+    /// Asks macOS for one permission, then refreshes the window list and calendar that depend on it.
+    ///
+    /// Params: `kind` – `screenCapture`, `microphone` or `calendar`; `cx`.
+    pub fn request_permission(&mut self, kind: &'static str, cx: &mut Context<Self>) {
+        let engine = match self.meeting_engine() {
+            Ok(e) => e,
+            Err(msg) => {
+                self.notify(NoticeKind::Error, msg, cx);
+                return;
+            }
+        };
+        bg(
+            cx,
+            move || engine.request_permission(kind),
+            move |this, res, cx| {
+                match res {
+                    Ok(p) => {
+                        this.permissions = Loadable::Ready(p);
+                        this.refresh_sources(cx);
+                        this.refresh_calendar(cx);
+                    }
+                    Err(e) => this.notify(NoticeKind::Error, e.to_string(), cx),
+                }
                 cx.notify();
             },
         );

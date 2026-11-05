@@ -601,6 +601,73 @@ impl SettingsPage {
     }
 
     /// Local models and index section.
+    /// macOS privacy grants with one-click requests and a deep link to System Settings.
+    fn permissions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = self.app.read(cx);
+        let (summary, missing) = match &app.permissions {
+            Loadable::Ready(p) => {
+                let missing = p.missing();
+                let summary = if missing.is_empty() {
+                    "麦克风、日历、屏幕与系统录音都已授权。".to_string()
+                } else {
+                    format!(
+                        "还没有授权：{}。授权后无需重新构建，签名固定时授权会一直保留。",
+                        missing
+                            .iter()
+                            .map(|(_, l)| *l)
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    )
+                };
+                (summary, missing)
+            }
+            Loadable::Loading => ("正在检查…".to_string(), vec![]),
+            Loadable::Idle => ("尚未检查。".to_string(), vec![]),
+            Loadable::Failed(e) => (e.message.clone(), vec![]),
+        };
+        let handle = self.app.clone();
+        let mut buttons = h_flex().gap_2().items_center().flex_wrap();
+        for (kind, label) in missing {
+            let h = handle.clone();
+            buttons = buttons.child(
+                Button::new(SharedString::from(format!("perm-{kind}")))
+                    .small()
+                    .outline()
+                    .label(format!("请求{label}"))
+                    .on_click(move |_, _, cx| h.update(cx, |a, cx| a.request_permission(kind, cx))),
+            );
+        }
+        let h = handle.clone();
+        buttons = buttons
+            .child(
+                Button::new("perm-settings")
+                    .small()
+                    .ghost()
+                    .label("打开系统设置")
+                    .on_click(|_, _, cx| {
+                        cx.open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                    }),
+            )
+            .child(
+                Button::new("perm-refresh")
+                    .small()
+                    .ghost()
+                    .icon(IconName::RefreshCw)
+                    .on_click(move |_, _, cx| h.update(cx, |a, cx| a.refresh_permissions(cx))),
+            );
+        ui::card(cx)
+            .child(ui::section_title("系统权限"))
+            .child(Self::row(
+                "授权状态",
+                Some("屏幕与系统录音用于录制会议窗口和远程参会者的声音。".into()),
+                v_flex()
+                    .gap_2()
+                    .child(ui::muted(summary, cx))
+                    .child(buttons),
+                cx,
+            ))
+    }
+
     fn models(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let app = self.app.read(cx);
         let embed_line = match &app.embed_status {
@@ -782,6 +849,7 @@ impl Render for SettingsPage {
                 "修改后立即保存。文字输入框按回车或离开输入框时保存。",
                 cx,
             ))
+            .child(self.permissions(cx))
             .child(self.obsidian(&cfg, cx))
             .child(self.capture(&cfg, cx))
             .child(self.minutes(&cfg, cx))

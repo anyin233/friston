@@ -16,16 +16,21 @@ public struct SpeechObservation: Sendable {
     /// Where the speech came from, when the input has ≥ 2 real channels.
     /// Usually relative (``StereoCueAnalyzer``), so no mic geometry is needed.
     public var spatial: SpatialCue?
+    /// The Sortformer slot that dominates this speech (stable within the stream's session), or
+    /// `nil` when Sortformer is unavailable or undecided.
+    public var turnSlot: Int?
 
     /// Creates an observation.
     /// - Parameters:
     ///   - embedding: L2-normalised speaker embedding.
     ///   - origin: Microphone or system audio.
     ///   - spatial: Position cue, or `nil` for mono input.
-    public init(embedding: [Float], origin: AudioOrigin, spatial: SpatialCue? = nil) {
+    ///   - turnSlot: Dominant Sortformer slot, from ``SortformerTimeline/dominantSlot(start:end:)``.
+    public init(embedding: [Float], origin: AudioOrigin, spatial: SpatialCue? = nil, turnSlot: Int? = nil) {
         self.embedding = embedding
         self.origin = origin
         self.spatial = spatial
+        self.turnSlot = turnSlot
     }
 }
 
@@ -159,6 +164,10 @@ public struct SpeakerFusionConfig: Sendable {
     public var spatialScale: Float = 0.33
     /// Spatial evidence below this confidence is ignored.
     public var minSpatialConfidence: Float = 0.3
+    /// Maximum influence of the Sortformer slot on the fused score: +this value for the cluster
+    /// the slot maps to, −half of it for a cluster another slot maps to. Small enough that a
+    /// clearly different timbre (or a voiceprint match) still wins over Sortformer.
+    public var turnWeight: Float = 0.2
 
     public init() {}
 }
@@ -185,6 +194,7 @@ public final class OnlineSpeakerTracker {
     private let config: SpeakerFusionConfig
     private let bank: VoiceprintBank
     private var clusters: [Cluster] = []
+    private var slots = SortformerSlotMapper()
     /// Display indices are never reused, even after a merge removes a cluster.
     private var nextIndex = 0
 
@@ -212,7 +222,8 @@ public final class OnlineSpeakerTracker {
             let i = clusters.firstIndex { $0.personId == match.personId && $0.origin == obs.origin }
                 ?? newCluster(obs, personId: match.personId)
             update(i, with: obs)
-            let (_, relabels) = consolidate(i)
+            let (survivor, relabels) = consolidate(i)
+            voteSlot(obs, survivor)
             return (.known(personId: match.personId, score: match.score), relabels)
         }
         let i: Int
@@ -223,6 +234,7 @@ public final class OnlineSpeakerTracker {
         }
         update(i, with: obs)
         let (survivor, relabels) = consolidate(i)
+        voteSlot(obs, survivor)
         if let person = clusters[survivor].personId {
             return (.known(personId: person, score: cosine(clusters[survivor].centroid, obs.embedding)), relabels)
         }
@@ -238,6 +250,12 @@ public final class OnlineSpeakerTracker {
         }
         guard let (best, score) = bestCluster(for: obs), score >= config.clusterThreshold else { return .unknown }
         return label(of: clusters[best])
+    }
+
+    /// Teaches the slot mapper that this observation's Sortformer slot is cluster `i`.
+    private func voteSlot(_ obs: SpeechObservation, _ i: Int) {
+        guard let slot = obs.turnSlot else { return }
+        slots.vote(slot: slot, origin: obs.origin, cluster: clusters[i].index)
     }
 
     private func bestCluster(for obs: SpeechObservation) -> (Int, Float)? {
@@ -272,6 +290,7 @@ public final class OnlineSpeakerTracker {
             let keepCurrent = a.personId != nil || (b.personId == nil && a.index < b.index)
             let (keep, drop) = keepCurrent ? (current, j) : (j, current)
             let from = label(of: clusters[drop])
+            slots.merge(cluster: clusters[drop].index, into: clusters[keep].index)
             merge(clusters[drop], into: keep)
             let to = label(of: clusters[keep])
             if from != to { relabels.append(SpeakerRelabel(from: from, to: to)) }
@@ -311,11 +330,16 @@ public final class OnlineSpeakerTracker {
     }
 
     private func fusedScore(_ c: Cluster, _ obs: SpeechObservation) -> Float {
-        let timbre = cosine(c.centroid, obs.embedding)
+        // Timbre, plus the turn evidence: Sortformer tracks who holds the floor even when a short
+        // utterance's embedding is too noisy to place on its own.
+        var score = cosine(c.centroid, obs.embedding)
+        if let slot = obs.turnSlot {
+            score += config.turnWeight * slots.agreement(slot: slot, origin: obs.origin, cluster: c.index)
+        }
         guard let a = c.position, let cue = obs.spatial, cue.confidence >= config.minSpatialConfidence,
               a.count == cue.position.count
-        else { return timbre }
-        return timbre + config.spatialWeight * cue.confidence * spatialTerm(a, cue.position)
+        else { return score }
+        return score + config.spatialWeight * cue.confidence * spatialTerm(a, cue.position)
     }
 
     /// Spatial agreement in −1…1: +1 at the same spot, −1 far apart.

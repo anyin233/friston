@@ -122,3 +122,84 @@ private func runMeeting(_ analyzer: StereoCueAnalyzer, talkers: [(Int, Float)], 
     _ = runMeeting(analyzer, talkers: [(0, 1), (0, 1), (0, 1)])
     #expect(analyzer.layout == .undetermined)
 }
+
+/// Talkers take turns for `rounds` rounds; returns each talker's segment cue over the last `measure` rounds.
+/// - Parameters:
+///   - analyzer: Analyzer under test (keeps its state across calls).
+///   - talkers: Delay per talker (equal gains).
+///   - offset: Constant extra delay on channel `b` for this stretch.
+///   - rounds: Rounds to run; each round is one frame (≈ 43 ms) per talker.
+///   - measure: Trailing rounds whose frames make up the returned cues.
+///   - seed: First noise seed; advanced by one per frame.
+/// - Returns: One cue per talker.
+private func turns(_ analyzer: StereoCueAnalyzer, talkers: [Int], offset: Int, rounds: Int, measure: Int,
+                   seed: inout UInt64) -> [SpatialCue?] {
+    var frames = [[StereoFrameCue]](repeating: [], count: talkers.count)
+    for round in 0..<rounds {
+        for (i, delay) in talkers.enumerated() {
+            let (a, b) = talker(delay: delay, offset: offset, seed: seed)
+            seed += 1
+            if let cue = analyzer.analyze(a, b), round >= rounds - measure { frames[i].append(cue) }
+        }
+    }
+    return frames.map { analyzer.segmentCue($0) }
+}
+
+@Test func delayJumpResetsNormalisationWithinSeconds() throws {
+    // A wireless link re-pairs mid-meeting: channel b suddenly arrives 150 samples (≈ 3 ms) later.
+    var seed: UInt64 = 1
+    let analyzer = try StereoCueAnalyzer()
+    let before = turns(analyzer, talkers: [-20, 0, 20], offset: 0, rounds: 100, measure: 10, seed: &seed)
+    #expect(analyzer.layout == .spaced)
+    #expect(before[0]!.position[0] < -0.7 && before[2]!.position[0] > 0.7)
+
+    // 30 rounds × 3 talkers × 43 ms ≈ 3.9 s of speech after the jump, measured over its last 1.3 s.
+    // Roughly 1 s goes to noticing the peak left the narrowed window, 0.6 s to the median flip
+    // and 1.7 s to the warm-up of the fresh statistics.
+    let after = turns(analyzer, talkers: [-20, 0, 20], offset: 150, rounds: 30, measure: 10, seed: &seed)
+    let x = after.map { $0?.position[0] ?? .nan }
+    #expect(analyzer.delayJumps == 1)
+    #expect(x[0] < -0.7 && abs(x[1]) < 0.3 && x[2] > 0.7, "positions after the jump \(x)")
+    #expect(analyzer.layout == .spaced, "a link delay is not a different kind of microphone")
+}
+
+@Test func withoutJumpDetectionPositionsStayWrongForMinutes() throws {
+    // Control for the test above: the two-minute statistics window alone does not recover in seconds.
+    var config = StereoCueConfig()
+    config.delayJumpWindowFrames = 0
+    var seed: UInt64 = 1
+    let analyzer = try StereoCueAnalyzer(config: config)
+    _ = turns(analyzer, talkers: [-20, 0, 20], offset: 0, rounds: 100, measure: 10, seed: &seed)
+    let after = turns(analyzer, talkers: [-20, 0, 20], offset: 150, rounds: 30, measure: 10, seed: &seed)
+    let x = after.map { $0?.position[0] ?? .nan }
+    #expect(analyzer.delayJumps == 0)
+    #expect(!(x[0] < -0.7 && abs(x[1]) < 0.3 && x[2] > 0.7), "positions \(x)")
+}
+
+@Test func newTalkerAtTheEdgeIsNotAJump() throws {
+    // Someone at the far end of a 20 cm pair speaks for the first time after a quiet start.
+    var seed: UInt64 = 1
+    let analyzer = try StereoCueAnalyzer()
+    _ = turns(analyzer, talkers: [-10, 0, 10], offset: 0, rounds: 100, measure: 10, seed: &seed)
+    _ = turns(analyzer, talkers: [25], offset: 0, rounds: 60, measure: 10, seed: &seed)
+    #expect(analyzer.delayJumps == 0)
+}
+
+@Test func reportedPositionPutsChannelBOnTheRight() throws {
+    // Delay −20: the talker reaches channel b first, i.e. sits on the right-hand side.
+    let analyzer = try StereoCueAnalyzer()
+    let cues = runMeeting(analyzer, talkers: [(-20, 1), (20, 1)])
+    let right = analyzer.reportedPosition(of: cues[0]!), left = analyzer.reportedPosition(of: cues[1]!)
+    #expect(right.count == 3 && left.count == 3)
+    #expect(right[0] > 0.7 && left[0] < -0.7, "\(right) / \(left)")
+}
+
+@Test func lateralUsesTheLevelAxisForCoincidentPairs() throws {
+    // XY pair: time difference is zero, so left-right must come from the level difference.
+    let analyzer = try StereoCueAnalyzer()
+    let cues = runMeeting(analyzer, talkers: [(0, 2), (0, 0.5)])
+    #expect(analyzer.layout == .coincident)
+    let louderOnB = analyzer.reportedPosition(of: cues[0]!)[0]
+    let louderOnA = analyzer.reportedPosition(of: cues[1]!)[0]
+    #expect(louderOnB > 0.7 && louderOnA < -0.7, "\(louderOnB) / \(louderOnA)")
+}

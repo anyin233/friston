@@ -99,3 +99,28 @@ private let flexDevice = AudioInputInfo(uid: "flex", name: "reSpeaker Flex", cha
     let x = frames.map { analyzer.segmentCue($0)!.position[0] }
     #expect(x[0] < -0.5 && abs(x[1]) < 0.3 && x[2] > 0.5, "positions \(x)")
 }
+
+@Test func flipSwapsThePairAndTypedSpacingOnlyFillsAGap() throws {
+    let xreal = AudioInputInfo(uid: "usb", name: "XREAL One Pro", channels: 2, sampleRate: 48_000, isVirtual: false)
+    let plain = try #require(try SpatialArrayProfile.resolve(for: xreal))
+    #expect(plain.adjusted(flip: false, spacingCm: nil) == plain)
+    let user = plain.adjusted(flip: true, spacingCm: 14)
+    #expect(user.channelA == 1 && user.channelB == 0)
+    #expect(user.spacingMeters == 0.14)
+    #expect(plain.adjusted(flip: false, spacingCm: 0).spacingMeters == nil, "0 means unknown")
+    // The ReSpeaker firmware fixes its aperture exactly; a typed value must not override it.
+    let flex = try #require(try SpatialArrayProfile.resolve(for: flexDevice, preset: .respeakerFlexLinear6ch))
+    #expect(flex.adjusted(flip: false, spacingCm: 30).spacingMeters == 0.0999)
+}
+
+@Test func azimuthIsPositiveTowardsChannelBAndNeedsSpacing() throws {
+    let xreal = AudioInputInfo(uid: "usb", name: "XREAL One Pro", channels: 2, sampleRate: 48_000, isVirtual: false)
+    let plain = try #require(try SpatialArrayProfile.resolve(for: xreal))
+    #expect(plain.azimuthDeg(delaySamples: 10) == nil)
+    let spaced = plain.adjusted(flip: false, spacingCm: 20)
+    // Sound reaching b first gives a negative GCC-PHAT delay; b is the right-hand channel.
+    // 14 samples at 48 kHz over 20 cm ≈ asin(0.5) = 30°.
+    let right = try #require(spaced.azimuthDeg(delaySamples: -14))
+    #expect(abs(right - 30) < 0.5, "\(right)")
+    #expect(try #require(spaced.azimuthDeg(delaySamples: 14)) < 0)
+}

@@ -23,12 +23,17 @@ public struct CapturePreset: Codable, Sendable, Equatable {
     public var outputDirectory: String?
     /// Enrolled voiceprints for live speaker naming; samples from another embedding model are ignored.
     public var voiceprints: [VoiceprintSample]?
+    /// Mirror direction cues (the mic's first channel is on the right).
+    public var spatialFlip: Bool
+    /// Distance between the two spatial mics in centimetres; enables `azimuthDeg`. `nil` = unknown.
+    public var spatialSpacingCm: Double?
 
     /// Creates a preset.
     /// - Parameters: see the stored properties; everything is optional and audio is off by default.
     public init(title: String? = nil, windowID: UInt32? = nil, displayID: UInt32? = nil, microphoneUID: String? = nil,
                 systemAudio: Bool = false, captionLanguage: String? = nil, fps: Int? = nil,
-                outputDirectory: String? = nil, voiceprints: [VoiceprintSample]? = nil) {
+                outputDirectory: String? = nil, voiceprints: [VoiceprintSample]? = nil,
+                spatialFlip: Bool = false, spatialSpacingCm: Double? = nil) {
         self.title = title
         self.windowID = windowID
         self.displayID = displayID
@@ -38,6 +43,8 @@ public struct CapturePreset: Codable, Sendable, Equatable {
         self.fps = fps
         self.outputDirectory = outputDirectory
         self.voiceprints = voiceprints
+        self.spatialFlip = spatialFlip
+        self.spatialSpacingCm = spatialSpacingCm
     }
 
     /// `microphoneUID` value meaning "the system default input", for apps that want the mic
@@ -47,9 +54,10 @@ public struct CapturePreset: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case title, windowID, displayID, microphoneUID, systemAudio, captionLanguage, fps, outputDirectory, voiceprints
+        case spatialFlip, spatialSpacingCm
     }
 
-    /// Decodes a preset, treating a missing `systemAudio` as `false`.
+    /// Decodes a preset, treating a missing `systemAudio` or `spatialFlip` as `false`.
     /// - Parameter decoder: Decoder positioned at the params object.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -62,6 +70,8 @@ public struct CapturePreset: Codable, Sendable, Equatable {
         fps = try c.decodeIfPresent(Int.self, forKey: .fps)
         outputDirectory = try c.decodeIfPresent(String.self, forKey: .outputDirectory)
         voiceprints = try c.decodeIfPresent([VoiceprintSample].self, forKey: .voiceprints)
+        spatialFlip = try c.decodeIfPresent(Bool.self, forKey: .spatialFlip) ?? false
+        spatialSpacingCm = try c.decodeIfPresent(Double.self, forKey: .spatialSpacingCm)
     }
 }
 

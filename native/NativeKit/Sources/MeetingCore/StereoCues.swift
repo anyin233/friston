@@ -73,15 +73,24 @@ public struct StereoCueConfig: Sendable, Equatable {
     public var warmupFrames: Int = 40
     /// Statistics window, in confident frames (≈ 2 min of speech at 43 ms per frame).
     public var historyFrames: Int = 3000
-    /// 95th-percentile |delay| below this means coincident capsules.
+    /// Delay spread (half of p95 − p5) below this means coincident capsules.
     public var coincidentMaxDelaySeconds: Float = 1e-4
-    /// 95th-percentile |delay| above this means mics placed far apart.
+    /// Delay spread (half of p95 − p5) above this means mics placed far apart.
     public var spacedMaxDelaySeconds: Float = 1.5e-3
     /// Level-difference spread (p95 − p5) needed to call a zero-delay pair coincident.
     public var minLevelSpreadDb: Float = 3
     /// Floors for the normalisation half-ranges, so near-constant axes are not blown up into noise.
     public var minDelayHalfRangeSamples: Float = 2
     public var minLevelHalfRangeDb: Float = 1.5
+    /// Recent confident frames compared against the long window to spot a link-delay jump
+    /// (≈ 1 s of speech); 0 disables jump detection.
+    public var delayJumpWindowFrames: Int = 24
+    /// Smallest shift treated as a jump. Above the TDOA of any bracket or glasses pair (20 cm ≈
+    /// 0.58 ms), below the several-millisecond re-buffering of a wireless relink.
+    public var minDelayJumpSeconds: Float = 7.5e-4
+    /// Consecutive voiced frames without a confident peak before a narrowed search window is
+    /// widened again: after a large jump the true peak lies outside it.
+    public var lostFramesBeforeWidening: Int = 24
 
     public init() {}
 }
@@ -99,6 +108,8 @@ public final class StereoCueAnalyzer {
     public private(set) var layout: StereoLayout = .undetermined
     /// GCC-PHAT search half-width in samples; narrows to the observed range once classified.
     public private(set) var searchLagSamples: Int
+    /// Inter-channel delay jumps detected so far (each one restarted the statistics).
+    public private(set) var delayJumps = 0
 
     private let gcc: GCCPHAT
     private let initialSearchLag: Int
@@ -106,6 +117,10 @@ public final class StereoCueAnalyzer {
     private var levels: [Float] = []
     private var duplicates: [Bool] = []
     private var sinceClassify = 0
+    /// Voiced frames in a row that produced no confident peak.
+    private var lostFrames = 0
+    /// Whether ``delayRange`` has been learned from data (jump detection needs a reference).
+    private var rangeLearned = false
     private var delayRange: (mid: Float, half: Float)
     private var levelRange: (mid: Float, half: Float)
 
@@ -137,6 +152,7 @@ public final class StereoCueAnalyzer {
         guard ea > floor, eb > floor else { return nil }
 
         let est = gcc.estimate(a, b, maxLag: searchLagSamples)
+        trackLostPeak(confident: est.confidence >= config.minConfidence)
         let cue = StereoFrameCue(
             delaySamples: est.delaySamples,
             levelDiffDb: 10 * log10(ea / eb),
@@ -172,6 +188,29 @@ public final class StereoCueAnalyzer {
         return SpatialCue(position: position, confidence: meanConf * Float(cues.count) / Float(frames.count))
     }
 
+    /// Collapses a cue to one left-right coordinate, using the axes the current layout trusts.
+    ///
+    /// A coincident pair carries direction only in the level difference and a spaced pair only
+    /// in the time difference, so neither axis alone works as "left/right" for every mic.
+    /// - Parameter cue: A 2-D cue from ``segmentCue(_:)`` or ``position(of:)``.
+    /// - Returns: About −1…1 in the analyzer's sign (positive: towards channel a).
+    public func lateral(of cue: SpatialCue) -> Float {
+        let (wt, wl) = axisWeights
+        guard cue.position.count == 2, wt + wl > 0 else { return cue.position.first ?? 0 }
+        return (cue.position[0] + cue.position[1]) / (wt + wl)
+    }
+
+    /// The `spatial/cue` coordinates of a segment cue: `[left-right, time, level]`, mirrored so
+    /// negative is channel a (the first, conventionally left channel) and positive channel b.
+    ///
+    /// The analyzer's own sign follows GCC-PHAT (positive: sound reached a first), which reads
+    /// backwards on a left-to-right screen axis.
+    /// - Parameter cue: A 2-D cue from ``segmentCue(_:)``.
+    /// - Returns: Three coordinates, each about −1…1.
+    public func reportedPosition(of cue: SpatialCue) -> [Float] {
+        ([lateral(of: cue)] + cue.position).map { -$0 }
+    }
+
     /// How much each axis counts for the current layout: (time, level).
     /// In a closely spaced pair the level difference is mostly noise; in a coincident pair the
     /// time difference is. Until the layout is known, lean on time but keep some level evidence.
@@ -195,10 +234,58 @@ public final class StereoCueAnalyzer {
             delays.removeFirst(); levels.removeFirst(); duplicates.removeFirst()
         }
         sinceClassify += 1
+        if detectDelayJump() { return }
         // Classify every frame while warming up, then periodically: sorting the history is not free.
-        if delays.count >= config.warmupFrames && (layout == .undetermined || sinceClassify >= 50) {
+        // A short history (start, or just after a jump) is re-read more often so it settles quickly.
+        let short = delays.count < 4 * config.warmupFrames
+        if delays.count >= config.warmupFrames
+            && (layout == .undetermined || sinceClassify >= 50 || (short && sinceClassify >= 10)) {
             classify()
         }
+    }
+
+    /// Widens a narrowed search window when voiced frames stop yielding a peak.
+    ///
+    /// After a link-delay jump larger than the narrowed window, every frame's true peak lies
+    /// outside it, nothing confident is recorded and the statistics could never see the jump.
+    /// - Parameter confident: Whether this voiced frame's peak passed `minConfidence`.
+    private func trackLostPeak(confident: Bool) {
+        guard !confident else { lostFrames = 0; return }
+        lostFrames += 1
+        if lostFrames >= config.lostFramesBeforeWidening && searchLagSamples < initialSearchLag {
+            searchLagSamples = initialSearchLag
+            lostFrames = 0
+        }
+    }
+
+    /// Restarts the statistics when the recent delays sit persistently far outside the learned range.
+    ///
+    /// A wireless transmitter that re-pairs shifts every talker by the same amount at once. The
+    /// long window would need ~2 minutes of speech to forget the old offset; a talker who is
+    /// merely new stays within about one range width of the others, a relink lands far beyond.
+    /// The recent frames seed the new history and the old half-range is kept, so positions are
+    /// usable again after a couple of seconds instead of collapsing to noise.
+    /// - Returns: `true` when a jump was detected and the history was replaced.
+    private func detectDelayJump() -> Bool {
+        let window = config.delayJumpWindowFrames
+        guard window > 0, rangeLearned, delays.count >= max(window, config.warmupFrames) else { return false }
+        let recent = Array(delays.suffix(window))
+        let median = percentile(recent, 0.5)
+        let minJump = config.minDelayJumpSeconds * config.sampleRate
+        guard abs(median - delayRange.mid) > delayRange.half + max(delayRange.half, minJump) else { return false }
+        delayJumps += 1
+        // The window straddles the jump; frames from before it would pin the 5th percentile to
+        // the old offset for as long as they stay in the history.
+        let start = delays.count - window
+        let keep = (start..<delays.count).filter { abs(delays[$0] - median) < abs(delays[$0] - delayRange.mid) }
+        delays = keep.map { delays[$0] }
+        levels = keep.map { levels[$0] }
+        duplicates = keep.map { duplicates[$0] }
+        // Centre on the recent talkers until the next classification measures the new spread.
+        delayRange = (median, delayRange.half)
+        rangeLearned = false
+        sinceClassify = 0
+        return true
     }
 
     private func classify() {
@@ -212,8 +299,11 @@ public final class StereoCueAnalyzer {
         let (l5, l95) = (percentile(levels, 0.05), percentile(levels, 0.95))
         delayRange = ((d5 + d95) / 2, max((d95 - d5) / 2, config.minDelayHalfRangeSamples))
         levelRange = ((l5 + l95) / 2, max((l95 - l5) / 2, config.minLevelHalfRangeDb))
+        rangeLearned = true
 
-        let maxDelay = percentile(delays.map(abs), 0.95) / config.sampleRate
+        // Spread around the centre, not |delay|: a constant link offset between the channels
+        // (two wireless transmitters) must not make a bracket pair look like mics across a table.
+        let maxDelay = (d95 - d5) / 2 / config.sampleRate
         if maxDelay > config.spacedMaxDelaySeconds {
             layout = .distributed
         } else if maxDelay < config.coincidentMaxDelaySeconds {

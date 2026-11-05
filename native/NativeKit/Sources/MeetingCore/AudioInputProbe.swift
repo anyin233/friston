@@ -14,6 +14,17 @@ public struct AudioInputInfo: Codable, Sendable, Equatable {
     /// Virtual loopback devices often report 2 channels but carry mixed app audio, not an array.
     public var supportsSpatialCues: Bool { channels >= 2 && !isVirtual }
 
+    /// Creates a device description; the engine also uses it for files that stand in for a
+    /// device (`caption/simulateFile`).
+    /// - Parameters: see the stored properties.
+    public init(uid: String, name: String, channels: Int, sampleRate: Double, isVirtual: Bool) {
+        self.uid = uid
+        self.name = name
+        self.channels = channels
+        self.sampleRate = sampleRate
+        self.isVirtual = isVirtual
+    }
+
     /// Classifies a Core Audio transport type.
     /// - Parameter transport: `kAudioDevicePropertyTransportType` value.
     /// - Returns: `true` for virtual and aggregate devices.

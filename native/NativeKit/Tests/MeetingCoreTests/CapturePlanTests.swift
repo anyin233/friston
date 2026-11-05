@@ -8,9 +8,10 @@ private let builtIn = AudioInputInfo(uid: "BuiltInMicrophoneDevice", name: "MacB
 
 @Test func presetDecodesTheWireShape() throws {
     // Same JSON as the Rust round-trip test in crates/mm-core/src/capture.rs.
-    let json = #"{"title":"周会","windowID":4242,"microphoneUID":"usb","systemAudio":true,"captionLanguage":"zh","fps":15}"#
+    let json = #"{"title":"周会","windowID":4242,"microphoneUID":"usb","systemAudio":true,"captionLanguage":"zh","fps":15,"spatialFlip":true,"spatialSpacingCm":14.5}"#
     let preset = try JSONDecoder().decode(CapturePreset.self, from: Data(json.utf8))
     #expect(preset.windowID == 4242)
+    #expect(preset.spatialFlip && preset.spatialSpacingCm == 14.5)
     #expect(preset.displayID == nil)
     #expect(preset.microphoneUID == "usb")
     #expect(preset.systemAudio)
@@ -22,6 +23,7 @@ private let builtIn = AudioInputInfo(uid: "BuiltInMicrophoneDevice", name: "MacB
     #expect(!preset.systemAudio)
     #expect(preset.microphoneUID == nil)
     #expect(preset.fps == nil)
+    #expect(!preset.spatialFlip && preset.spatialSpacingCm == nil)
 }
 
 @Test func validationRejectsEmptyAndAmbiguousPresets() {

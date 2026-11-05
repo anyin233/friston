@@ -3,7 +3,7 @@ import Foundation
 /// Direction evidence attached to a final caption. Mirrors `mm_core::SpatialCue`, whose
 /// serde field names are snake_case.
 public struct CaptionSpatialCue: Codable, Sendable, Equatable {
-    /// Calibrated azimuth in degrees; `nil` because live cues are geometry-free.
+    /// Azimuth in degrees, positive to the right; `nil` unless the mic spacing is known.
     public var azimuthDeg: Float?
     /// Median inter-channel delay over the utterance, in samples at the mic rate.
     public var tdoaSamples: Float
@@ -74,6 +74,43 @@ public struct CaptionFinalEvent: Codable, Sendable, Equatable {
         self.language = language
         self.speaker = speaker
         self.spatial = spatial
+    }
+}
+
+/// `spatial/cue` payload: where one final utterance came from, sent right after its `caption/final`.
+///
+/// Wire keys are camelCase and must match `mm_core::SpatialCueEvent`. Positions are relative to
+/// this meeting only (see ``StereoCueAnalyzer``) and use the screen convention: negative is the
+/// side of the pair's first channel (left), positive the second (right).
+public struct SpatialCueEvent: Codable, Sendable, Equatable {
+    public var sessionId: String
+    public var utteranceId: Int
+    public var origin: AudioOrigin
+    public var startMs: Int
+    public var endMs: Int
+    /// `[left-right, time difference, level difference]`, each about −1…1; see
+    /// ``StereoCueAnalyzer/reportedPosition(of:)``.
+    public var position: [Float]
+    /// 0…1 reliability.
+    public var confidence: Float
+    /// Degrees from straight ahead, positive to the right; only when the mic spacing is known.
+    public var azimuthDeg: Float?
+    /// The speaker of the matching `caption/final`.
+    public var speaker: SpeakerLabel
+
+    /// Creates the payload.
+    /// - Parameters: see the stored properties.
+    public init(sessionId: String, utteranceId: Int, origin: AudioOrigin, startMs: Int, endMs: Int,
+                position: [Float], confidence: Float, azimuthDeg: Float?, speaker: SpeakerLabel) {
+        self.sessionId = sessionId
+        self.utteranceId = utteranceId
+        self.origin = origin
+        self.startMs = startMs
+        self.endMs = endMs
+        self.position = position
+        self.confidence = confidence
+        self.azimuthDeg = azimuthDeg
+        self.speaker = speaker
     }
 }
 

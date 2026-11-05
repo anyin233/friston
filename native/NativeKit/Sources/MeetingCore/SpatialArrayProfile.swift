@@ -69,6 +69,31 @@ public struct SpatialArrayProfile: Sendable, Equatable {
         }
     }
 
+    /// Applies the user's microphone settings.
+    ///
+    /// Flipping swaps the two channels, which mirrors every cue (time and level difference
+    /// change sign together) without the analyzer or fusion knowing. A spacing the hardware
+    /// preset already fixes is kept: the firmware layout is exact, a typed value is not.
+    /// - Parameters:
+    ///   - flip: Swap left and right.
+    ///   - spacingCm: Distance between the two mics in centimetres; `nil` or ≤ 0 for unknown.
+    /// - Returns: The adjusted profile.
+    public func adjusted(flip: Bool, spacingCm: Double?) -> SpatialArrayProfile {
+        var p = self
+        if flip { swap(&p.channelA, &p.channelB) }
+        if p.spacingMeters == nil, let cm = spacingCm, cm > 0, cm.isFinite { p.spacingMeters = Float(cm / 100) }
+        return p
+    }
+
+    /// Absolute direction of a delay between the pair, when the spacing is known.
+    /// - Parameter delaySamples: GCC-PHAT delay of channel b relative to a, at the analyzer rate.
+    /// - Returns: Degrees from straight ahead, positive towards channel b (right, matching
+    ///   ``StereoCueAnalyzer/reportedPosition(of:)``), or `nil` without a spacing.
+    public func azimuthDeg(delaySamples: Float) -> Float? {
+        GCCPHAT.azimuth(delaySamples: delaySamples, sampleRate: analyzerConfig.sampleRate,
+                        spacingMeters: spacingMeters, speedOfSound: analyzerConfig.speedOfSound).map { -$0 }
+    }
+
     /// Splits the chosen pair out of an interleaved capture buffer.
     /// - Parameters:
     ///   - samples: Frame-interleaved samples (`channels` values per frame).

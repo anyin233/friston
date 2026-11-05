@@ -143,6 +143,20 @@ private func json<T: Encodable>(_ value: T) throws -> [String: Any] {
     #expect((relabel["to"] as? [String: Any])?["person_id"] as? String == "p")
 }
 
+@Test func spatialCueEventUsesCamelCaseAndOmitsUnknownAzimuth() throws {
+    // Same JSON keys as `spatial_cue_decodes_the_engine_shape` in crates/mm-core/src/live.rs.
+    let event = try json(SpatialCueEvent(
+        sessionId: "s", utteranceId: 7, origin: .microphone, startMs: 1200, endMs: 2500,
+        position: [-0.8, -0.75, 0.1], confidence: 0.6, azimuthDeg: nil, speaker: .cluster(index: 1)))
+    #expect(Set(event.keys) == ["sessionId", "utteranceId", "origin", "startMs", "endMs", "position",
+                                "confidence", "speaker"])
+    #expect((event["position"] as? [Double])?.count == 3)
+    let withAzimuth = try json(SpatialCueEvent(
+        sessionId: "s", utteranceId: 7, origin: .microphone, startMs: 0, endMs: 1, position: [0.5],
+        confidence: 1, azimuthDeg: 30, speaker: .unknown))
+    #expect(withAzimuth["azimuthDeg"] as? Double == 30)
+}
+
 @Test func millisecondsFromSamples() {
     #expect(CaptionClock(sampleRate: 16_000, offsetMs: 250).ms(atSample: 16_000) == 1250)
 }

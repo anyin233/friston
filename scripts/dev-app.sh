@@ -23,6 +23,8 @@ target_dir() {
 }
 
 APP_PATH="$(target_dir)/debug/MeetingMasterDev.app"
+# shellcheck source=lib/bundle.sh
+source "$REPO_ROOT/scripts/lib/bundle.sh"
 
 # build: compile the GUI binary and wrap it into a stable, ad-hoc signed .app bundle.
 build() {
@@ -31,23 +33,9 @@ build() {
   bin="$(target_dir)/debug/$BIN_NAME"
   [[ -x "$bin" ]] || { echo "error: expected binary at $bin after build" >&2; exit 1; }
 
-  mkdir -p "$APP_PATH/Contents/MacOS"
-  cp "$bin" "$APP_PATH/Contents/MacOS/$BIN_NAME"
-  cat >"$APP_PATH/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleExecutable</key><string>$BIN_NAME</string>
-  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-  <key>CFBundleName</key><string>$APP_NAME</string>
-  <key>CFBundleDisplayName</key><string>$APP_NAME</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-</dict></plist>
-PLIST
+  write_bundle "$APP_PATH" "$bin" "$BUNDLE_ID" "$APP_NAME" "${MM_ENGINES_DIR:-$REPO_ROOT/target/engines/Debug}"
   # Ad-hoc signature so macOS treats the bundle as a coherent app (TCC/AX identity).
-  codesign --force --sign - "$APP_PATH" >/dev/null
+  sign_bundle "$APP_PATH"
   echo "$APP_PATH"
 }
 

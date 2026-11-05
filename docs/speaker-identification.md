@@ -67,3 +67,15 @@
 ## 会后精修
 
 会议结束后，用 Qwen3-ASR 1.7B、ForcedAligner 和离线分离（Pyannote 或 Sortformer）对整段录音重算一遍，再全局重新聚类，修正实时阶段的误判。重叠发言段落会标出来，供用户复核。
+
+## 真实会议评测（AMI ES2004a，2026-11-05）
+
+用公开的 AMI 会议语料 ES2004a（混合声道，17.5 分钟，4 位真实说话人，CC BY 4.0）和 pyannote/AMI-diarization-setup 的 RTTM 标注，在只有一人说话的 100 ms 帧上统计说话人混淆率。复跑：`scripts/eval-diarization.py <mm-meetingd> <wav> <rttm> {file|live}`。
+
+| 路径 | 识别出的说话人 | 混淆率 |
+| --- | --- | --- |
+| 会后（`transcribe/file`，Pyannote 默认阈值） | 4 | 1.6% |
+| 实时（Sortformer + WeSpeaker + 融合），调参前 | 11 + 未识别 | 3.2%（多对一） |
+| 实时，小簇合并门槛 0.35（现默认） | 6 + 未识别（多出的 2 个各约 1–3 秒） | 4.6%（一对一） |
+
+结论：Pyannote 默认阈值对真人有效，不需要改；合成语音（不同 TTS 女声余弦约 0.61）会被合并，但那是合成声音彼此过于相似，不代表真人。实时路径的碎片簇来自单句音色偏离，现在由稳定说话人的下一句以 0.35 的门槛吸收（`SpeakerFusionConfig.smallMergeThreshold`）。

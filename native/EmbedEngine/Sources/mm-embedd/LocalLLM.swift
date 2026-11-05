@@ -78,17 +78,23 @@ actor LocalLLM {
             if !system.isEmpty { messages.append(.system(system)) }
             messages.append(.user(prompt))
             let prepared = try await context.processor.prepare(input: UserInput(chat: messages))
+            // Small models can loop on JSON-legal whitespace forever; penalising whitespace-only
+            // tokens and nudging toward closing tokens near the budget (as MLXFoundationModels
+            // does) keeps the object compact and guarantees it closes.
+            let (whitespaceBias, whitespaceIDs) = WhitespaceTokenBias.compute(tokenizer: tokenizer)
+            let closingBias = ClosingTokenBias.compute(tokenizer: tokenizer, eosTokenId: tokenizer.eosTokenId)
             var output = ""
             do {
                 try GuidedGenerationLoop.run(
                     input: prepared, context: context, constraint: constraint,
-                    maxTokens: maxTokens, vocabSize: grammarTokenizer.vocabSize
+                    maxTokens: maxTokens, vocabSize: grammarTokenizer.vocabSize,
+                    closingBias: closingBias, whitespaceBias: whitespaceBias, whitespaceTokenIDs: whitespaceIDs
                 ) { delta in
                     output += delta
                     return true
                 }
             } catch {
-                throw RPCError(code: -32000, message: "guided generation failed after \(output.count) chars: \(error)")
+                throw RPCError(code: -32000, message: "guided generation failed after \(output.count) chars (\(error)); tail: \(String(output.suffix(300)))")
             }
             return output
         }

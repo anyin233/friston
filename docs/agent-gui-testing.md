@@ -72,3 +72,19 @@ approved / app not running) · `3` harness error (codex missing, timeout, malfor
 - macOS only; the app must be on screen (Computer Use operates the real window).
 - Each run costs a Codex model session (~30k tokens for a trivial check, ~1 min).
 - Codex runs `-s read-only` and is told to touch only the dev app; it cannot edit the repo.
+
+## 隔离数据与系统权限（2026-11-05 实测）
+
+- Codex Computer Use 有时会结束已运行的实例并自己重新启动 App；它启动的实例不会继承 `open --env` 设置的环境变量，于是会用真实的数据目录并自动发现你的 Obsidian 库。测试时请用会话级环境变量，测完立即撤销：
+
+  ```bash
+  launchctl setenv MM_DATA_DIR /path/to/scratch/data
+  ```
+
+  ```bash
+  launchctl unsetenv MM_DATA_DIR
+  ```
+
+- `Computer Use server error -10005: noWindowsAvailable` 是间歇性的：先 `osascript -e 'tell application id "dev.meetingmaster.app.dev" to activate'`，确认只有一个实例在运行，再重试。
+- 开发包是 ad-hoc 签名，每次 `scripts/dev-app.sh build` 都会改变签名，系统会把它当成新 App：麦克风、屏幕与系统录音的授权需要在重建之后重新授予，授予之后不要再重建。
+- 从终端或 Claude 启动的进程，权限算在启动它的 App（终端、Claude）头上，而不是 Meeting Master Dev。

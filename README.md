@@ -59,6 +59,6 @@ scripts/package-app.sh
 ## 已知限制
 
 - 没有屏幕录制权限时，开始记录会自动降级为只录麦克风，并提示去系统设置里授权；授权后才会录窗口和系统声音。
-- 系统声音这一路的“采集”本身需要屏幕录制权限，自动化测试环境里没有；其后的实时字幕管线已用 `caption/simulateFile`（`origin: system`）验证。
+- 系统声音的真实采集需要屏幕录制权限，本机未授权，所以尚未实测；采集之后的实时字幕管线已用 `caption/simulateFile`（`origin: system`）验证。
 - 方位识别需要 ≥2 声道的外接麦克风（见 [说话人识别](docs/speaker-identification.md)）。
 - 说话人分离已用真实会议语料（AMI）评测并调参，结果见 [说话人识别](docs/speaker-identification.md)。

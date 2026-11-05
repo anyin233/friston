@@ -84,7 +84,8 @@
 | 项目 | 结果 | 复跑 |
 | --- | --- | --- |
 | 实时字幕中文准确率（Qwen3-ASR 0.6B 4bit，合成语音 58 秒、8 句） | 字错误率 2.4% | 测试脚本见会话记录：`caption/simulateFile` 以实时速度回放，与参考文本按字比对 |
-| 定稿字幕延迟（从一句话结束到字幕定稿） | 中位数 3.2 秒，p90 4.0 秒；其中约 1 秒是等 Sortformer 确认说话人 | 同上 |
+| 定稿字幕延迟（从一句话结束到字幕定稿） | 中位数约 3.6 秒，p90 约 4.9 秒（多次运行在 3.2–3.7 秒间波动）；其中约 1 秒是等 Sortformer 确认说话人 | 同上 |
+| 第一条易变字幕（从真实开口算起） | 中位数 2.5 秒（第一条在说满 0.5 秒时就解码，之前 3.1 秒） | 同上 |
 | 会后精转写速度（Qwen3-ASR 1.7B 8bit） | 约 0.2–0.3 倍实时（50 秒录音 14–15 秒） | `transcribe/file` |
 | 说话人分离 | 见 [speaker-identification.md](speaker-identification.md) 的 AMI 评测 | `scripts/eval-diarization.py` |
 | 内存：`mm-meetingd` 实时字幕模型（0.6B + VAD + WeSpeaker + Sortformer） | 约 1.0 GB | `footprint` |

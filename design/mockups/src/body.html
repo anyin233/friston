@@ -1,0 +1,598 @@
+<body>
+<!--ICON_SPRITE-->
+
+<div class="proto" role="toolbar" aria-label="原型导航">
+  <strong>Meeting Master 界面原型 v0.1</strong>
+  <button data-go="today">今天</button>
+  <button data-go="schedule">日程</button>
+  <button data-go="live">会议中</button>
+  <button data-go="library">纪要库</button>
+  <button data-go="minutes">纪要详情</button>
+  <button data-go="people">说话人</button>
+  <button data-go="settings">设置</button>
+  <span class="spacer"></span>
+  <label><input type="checkbox" id="annoToggle"> 显示 GPUI 组件映射</label>
+</div>
+
+<div class="desk">
+<div class="scaler" id="scaler">
+<div class="window" id="win" data-recording="false">
+
+  <header class="titlebar">
+    <div class="lights"><span></span><span></span><span></span><svg class="i"><use href="#i-panel-left"/></svg></div>
+    <div class="cmd"><svg class="i sm"><use href="#i-search"/></svg>搜索会议、纪要、人物，或问一个问题<kbd>⌘K</kbd></div>
+    <div class="tb-right">
+      <span class="rec num" id="recTimer">录制中 00:41:52</span>
+      <span class="tb-status"><span class="dot"></span>索引最新</span>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="sidebar" aria-label="主导航">
+      <div class="nav-group">工作台</div>
+      <button class="nav-item" data-go="today"><svg class="i"><use href="#i-layout-dashboard"/></svg>今天</button>
+      <button class="nav-item" data-go="schedule"><svg class="i"><use href="#i-calendar"/></svg>日程<span class="count">4</span></button>
+      <button class="nav-item" data-go="live"><svg class="i"><use href="#i-mic"/></svg>会议中<span class="live-badge" id="liveBadge" hidden></span></button>
+      <button class="nav-item" data-go="library"><svg class="i"><use href="#i-book-open"/></svg>纪要库</button>
+      <button class="nav-item" data-go="people"><svg class="i"><use href="#i-circle-user"/></svg>说话人<span class="count">2 待命名</span></button>
+      <div class="nav-group" style="margin-top:8px">最近</div>
+      <button class="nav-item" data-go="minutes" data-secondary><svg class="i"><use href="#i-file-text"/></svg>产品周会</button>
+      <button class="nav-item" data-go="minutes"><svg class="i"><use href="#i-file-text"/></svg>架构评审</button>
+      <button class="nav-item" style="margin-top:auto" data-go="settings"><svg class="i"><use href="#i-settings"/></svg>设置</button>
+      <div class="side-foot">
+        <div><span class="dot"></span>Obsidian：Work Notes</div>
+        <div><span class="dot" id="engineDot"></span><span id="engineText">字幕引擎就绪</span></div>
+        <div><span class="dot idle"></span>嵌入引擎空闲</div>
+      </div>
+    </nav>
+
+    <main>
+<!-- ============================== 今天 ============================== -->
+<section class="screen" id="s-today" data-gpui="TitleBar · Sidebar / SidebarMenu · Button(primary / outline) · Tag · Avatar · List (virtualized for long days) · Checkbox · Resizable (main | rail)">
+  <div class="today">
+    <div class="today-main">
+      <header class="page-head">
+        <h1>11月5日，星期四</h1>
+        <p class="sub">今天有 4 场会议，1 场已结束。下一场 8 分钟后开始。</p>
+      </header>
+
+      <div class="next">
+        <div class="next-top">
+          <div>
+            <div class="next-when num"><span class="soon">8 分钟后</span><span>14:00–15:00</span><span>腾讯会议</span><span class="tag">评审会模板</span></div>
+            <h2>Q3 预算评审</h2>
+          </div>
+          <div class="next-actions">
+            <button class="btn"><svg class="i sm"><use href="#i-external-link"/></svg>加入会议</button>
+            <button class="btn primary" data-go="live"><svg class="i sm"><use href="#i-mic"/></svg>开始记录</button>
+          </div>
+        </div>
+        <div class="next-people">
+          <div class="av-stack">
+            <span class="av c1" title="王伟：已录入声纹">王</span>
+            <span class="av c2" title="李娜：已录入声纹">李</span>
+            <span class="av c5" title="我：已录入声纹">我</span>
+            <span class="av pending" title="赵磊：未录入">赵</span>
+            <span class="av pending" title="Alex Chen：未录入">A</span>
+          </div>
+          <p>5 位参会者中 3 位已有声纹。<a data-go="people">为赵磊、Alex Chen 录入声纹</a>，字幕里就能直接显示他们的名字。</p>
+        </div>
+        <div class="preset">
+          <span class="preset-label">记录方式</span>
+          <span class="chip"><svg class="i sm"><use href="#i-app-window"/></svg>只录<strong>腾讯会议</strong>窗口</span>
+          <span class="chip"><svg class="i sm"><use href="#i-mic"/></svg><strong>XREAL One Pro</strong>双声道，可判断方位</span>
+          <span class="chip"><svg class="i sm"><use href="#i-volume-2"/></svg>系统声音</span>
+          <span class="chip"><svg class="i sm"><use href="#i-captions"/></svg>实时字幕，中英自动识别</span>
+          <a style="margin-left:4px">修改</a>
+        </div>
+      </div>
+
+      <h3 class="section-title">今天的日程</h3>
+      <ol class="dayline">
+        <li class="done"><time class="num">10:00</time><div class="t">产品周会</div><div class="m"><span>已结束</span><span class="tag ok">纪要已写入 Obsidian</span><a data-go="minutes">打开纪要</a></div></li>
+        <li class="upnext"><time class="num">14:00</time><div class="t">Q3 预算评审</div><div class="m"><span>腾讯会议</span><span>5 人</span></div></li>
+        <li><time class="num">16:30</time><div class="t">与李娜 1:1</div><div class="m"><span>线下，会议室 3F-B</span><span class="tag">只录音</span></div></li>
+        <li><time class="num">19:30</time><div class="t">读书会：《设计心理学》第 4 章</div><div class="m"><span>线下</span><span class="tag">不记录</span></div></li>
+      </ol>
+    </div>
+
+    <aside class="today-rail">
+      <div>
+        <h3 class="section-title">最近的纪要</h3>
+        <ul class="mlist">
+          <li data-go="minutes"><div class="t">产品周会</div><div class="m"><span class="num">今天 10:00</span><span class="tag ok">已写入 Obsidian</span></div></li>
+          <li data-go="minutes"><div class="t">架构评审：推理集群扩容</div><div class="m"><span class="num">10月28日</span><span class="tag ok">已写入 Obsidian</span></div></li>
+          <li><div class="t">客户访谈：华东区渠道</div><div class="m"><span class="num">10月27日</span><span class="tag busy">会后精转写 62%</span></div></li>
+        </ul>
+      </div>
+      <div>
+        <h3 class="section-title">我的待办</h3>
+        <ul class="todo">
+          <li><span class="check"></span><div>整理 Q3 GPU 实际用量，按团队拆分<span class="src">产品周会，周五前</span></div></li>
+          <li><span class="check"></span><div>把批量嵌入任务迁到夜间时段的方案发给 Alex<span class="src">架构评审，11月7日前</span></div></li>
+          <li><span class="check on"><svg class="i sm" style="width:11px;height:11px"><use href="#i-check"/></svg></span><div style="color:var(--ink-3);text-decoration:line-through">回复华东区渠道的报价问题<span class="src">客户访谈</span></div></li>
+        </ul>
+      </div>
+      <div class="rail-foot"><svg class="i sm"><use href="#i-refresh-cw"/></svg><span class="num">已索引 12,480 个片段，全部最新</span></div>
+    </aside>
+  </div>
+</section>
+
+<!-- ============================== 日程 ============================== -->
+<section class="screen" id="s-schedule" data-gpui="Calendar week view (custom element on gpui div + absolute positioning) · Popover · Select · DescriptionList · Input (multi-line editor) · Button">
+  <div class="sched">
+    <div class="week">
+      <div class="week-head">
+        <h2 class="h2">11月 第 45 周</h2>
+        <div class="seg"><button>日</button><button aria-pressed="true">周</button><button>月</button></div>
+        <button class="btn sm ghost"><svg class="i sm" style="transform:rotate(180deg)"><use href="#i-chevron-right"/></svg></button>
+        <button class="btn sm">今天</button>
+        <button class="btn sm ghost"><svg class="i sm"><use href="#i-chevron-right"/></svg></button>
+        <button class="btn sm"><svg class="i sm"><use href="#i-plus"/></svg>新建会议</button>
+      </div>
+      <div class="week-days num">
+        <div></div>
+        <div>周一<b>2</b></div><div>周二<b>3</b></div><div>周三<b>4</b></div><div class="today-col">周四<b>5</b></div><div>周五<b>6</b></div><div>周六<b>7</b></div><div>周日<b>8</b></div>
+      </div>
+      <div class="week-grid" id="weekGrid">
+        <div class="hours num" id="hours"></div>
+      </div>
+    </div>
+    <aside class="ev-panel">
+      <div>
+        <div class="muted num" style="font-size:12.5px">周四 11月5日 14:00–15:00</div>
+        <h2 class="h2" style="margin-top:4px">Q3 预算评审</h2>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn primary" data-go="live"><svg class="i sm"><use href="#i-mic"/></svg>加入并开始记录</button>
+        <button class="btn"><svg class="i sm"><use href="#i-link"/></svg>复制链接</button>
+      </div>
+      <dl class="kv">
+        <dt>会议链接</dt><dd><a>meeting.tencent.com/dm/7Kq2…</a></dd>
+        <dt>日历</dt><dd>工作（iCloud）</dd>
+        <dt>纪要位置</dt><dd><span class="code">Meetings/2026/2026-11-05 1400 Q3 预算评审.md</span></dd>
+      </dl>
+      <div>
+        <h3 class="section-title">参会者与声纹</h3>
+        <ul class="people-list">
+          <li><span class="av c1">王</span>王伟<span class="state tag ok">声纹 3 段</span></li>
+          <li><span class="av c2">李</span>李娜<span class="state tag ok">声纹 2 段</span></li>
+          <li><span class="av c5">我</span>我<span class="state tag ok">声纹 4 段</span></li>
+          <li><span class="av pending">赵</span>赵磊<span class="state"><a data-go="people">录入声纹</a></span></li>
+          <li><span class="av pending">A</span>Alex Chen<span class="state muted">远程，通过系统声音区分</span></li>
+        </ul>
+      </div>
+      <div class="field"><span>记录方式</span><div class="select">窗口 + 双声道麦克风 + 系统声音<svg class="i sm"><use href="#i-chevron-down"/></svg></div></div>
+      <div class="field"><span>纪要模板</span><div class="select">评审会：决定、待办、风险<svg class="i sm"><use href="#i-chevron-down"/></svg></div></div>
+      <div class="field">
+        <span>会前笔记（会议开始后接着写）</span>
+        <div class="prenote"><ul><li>Q3 GPU 实际用量 vs 预算，差多少？</li><li>批量嵌入任务能否挪到夜间？</li><li>采购截止日期</li></ul></div>
+      </div>
+    </aside>
+  </div>
+</section>
+
+<!-- ============================== 会议中 ============================== -->
+<section class="screen" id="s-live" data-gpui="Toolbar · Tag/Chip with level Meter (custom canvas) · List (virtualized captions, auto-scroll) · Input (rich-text notes editor) · custom SVG/canvas seating map · Progress bars · Separate borderless always-on-top window for the floating captions">
+  <div class="live" style="display:flex">
+    <div class="capbar">
+      <span class="chip" title="正在录制：腾讯会议「Q3 预算评审」窗口"><svg class="i sm"><use href="#i-app-window"/></svg><strong>腾讯会议</strong>窗口</span>
+      <span class="chip spatial" title="双声道，可判断说话人方位"><svg class="i sm"><use href="#i-mic"/></svg><strong>XREAL One Pro</strong><span class="meter" data-meter></span></span>
+      <span class="chip"><svg class="i sm"><use href="#i-volume-2"/></svg>系统声音<span class="meter" data-meter></span></span>
+      <span class="spacer"></span>
+      <button class="icon-btn" title="标记重点 ⌘M" aria-label="标记重点"><svg class="i"><use href="#i-flag"/></svg></button>
+      <button class="icon-btn" title="截图到笔记 ⌘⇧S" aria-label="截图到笔记"><svg class="i"><use href="#i-camera"/></svg></button>
+      <button class="btn sm" id="ovToggle" aria-pressed="true"><svg class="i sm"><use href="#i-captions"/></svg>浮窗字幕</button>
+      <button class="btn sm"><svg class="i sm"><use href="#i-pause"/></svg>暂停</button>
+      <button class="btn sm danger"><svg class="i sm"><use href="#i-square"/></svg>结束并生成纪要</button>
+    </div>
+    <div class="live-panes">
+      <div class="stagepane">
+        <header><strong>实时字幕</strong><span>中文 / English 自动识别</span><span class="spacer"></span><svg class="i sm"><use href="#i-languages"/></svg><span>不翻译</span></header>
+        <div class="captions">
+          <div class="cap c1"><div class="rail"></div><div><div class="meta"><span class="name">王伟</span><span class="score">声纹 0.84</span><span class="num">41:12</span></div><p>这季度 GPU 的实际用量比预算高了大概百分之十八，主要是推理那一块。</p></div></div>
+          <div class="cap c3"><div class="rail"></div><div><div class="meta"><span class="name">Alex Chen</span><span class="remote">远程</span><span class="num">41:20</span></div><p>Most of it is the batch embedding jobs. We can move them to off-peak hours next week.</p></div></div>
+          <div class="cap c2"><div class="rail"></div><div><div class="meta"><span class="name">李娜</span><span class="score">声纹 0.79</span><span class="num">41:31</span></div><p>那我们先按上调百分之十二来报，剩下的看 Alex 那边能不能优化掉。</p></div></div>
+          <div class="cap unknown"><div class="rail"></div><div><div class="meta"><span class="name">说话人 4</span><span class="score">右前方，第 18 次发言</span><span class="num">41:40</span></div><p>我补充一下，采购那边下周三之前要拿到最终数字。</p>
+            <div class="whois">这是谁？<button><span class="av pending" style="width:16px;height:16px;font-size:9px">赵</span>赵磊</button><button><svg class="i sm"><use href="#i-user-plus"/></svg>新建人物</button><span>命名后，本场之前的发言也会一起改名</span></div></div></div>
+          <div class="cap partial c1"><div class="rail"></div><div><div class="meta"><span class="name">王伟</span><span class="score">正在说</span><span class="num">41:47</span></div><p id="partialText">好，那就定在下周三之前，我这边先出一版</p></div></div>
+        </div>
+        <div class="stage-foot"><span>Qwen3-ASR 0.6B 流式，延迟约 0.6 秒</span><span>说话人：音色 + 方位</span></div>
+      </div>
+
+      <div class="notespane">
+        <div class="notes-tools">
+          <button class="tb">B</button><button class="tb" style="font-style:italic;font-family:Georgia">I</button><button class="tb"><svg class="i sm"><use href="#i-list-checks"/></svg></button>
+          <span class="split-v" style="height:18px;margin:0 6px"></span>
+          <button class="btn sm ghost"><svg class="i sm"><use href="#i-clock"/></svg>插入时间戳 <span class="kbd">⌘↩</span></button>
+          <button class="btn sm ghost"><svg class="i sm"><use href="#i-image"/></svg>插入截图</button>
+          <span class="spacer"></span>
+          <button class="btn sm ghost"><svg class="i sm"><use href="#i-external-link"/></svg>在 Obsidian 中打开</button>
+        </div>
+        <div class="doc">
+          <h1>Q3 预算评审</h1>
+          <div class="docmeta num"><span>11月5日 14:00</span><span>王伟、李娜、赵磊、Alex Chen、我</span></div>
+          <h2>会前</h2>
+          <ul><li>Q3 GPU 实际用量 vs 预算，差多少？</li><li>批量嵌入任务能否挪到夜间？</li></ul>
+          <h2>笔记</h2>
+          <ul>
+            <li><span class="ts c1">41:12</span>超支约 18%，主要在推理。<span class="mention c1">@王伟</span> 会后给分团队明细。</li>
+            <li><span class="ts c3">41:20</span>批量嵌入可以挪到夜间，Alex 估计能省一半。</li>
+            <li><span class="ts c2">41:31</span>先按 <b>+12%</b> 上报，剩余靠优化。</li>
+          </ul>
+          <figure class="shot">
+            <svg viewBox="0 0 420 180" width="420" height="180" role="img" aria-label="会议中的截图：GPU 用量与预算对比柱状图">
+              <rect width="420" height="180" fill="#F7F8FC"/>
+              <text x="18" y="26" font-size="12" font-weight="600" fill="#171A33" font-family="-apple-system,PingFang SC">GPU 用量 vs 预算（千卡时）</text>
+              <g font-size="10" fill="#8A8FA8" font-family="-apple-system">
+                <text x="40" y="168">7月</text><text x="140" y="168">8月</text><text x="240" y="168">9月</text><text x="330" y="168">Q4 预测</text>
+              </g>
+              <line x1="18" y1="150" x2="402" y2="150" stroke="#CFD4E2"/>
+              <g><rect x="30" y="80" width="26" height="70" fill="#CFD4E2"/><rect x="58" y="70" width="26" height="80" fill="#3640D8"/>
+                 <rect x="130" y="78" width="26" height="72" fill="#CFD4E2"/><rect x="158" y="58" width="26" height="92" fill="#3640D8"/>
+                 <rect x="230" y="76" width="26" height="74" fill="#CFD4E2"/><rect x="258" y="48" width="26" height="102" fill="#3640D8"/>
+                 <rect x="322" y="70" width="26" height="80" fill="#CFD4E2"/><rect x="350" y="52" width="26" height="98" fill="#3640D8" fill-opacity=".45"/></g>
+              <g font-size="10" font-family="-apple-system"><rect x="300" y="16" width="9" height="9" fill="#CFD4E2"/><text x="313" y="24" fill="#4A4F6E">预算</text><rect x="345" y="16" width="9" height="9" fill="#3640D8"/><text x="358" y="24" fill="#4A4F6E">实际</text></g>
+            </svg>
+            <figcaption class="num"><span>截图 41:15</span><span>来自腾讯会议窗口</span></figcaption>
+          </figure>
+          <ul>
+            <li><span class="ts">41:40</span>采购截止：<b>下周三</b>。<span class="caret"></span></li>
+          </ul>
+        </div>
+        <div class="notes-foot num">
+          <span title="Meetings/2026/2026-11-05 1400 Q3 预算评审.md"><svg class="i sm"><use href="#i-check"/></svg>已保存到 Obsidian</span>
+          <span><svg class="i sm"><use href="#i-refresh-cw"/></svg>2 秒前已更新搜索索引</span>
+          <span class="spacer" style="flex:1"></span>
+          <span class="muted">Work Notes</span>
+        </div>
+      </div>
+
+      <aside class="spacepane">
+        <section>
+          <h3>会议桌</h3>
+          <p class="hint">双声道麦克风只能分辨前方左右，前后不可分。</p>
+          <svg class="room" id="room" viewBox="0 0 280 176" role="img" aria-label="说话人方位图：王伟在左前方，李娜在右前方偏中，说话人 4 在右侧"></svg>
+          <div class="evidence" style="margin-top:6px">
+            <div><span>远程（系统声音）</span><span class="who c3">Alex Chen</span></div>
+          </div>
+        </section>
+        <section>
+          <h3 style="margin-bottom:10px">发言时长</h3>
+          <ul class="talk num">
+            <li class="c1"><span class="who c1">王伟</span><span class="bar"><i style="width:82%"></i></span><span class="pct">36%</span></li>
+            <li class="c2"><span class="who c2">李娜</span><span class="bar"><i style="width:58%"></i></span><span class="pct">25%</span></li>
+            <li class="c3"><span class="who c3">Alex Chen</span><span class="bar"><i style="width:40%"></i></span><span class="pct">18%</span></li>
+            <li class="unknown"><span class="who unknown">说话人 4</span><span class="bar"><i style="width:28%;background:var(--ink-3)"></i></span><span class="pct">12%</span></li>
+            <li class="c5"><span class="who c5">我</span><span class="bar"><i style="width:20%"></i></span><span class="pct">9%</span></li>
+          </ul>
+        </section>
+        <section>
+          <h3 style="margin-bottom:8px">识别依据</h3>
+          <div class="evidence num">
+            <div><span>声纹已匹配</span><span>3 人</span></div>
+            <div><span>方位稳定的说话人</span><span>4 个</span></div>
+            <div><span>重叠发言</span><span>2 处，会后复核</span></div>
+            <div><span>会后精转写</span><span>结束后约 3 分钟</span></div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 纪要库 ============================== -->
+<section class="screen" id="s-library" data-gpui="Input (search) · Segmented / ButtonGroup · List (virtualized results) · custom waveform / keyframe elements · Resizable (facets | results | preview) · Markdown preview">
+  <div class="lib" style="display:flex">
+    <div class="lib-search">
+      <div class="searchbox"><svg class="i lg"><use href="#i-search"/></svg><span class="q">上次讨论 GPU 扩容时白板上画的方案</span><span class="hint">文字、截图、录音、录屏一起搜</span></div>
+      <div class="lib-filters">
+        <div class="seg">
+          <button aria-pressed="true">全部</button>
+          <button><svg class="i sm"><use href="#i-file-text"/></svg>文字</button>
+          <button><svg class="i sm"><use href="#i-image"/></svg>图片</button>
+          <button><svg class="i sm"><use href="#i-audio-lines"/></svg>音频</button>
+          <button><svg class="i sm"><use href="#i-video"/></svg>视频</button>
+        </div>
+        <span class="chip"><svg class="i sm"><use href="#i-users"/></svg>任何人<svg class="i sm"><use href="#i-chevron-down"/></svg></span>
+        <span class="chip"><svg class="i sm"><use href="#i-calendar"/></svg>最近 3 个月<svg class="i sm"><use href="#i-chevron-down"/></svg></span>
+        <span class="spacer"></span>
+        <span class="muted num" style="font-size:12px">在 12,480 个片段中找到 23 条，0.08 秒</span>
+      </div>
+    </div>
+    <div class="lib-body">
+      <aside class="facets">
+        <div><h4>会议</h4><ul class="num">
+          <li><span class="check on"><svg class="i sm" style="width:11px;height:11px"><use href="#i-check"/></svg></span>架构评审<span class="n">9</span></li>
+          <li><span class="check"></span>产品周会<span class="n">6</span></li>
+          <li><span class="check"></span>Q3 预算评审<span class="n">5</span></li>
+          <li><span class="check"></span>客户访谈<span class="n">3</span></li></ul></div>
+        <div><h4>说话人</h4><ul class="num">
+          <li><span class="who c1">王伟</span><span class="n">11</span></li>
+          <li><span class="who c3">Alex Chen</span><span class="n">7</span></li>
+          <li><span class="who c2">李娜</span><span class="n">4</span></li></ul></div>
+        <div><h4>来源</h4><ul class="num">
+          <li>会议笔记<span class="n">8</span></li><li>转写<span class="n">7</span></li><li>截图与白板<span class="n">4</span></li><li>录音片段<span class="n">3</span></li><li>录屏片段<span class="n">1</span></li></ul></div>
+      </aside>
+      <div class="results">
+        <div class="res-head"><span>按相关度排序</span></div>
+        <div class="hit sel">
+          <span class="kind"><svg class="i"><use href="#i-image"/></svg></span>
+          <div>
+            <div class="src num"><b>架构评审：推理集群扩容</b><span>10月28日</span><span>白板照片 23:10</span></div>
+            <div class="thumbs"><svg id="wbThumb" width="240" height="120" viewBox="0 0 240 120"></svg></div>
+            <div class="why">画面里的文字和图形与问题相近：“A100 租赁”“夜间批处理”“扩容 2 期”</div>
+          </div>
+          <div class="score num">0.81<div class="bar"><i style="width:81%"></i></div></div>
+        </div>
+        <div class="hit">
+          <span class="kind"><svg class="i"><use href="#i-file-text"/></svg></span>
+          <div>
+            <div class="src num"><b>架构评审：推理集群扩容</b><span>转写 23:42</span><span class="who c3">Alex Chen</span></div>
+            <p>白板上这个方案的意思是，<mark>扩容分两期</mark>：第一期先<mark>租 A100</mark> 顶住推理，第二期等新机房到位再迁移。</p>
+          </div>
+          <div class="score num">0.77<div class="bar"><i style="width:77%"></i></div></div>
+        </div>
+        <div class="hit">
+          <span class="kind"><svg class="i"><use href="#i-audio-lines"/></svg></span>
+          <div>
+            <div class="src num"><b>产品周会</b><span>录音 12:40–13:10</span><span class="who c1">王伟</span></div>
+            <svg class="wave" data-wave="7" data-hl="0.30,0.62" width="440" height="34" viewBox="0 0 440 34" preserveAspectRatio="none" role="img" aria-label="录音波形，命中片段已高亮"></svg>
+            <div class="why">声音内容与问题相近；这段没有对应的文字笔记</div>
+          </div>
+          <div class="score num">0.69<div class="bar"><i style="width:69%"></i></div></div>
+        </div>
+        <div class="hit">
+          <span class="kind"><svg class="i"><use href="#i-video"/></svg></span>
+          <div>
+            <div class="src num"><b>架构评审：推理集群扩容</b><span>录屏 31:00–31:20</span><span>共享屏幕：成本模型.xlsx</span></div>
+            <div class="thumbs" id="frames"></div>
+          </div>
+          <div class="score num">0.64<div class="bar"><i style="width:64%"></i></div></div>
+        </div>
+        <div class="hit">
+          <span class="kind"><svg class="i"><use href="#i-book-open"/></svg></span>
+          <div>
+            <div class="src num"><b>Q3 预算评审</b><span>我的笔记</span><span>今天</span></div>
+            <p>批量嵌入可以挪到夜间，Alex 估计能省一半。先按 +12% 上报，剩余靠优化。</p>
+          </div>
+          <div class="score num">0.58<div class="bar"><i style="width:58%"></i></div></div>
+        </div>
+      </div>
+      <aside class="preview">
+        <div class="big"><svg id="wbBig" width="356" height="200" viewBox="0 0 240 135"></svg></div>
+        <div>
+          <div class="muted num" style="font-size:12px">10月28日 架构评审，23:10</div>
+          <h3 class="section-title" style="font-size:15px;margin-top:4px">白板：扩容 2 期方案</h3>
+          <p style="margin:0;color:var(--ink-2)">这张白板出现时，<span class="who c3">Alex Chen</span> 正在讲解分两期扩容；纪要中的决定 2 引用了这里。</p>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn primary" data-go="minutes">打开纪要</button>
+          <button class="btn"><svg class="i sm"><use href="#i-play"/></svg>从 23:10 播放</button>
+        </div>
+        <div>
+          <h3 class="section-title">同一时刻</h3>
+          <div class="cap c3" style="padding:0;grid-template-columns:3px 1fr"><div class="rail"></div><div><div class="meta" style="color:var(--ink-3)"><span class="name">Alex Chen</span><span class="num">23:08</span></div><p style="font-size:13.5px;color:var(--ink)">我在白板上画一下，第一期先租，第二期再迁。</p></div></div>
+        </div>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 纪要详情 ============================== -->
+<section class="screen" id="s-minutes" data-gpui="Breadcrumb · Tabs · Markdown (rendered minutes) · Table · custom speaker-timeline element · Button · Tag">
+  <div class="minutes" style="display:flex">
+    <div class="min-head">
+      <div class="min-crumb"><a data-go="library">纪要库</a><svg class="i sm"><use href="#i-chevron-right"/></svg><span>10月28日</span></div>
+      <div class="min-title">
+        <h2 class="h2">架构评审：推理集群扩容</h2>
+        <button class="btn"><svg class="i sm"><use href="#i-refresh-cw"/></svg>重新生成</button>
+        <button class="btn primary"><svg class="i sm"><use href="#i-external-link"/></svg>在 Obsidian 中打开</button>
+      </div>
+      <div class="min-meta num">
+        <span>10月28日 15:00</span><span>58 分钟</span>
+        <span class="av-stack"><span class="av c1">王</span><span class="av c3">A</span><span class="av c2">李</span><span class="av c4">赵</span><span class="av c5">我</span></span>
+        <span class="tag accent"><svg class="i sm"><use href="#i-bot"/></svg>由本机 ChatGPT 生成</span>
+        <span class="tag ok">已写入 Obsidian</span>
+      </div>
+      <div class="tabs" role="tablist"><button role="tab" aria-selected="true">纪要</button><button role="tab">转写</button><button role="tab">我的笔记</button><button role="tab">截图与录屏</button></div>
+    </div>
+    <div class="min-body">
+      <article class="min-doc">
+        <h3>摘要</h3>
+        <p>Q3 推理用量超出预算约 18%。会议同意分两期扩容：第一期租用 A100 应对推理高峰，第二期在新机房交付后迁移；同时把批量嵌入任务挪到夜间，以降低峰值占用。</p>
+        <h3>决定</h3>
+        <ol>
+          <li>Q4 预算按 +12% 上报，差额通过任务调度优化消化。</li>
+          <li>扩容分两期，第一期以租赁为主，不新增采购。<span class="ts c3">23:10</span></li>
+          <li>批量嵌入任务从 11 月 10 日起改为夜间执行。</li>
+        </ol>
+        <h3>待办</h3>
+        <table class="acts num">
+          <thead><tr><th style="width:96px">负责人</th><th>事项</th><th style="width:84px">截止</th><th style="width:64px">出处</th></tr></thead>
+          <tbody>
+            <tr><td><span class="who c3">Alex Chen</span></td><td>夜间批处理迁移方案与回滚预案</td><td>11月7日</td><td><span class="ts c3">24:02</span></td></tr>
+            <tr><td><span class="who c1">王伟</span></td><td>按团队拆分 Q3 GPU 实际用量</td><td>本周五</td><td><span class="ts c1">12:51</span></td></tr>
+            <tr><td><span class="who c4">赵磊</span></td><td>确认采购截止日期与租赁报价</td><td>11月4日</td><td><span class="ts c4">40:15</span></td></tr>
+          </tbody>
+        </table>
+        <h3>待定问题</h3>
+        <ul><li>新机房交付时间仍不确定，影响第二期迁移窗口。</li><li>夜间执行是否影响海外团队的白天使用？</li></ul>
+      </article>
+      <aside class="min-side">
+        <section>
+          <h3 class="section-title">谁在什么时候发言</h3>
+          <svg id="timeline" width="360" height="150" viewBox="0 0 360 150" role="img" aria-label="说话人时间线"></svg>
+          <div class="player num"><button class="play"><svg class="i sm"><use href="#i-play"/></svg></button><span>23:10 / 58:04</span><span class="spacer" style="flex:1"></span><span>1.5×</span></div>
+        </section>
+        <section>
+          <h3 class="section-title">截图与录屏</h3>
+          <div class="gallery" id="gallery"></div>
+        </section>
+        <section>
+          <h3 class="section-title">同步</h3>
+          <div class="sync-row"><span class="dot"></span>纪要写在笔记的“纪要”区块里；你在 Obsidian 里写的其他内容不会被覆盖。</div>
+        </section>
+      </aside>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 说话人 ============================== -->
+<section class="screen" id="s-people" data-gpui="List · Avatar · Table · Progress · custom waveform with range selection · Button · Alert">
+  <div class="people" style="display:flex">
+    <aside class="plist">
+      <h4>人物</h4>
+      <div class="prow sel"><span class="av c1">王</span><div><div class="n">王伟</div><div class="d num">3 段声纹，共 2 分 10 秒</div></div><span class="tag ok">已录入</span></div>
+      <div class="prow"><span class="av c2">李</span><div><div class="n">李娜</div><div class="d num">2 段声纹，共 58 秒</div></div><span class="tag ok">已录入</span></div>
+      <div class="prow"><span class="av c5">我</span><div><div class="n">我</div><div class="d num">4 段声纹</div></div><span class="tag ok">已录入</span></div>
+      <div class="prow"><span class="av pending">赵</span><div><div class="n">赵磊</div><div class="d">还没有声纹</div></div><span class="tag">待录入</span></div>
+      <div class="prow"><span class="av pending">A</span><div><div class="n">Alex Chen</div><div class="d">通常远程参会</div></div><span class="tag">待录入</span></div>
+      <h4>未命名的说话人</h4>
+      <div class="prow"><span class="av" style="--c:var(--ink-3)">4</span><div><div class="n">说话人 4</div><div class="d">Q3 预算评审，18 次发言</div></div></div>
+      <div class="prow"><span class="av" style="--c:var(--ink-3)">2</span><div><div class="n">说话人 2</div><div class="d">客户访谈，31 次发言</div></div></div>
+    </aside>
+    <div class="pdetail">
+      <div class="phead"><span class="av c1">王</span><div style="margin-right:auto"><h2 class="h2">王伟</h2><div class="muted">财务部，12 场会议中出现</div></div>
+        <button class="btn"><svg class="i sm"><use href="#i-scissors"/></svg>从录音中截取</button>
+        <button class="btn primary"><svg class="i sm"><use href="#i-mic"/></svg>录制新样本</button></div>
+
+      <div class="enroll">
+        <div class="read">
+          <h3 class="section-title">请王伟朗读下面这段话</h3>
+          <p><span class="said">今天我们复盘第三季度的预算执行情况，重点看推理集群的用量，</span>以及下个季度是否需要增加租赁。数字我会在会后发到群里，有问题随时找我。</p>
+        </div>
+        <div class="gauge num">
+          <div style="display:flex;justify-content:space-between"><span>有效语音</span><b>11.4 / 15 秒</b></div>
+          <div class="prog"><i style="width:76%"></i></div>
+          <div style="display:flex;align-items:center;gap:10px"><span class="meter" data-meter style="height:22px"></span><span class="muted">正在录音</span></div>
+          <ul class="qc">
+            <li><svg class="i sm okc"><use href="#i-check"/></svg>只有一个人在说话</li>
+            <li><svg class="i sm okc"><use href="#i-check"/></svg>信噪比 28 dB</li>
+            <li><svg class="i sm warnc"><use href="#i-circle-dot"/></svg>换一个麦克风再录一段，识别会更稳</li>
+          </ul>
+          <button class="btn danger sm" style="justify-self:start"><svg class="i sm"><use href="#i-square"/></svg>停止</button>
+        </div>
+      </div>
+
+      <div class="clip">
+        <div class="clip-head"><h3 class="section-title" style="margin:0">从录音中截取</h3><span class="muted num">产品周会，今天 10:00</span><span class="spacer"></span><span class="num">已选 12:40–13:05，25 秒</span><button class="btn sm primary">用这段作为声纹</button></div>
+        <svg id="clipWave" width="100%" height="92" viewBox="0 0 860 92" preserveAspectRatio="none" role="img" aria-label="录音波形与说话人分段，已选中一段"></svg>
+      </div>
+
+      <div>
+        <h3 class="section-title">已有声纹</h3>
+        <table class="samples num">
+          <thead><tr><th>来源</th><th>时长</th><th>麦克风</th><th>质量</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>专门录制</td><td>32 秒</td><td>MacBook Pro 麦克风</td><td><span class="tag ok">好</span></td><td><a>试听</a></td></tr>
+            <tr><td>从“架构评审”录音截取</td><td>25 秒</td><td>XREAL One Pro</td><td><span class="tag ok">好</span></td><td><a>试听</a></td></tr>
+            <tr><td>会后确认（产品周会）</td><td>1 分 13 秒</td><td>会议室麦克风</td><td><span class="tag busy">有回声</span></td><td><a>试听</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div>
+        <h3 class="section-title">这台 Mac 上的麦克风</h3>
+        <div class="probe num">
+          <div><svg class="i sm"><use href="#i-mic"/></svg><b>XREAL One Pro</b><span class="muted">2 声道，48 kHz</span><span class="spacer"></span><span class="tag ok">可判断左右方位</span></div>
+          <div><svg class="i sm"><use href="#i-mic"/></svg><b>MacBook Pro 麦克风</b><span class="muted">1 声道（系统已做波束成形）</span><span class="spacer"></span><span class="tag">仅音色识别</span></div>
+          <div><svg class="i sm"><use href="#i-mic"/></svg><b>AirPods</b><span class="muted">1 声道，24 kHz</span><span class="spacer"></span><span class="tag">仅音色识别</span></div>
+        </div>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">方位只在一场会议内有用，人会换座位，所以不会存进声纹。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 设置 ============================== -->
+<section class="screen" id="s-settings" data-gpui="Settings page (gpui-component setting module) · Radio · Switch · Select · Table · Input (secure, Keychain-backed) · Button">
+  <div class="settings" style="display:flex">
+    <nav class="snav"><a class="on">纪要生成</a><a>模型</a><a>录制与字幕</a><a>Obsidian</a><a>搜索索引</a><a>隐私</a></nav>
+    <div class="sbody">
+      <section class="sblock">
+        <h2>纪要生成</h2>
+        <p class="desc">转写和说话人识别始终在本机完成。生成纪要时，按下面的顺序选择第一个可用的方式。</p>
+        <div class="prov">
+          <div class="prov-row"><span class="radio"></span>
+            <div><div class="t"><svg class="i sm"><use href="#i-key-round"/></svg>自带 API 密钥</div>
+              <div class="d">使用你自己的 OpenAI、Anthropic、Gemini 或兼容 OpenAI 接口的服务。密钥保存在“钥匙串”里。</div>
+              <div class="keys"><span class="chip">OpenAI<span class="muted">未配置</span></span><span class="chip">Anthropic<span class="muted">未配置</span></span><span class="chip">Gemini<span class="muted">未配置</span></span><span class="chip">兼容接口<span class="muted">未配置</span></span></div></div>
+            <button class="btn sm"><svg class="i sm"><use href="#i-plus"/></svg>添加密钥</button></div>
+          <div class="prov-row on"><span class="radio on"></span>
+            <div><div class="t"><svg class="i sm"><use href="#i-bot"/></svg>本机 ChatGPT（通过 Codex）<span class="tag ok">正在使用</span></div>
+              <div class="d num">已用 ChatGPT Plus 账号登录 Codex，codex-cli 0.166.0。不需要 API 密钥，用量计入你的 ChatGPT 套餐。</div>
+              <div class="caps"><span class="tag">文字</span><span class="tag">截图</span><span class="tag">录音片段</span><span class="tag">结构化输出</span></div></div>
+            <button class="btn sm">检查登录</button></div>
+          <div class="prov-row"><span class="radio"></span>
+            <div><div class="t"><svg class="i sm"><use href="#i-cpu"/></svg>本地模型（MLX）</div>
+              <div class="d num">完全离线。Gemma 4 E4B 4-bit，约 3.1 GB，在 M5 Pro 上生成一份纪要约 40 秒。</div></div>
+            <button class="btn sm"><svg class="i sm"><use href="#i-hard-drive"/></svg>下载 3.1 GB</button></div>
+        </div>
+        <div class="fallback"><span class="step"><b>1</b>自带密钥</span><svg class="i sm"><use href="#i-chevron-right"/></svg><span class="step"><b>2</b>本机 ChatGPT</span><svg class="i sm"><use href="#i-chevron-right"/></svg><span class="step"><b>3</b>本地模型</span></div>
+      </section>
+
+      <section class="sblock">
+        <h2>模型</h2>
+        <p class="desc">都在本机运行。GPU 由 MLX 调用，神经引擎由 Core ML 调用。开会时，实时字幕优先使用计算资源。</p>
+        <table class="mtable num">
+          <thead><tr><th>用途</th><th>模型</th><th>运行在</th><th>大小</th><th>状态</th></tr></thead>
+          <tbody>
+            <tr><td>实时字幕</td><td><span class="model">Qwen3-ASR 0.6B</span><span class="sub">流式，中英日韩及 22 种方言</span></td><td>GPU（MLX）</td><td>0.7 GB</td><td><span class="tag ok">已就绪</span></td></tr>
+            <tr><td>会后精转写</td><td><span class="model">Qwen3-ASR 1.7B + 强制对齐</span><span class="sub">逐字时间戳</span></td><td>GPU（MLX）</td><td>2.4 GB</td><td><span class="tag ok">已就绪</span></td></tr>
+            <tr><td>谁在说话</td><td><span class="model">Sortformer 流式分离</span><span class="sub">最多 4 人同时，每 0.5 秒更新</span></td><td>神经引擎</td><td>0.2 GB</td><td><span class="tag ok">已就绪</span></td></tr>
+            <tr><td>声纹</td><td><span class="model">WeSpeaker ResNet34</span><span class="sub">256 维声纹向量</span></td><td>神经引擎</td><td>27 MB</td><td><span class="tag ok">已就绪</span></td></tr>
+            <tr><td>多模态搜索</td><td><span class="model">EmbeddingGemma 2</span><span class="sub">文字、图片、音频、视频共用 768 维空间</span></td><td>GPU（MLX）</td><td>1.6 GB</td><td><button class="btn sm"><svg class="i sm"><use href="#i-hard-drive"/></svg>下载</button></td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="sblock">
+        <h2>录制与字幕</h2>
+        <div class="form num">
+          <label>默认麦克风</label><div class="select" style="width:340px">XREAL One Pro（2 声道）<svg class="i sm"><use href="#i-chevron-down"/></svg></div>
+          <label>麦克风间距</label><div class="inline"><div class="select" style="width:120px">14 cm<svg class="i sm"><use href="#i-chevron-down"/></svg></div><span class="muted">用来把声音到达的时间差换算成角度</span></div>
+          <label>录制系统声音</label><div class="inline"><span class="switch on"></span><span class="muted">远程参会者的声音来自这里</span></div>
+          <label>录屏范围</label><div class="seg" style="justify-self:start"><button aria-pressed="true">指定窗口</button><button>整个屏幕</button><button>不录屏</button></div>
+          <label>浮窗字幕</label><div class="inline"><span class="switch on"></span><span class="muted">会议开始时自动打开，可穿透点击</span></div>
+          <label>字幕翻译</label><div class="select" style="width:200px">不翻译<svg class="i sm"><use href="#i-chevron-down"/></svg></div>
+        </div>
+      </section>
+
+      <section class="sblock">
+        <h2>Obsidian</h2>
+        <p class="desc">会议笔记和纪要以 Markdown 文件写进你的库，Obsidian 关着也能写入。录音和录屏放在库外面，笔记里只放链接。</p>
+        <div class="form">
+          <label>库</label><div class="select" style="width:340px">Work Notes（~/Documents/Work Notes）<svg class="i sm"><use href="#i-chevron-down"/></svg></div>
+          <label>会议笔记路径</label><span class="code">Meetings/{年}/{日期} {时间} {标题}.md</span>
+          <label>人物笔记</label><span class="code">People/{姓名}.md</span>
+          <label>录音与录屏</label><div class="inline"><span class="code">~/Movies/Meeting Master</span><button class="btn sm ghost"><svg class="i sm"><use href="#i-folder"/></svg>更改</button></div>
+          <label>参会者写成双链</label><div class="inline"><span class="switch on"></span><span class="muted">例如 [[王伟]]，Obsidian 的关系图里就能看到谁和谁开过会</span></div>
+        </div>
+      </section>
+
+      <section class="sblock">
+        <h2>搜索索引</h2>
+        <p class="desc">笔记一有改动就自动更新索引，在 Obsidian 里改的也一样。只重新处理改过的段落。</p>
+        <div class="stats num">
+          <div><b>9,812</b><span>文字片段</span></div><div><b>1,204</b><span>图片</span></div><div><b>1,322</b><span>音频片段</span></div><div><b>142</b><span>录屏片段</span></div>
+        </div>
+        <div class="inline num" style="margin-top:12px;font-size:12.5px;color:var(--ink-2)"><span class="dot"></span>队列为空，最近一次更新在 2 秒前<span class="spacer" style="flex:1"></span><button class="btn sm">暂停索引</button><button class="btn sm">全部重建</button></div>
+      </section>
+    </div>
+  </div>
+</section>
+    </main>
+  </div>
+</div>
+
+<!-- Floating caption window: a separate borderless, always-on-top, click-through GPUI window. -->
+<div class="overlay c1" id="overlay" role="region" aria-label="浮窗字幕">
+  <div class="ov-top"><span>浮窗字幕</span><span class="spacer"></span><button>A−</button><button>A+</button><button><svg class="i sm"><use href="#i-languages"/></svg>翻译</button><button aria-pressed="true"><svg class="i sm"><use href="#i-lock"/></svg>穿透点击</button><button><svg class="i sm"><use href="#i-x"/></svg></button></div>
+  <div class="prev c4" style="--c:#A8ADD6"><span class="spk">说话人 4</span>我补充一下，采购那边下周三之前要拿到最终数字。</div>
+  <div class="curr"><span class="spk">王伟</span><span id="ovText">好，那就定在下周三之前，我这边先出一版</span></div>
+</div>
+</div>
+</div>
+
+<div class="anno" id="anno"><b>GPUI 组件：</b><span id="annoText"></span></div>

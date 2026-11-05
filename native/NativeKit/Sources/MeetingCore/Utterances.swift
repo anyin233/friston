@@ -30,8 +30,12 @@ public struct UtteranceSegmenter: Sendable {
     /// Timing rules, in seconds.
     public struct Config: Sendable {
         public var sampleRate: Int
-        /// Minimum speech before the first partial and between partials.
+        /// Speech between consecutive partials.
         public var partialInterval: Double
+        /// Speech before the first partial. Shorter than `partialInterval` so a caption appears
+        /// sooner (measured: first partial 2.6 s after speech onset at 1 s); later partials keep
+        /// the slower cadence so the decoder is not run more often.
+        public var firstPartialDelay: Double
         /// Longest utterance before it is finalized and a new one starts (ASR quality drops on long inputs).
         public var maxDuration: Double
         /// Utterances shorter than this are dropped unless a partial was already shown.
@@ -39,10 +43,11 @@ public struct UtteranceSegmenter: Sendable {
 
         /// Creates a config.
         /// - Parameters: see the stored properties.
-        public init(sampleRate: Int = 16_000, partialInterval: Double = 1.0, maxDuration: Double = 12,
-                    minFinalDuration: Double = 0.3) {
+        public init(sampleRate: Int = 16_000, partialInterval: Double = 1.0, firstPartialDelay: Double = 0.5,
+                    maxDuration: Double = 12, minFinalDuration: Double = 0.3) {
             self.sampleRate = sampleRate
             self.partialInterval = partialInterval
+            self.firstPartialDelay = firstPartialDelay
             self.maxDuration = maxDuration
             self.minFinalDuration = minFinalDuration
         }
@@ -113,7 +118,8 @@ public struct UtteranceSegmenter: Sendable {
             return [action]
         }
         let since = sample - (lastPartialEnd ?? start)
-        if since >= samples(config.partialInterval) {
+        let due = lastPartialEnd == nil ? config.firstPartialDelay : config.partialInterval
+        if since >= samples(due) {
             lastPartialEnd = sample
             return [.partial(id: id, start: start, end: sample)]
         }

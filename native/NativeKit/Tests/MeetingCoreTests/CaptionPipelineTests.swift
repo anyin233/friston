@@ -64,7 +64,7 @@ private let sr = 16_000
 
 @Test func utteranceGetsPartialsThenOneFinalWithTheSameId() {
     let ids = UtteranceIDAllocator()
-    var seg = UtteranceSegmenter(config: .init(sampleRate: sr, partialInterval: 1, maxDuration: 20), ids: ids)
+    var seg = UtteranceSegmenter(config: .init(sampleRate: sr, partialInterval: 1, firstPartialDelay: 1, maxDuration: 20), ids: ids)
     #expect(seg.speechStarted(atSample: 8_000).isEmpty)
     #expect(seg.advance(to: 16_000).isEmpty) // only 0.5 s of speech so far
     #expect(seg.advance(to: 24_000) == [.partial(id: 1, start: 8_000, end: 24_000)])
@@ -73,6 +73,18 @@ private let sr = 16_000
     #expect(seg.speechEnded(endSample: 44_000) == [.final(id: 1, start: 8_000, end: 44_000, hadPartial: true)])
     #expect(seg.activeStart == nil)
     #expect(seg.advance(to: 80_000).isEmpty)
+}
+
+@Test func firstPartialComesEarlierThanTheRefreshInterval() {
+    // Default: the first partial after 0.5 s of speech, later ones every 1 s, so a caption
+    // appears about half a second sooner without transcribing more often.
+    let ids = UtteranceIDAllocator()
+    var seg = UtteranceSegmenter(config: .init(sampleRate: sr), ids: ids)
+    #expect(seg.speechStarted(atSample: 0).isEmpty)
+    #expect(seg.advance(to: 7_000).isEmpty)
+    #expect(seg.advance(to: 8_000) == [.partial(id: 1, start: 0, end: 8_000)])
+    #expect(seg.advance(to: 20_000).isEmpty) // 0.75 s since the first partial
+    #expect(seg.advance(to: 24_000) == [.partial(id: 1, start: 0, end: 24_000)])
 }
 
 @Test func longSpeechIsForceSplitIntoNewUtterances() {

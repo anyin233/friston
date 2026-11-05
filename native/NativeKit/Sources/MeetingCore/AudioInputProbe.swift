@@ -27,8 +27,9 @@ public struct AudioInputInfo: Codable, Sendable, Equatable {
 ///
 /// Note: on current MacBook Pros the built-in array is exposed as a single, already
 /// beamformed channel, so spatial cues need a multichannel USB/conference mic (or a
-/// stereo device such as AR glasses). AVFoundation's first-order-ambisonics capture
-/// must be re-checked at runtime with microphone permission granted.
+/// stereo device such as AR glasses). AVFoundation's first-order-ambisonics capture is
+/// also unsupported on the built-in mic (verified with permission granted, macOS 27.2);
+/// `scripts/probe-spatial-capture.swift` re-checks it after OS or hardware changes.
 public enum AudioInputProbe {
     /// Lists every device that has input channels.
     /// - Returns: Devices sorted by name.

@@ -20,7 +20,7 @@
 - 远程参会者只出现在系统声音里，不会和会议室里的人混在一起。这部分不受影响。
 - 会议室内的多人只能靠 Sortformer 分离和声纹区分。预录过声纹的人可以直接叫出名字；音色相近、短句和重叠发言更容易出错，会后精修可以修正一部分。
 
-唯一的悬念是 AVFoundation 的一阶 Ambisonics（FOA）采集。上次探测进程没有麦克风授权，结果是"不支持"。需要在已签名的 App 里重新确认（tech-stack.md 已列为"待验证"）。即使可用，它是系统合成的空间声场，能不能拿来做 GCC-PHAT 也要再评估，产品规划里不应依赖它。
+系统的空间录音（AVFoundation 一阶 Ambisonics，FOA）在这台 Mac 上也开不了，已在授权麦克风后实测确认，见第 4 节。
 
 ## 2. 一对 DJI Mic Mini 做立体声麦克风
 
@@ -111,6 +111,45 @@ GCC-PHAT 估计的是两路信号的到达时间差（TDOA）。用支架定距�
 - 绝对角度未知；最大 TDOA 只是下限估计（要有人坐在两支麦的连线方向上才能测到真实上限），所以相对位置会被拉伸。对聚类没有影响，对界面显示有影响。
 - 双麦始终前后不可分。
 - 声道间时延不稳定的设备（见 2.2）无论有没有参数都做不了 TDOA，只能退回电平差。
+
+## 4. 系统空间录音（FOA）能否启用
+
+### 4.1 Apple 提供的接口
+
+Apple 的"空间音频录制"走 AVFoundation 采集链路（[AVCaptureMultichannelAudioMode](https://developer.apple.com/documentation/avfoundation/avcapturemultichannelaudiomode)，WWDC25 session 251）：
+
+1. 用 `AVCaptureDeviceInput.isMultichannelAudioModeSupported(.firstOrderAmbisonics)` 检查（macOS 15+）。
+2. 设置 `input.multichannelAudioMode = .firstOrderAmbisonics`。官方说明：这个属性**只对内置麦克风生效，外接麦克风会忽略它**。所以 XREAL、DJI 等外接设备与它无关。
+3. 二选一：
+   - `AVCaptureMovieFileOutput` 直接写 QuickTime 文件：一条兼容用的 AAC 立体声轨，加一条 APAC 编码的空间音频轨。
+   - `AVCaptureAudioDataOutput` 拿原始缓冲（macOS 26+ 才有 `spatialAudioChannelLayoutTag`）：最多两个输出，一个设为 4 声道 FOA（`kAudioChannelLayoutTag_HOA_ACN_SN3D | 4`），另一个设为立体声。自己写文件时，还要用 `AVCaptureSpatialAudioMetadataSampleGenerator` 生成元数据轨。
+4. 不能和 `AVCaptureMultiCamSession` 一起用。配置不合法时，`commitConfiguration()` 或 `startRunning()` 会抛出 `NSInvalidArgumentException`。
+
+Apple 的文档和 WWDC 讲解都**没有给出支持的设备列表**，示例也都是 iPhone。接口在 macOS 上存在，不代表 Mac 的硬件支持。
+
+### 4.2 本机实测（2026-11-05，MacBook Pro Mac17,9，macOS 27.2，已授权麦克风）
+
+用 `swift scripts/probe-spatial-capture.swift` 探测。分别在单独创建输入、以及把输入加入 `AVCaptureSession` 之后各查一次，结果相同：
+
+| 设备 | 立体声模式 | FOA 模式 | Core Audio 物理格式 |
+| --- | --- | --- | --- |
+| MacBook Pro Microphone | 不支持 | **不支持** | 只有 1 声道（44.1/48/88.2/96 kHz） |
+| XREAL One Pro | 不支持 | 不支持（外接设备，本来就不适用） | 2 声道 48 kHz |
+| AirPods | 不支持 | 不支持 | 1 声道 24 kHz |
+| Goldenglow Microphone（来源未确认） | 不支持 | 不支持 | 1 声道 48 kHz |
+| Teams / 腾讯会议虚拟设备 | 不支持 | 不支持 | 虚拟设备，不适用 |
+
+结论：
+
+- **在这台 Mac 上，系统空间录音无法启用。** 没有隐藏的多声道格式，也没有可打开的系统开关或权限。内置麦克风阵列在系统内部合成为 1 个声道后才交给应用，应用拿不到阵列的原始声道。
+- 之前"探测时没有麦克风授权，结果不可信"的疑问已经排除：这次已经授权，结果仍然是不支持。
+- 这是硬件和系统的限制，App 侧没有绕过的办法。不要用私有接口或驱动去读阵列原始数据：不稳定，也违反"只用公开接口"的原则。
+
+### 4.3 以后怎么跟进
+
+- **随系统升级重新探测**：每次 macOS 大版本升级或换新机后，跑一次 `swift scripts/probe-spatial-capture.swift`。一旦内置麦克风出现 `foa=true`，就可以接入。
+- **FOA 接入后的价值**：FOA 的 4 个分量（W、X、Y、Z）可以用声强向量直接算出方位角，覆盖 360°，**没有双麦的前后歧义**。届时可以把它作为 `SpatialCue` 的另一种来源（例如 `[cos θ, sin θ]`），融合逻辑不用改。
+- **iPhone 作为陪伴录音设备**：iOS 18 起 iPhone 支持这套 FOA 采集，但支持哪些机型 Apple 没有列出，需要实测。代价是要多做一个 iOS 端 App，把 4 声道音频实时传回 Mac，工作量明显大于外接一个 USB 双声道麦克风。现阶段不建议。
 
 ## 建议的下一步
 

@@ -36,8 +36,18 @@ for pkg in "${PACKAGES[@]}"; do
       build
   )
   products="$ROOT/native/$pkg/.build-xcode/Build/Products/$CONFIG"
-  cp -f "$products/$binary" "$OUT/"
-  # MLX's default.metallib and model resources ship as SwiftPM resource bundles next to the binary.
-  find "$products" -maxdepth 1 -name '*.bundle' -exec cp -Rf {} "$OUT/" \;
-  echo "    -> $OUT/$binary"
+  # One folder per engine: the two packages pin different mlx-swift versions, and both ship
+  # a resource bundle with the same name, so a shared folder lets one overwrite the other.
+  dest="$OUT/$binary"
+  rm -rf "$dest" "$OUT/$binary.tmp"
+  mkdir -p "$OUT/$binary.tmp"
+  cp -f "$products/$binary" "$OUT/$binary.tmp/"
+  # SwiftPM resource bundles (model configs, MLX shaders) sit next to the binary.
+  find "$products" -maxdepth 1 -name '*.bundle' -exec cp -Rf {} "$OUT/$binary.tmp/" \;
+  # MLX looks for a colocated mlx.metallib before any bundle lookup, which keeps the
+  # shaders found even when Bundle.main points elsewhere (e.g. inside an .app).
+  metallib="$(find "$OUT/$binary.tmp" -path '*mlx-swift_Cmlx.bundle*' -name default.metallib | head -1)"
+  [[ -n "$metallib" ]] && cp -f "$metallib" "$OUT/$binary.tmp/mlx.metallib"
+  mv "$OUT/$binary.tmp" "$dest"
+  echo "    -> $dest/$binary"
 done

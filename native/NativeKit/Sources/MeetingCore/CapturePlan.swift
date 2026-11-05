@@ -20,12 +20,14 @@ public struct CapturePreset: Codable, Sendable, Equatable {
     public var fps: Int?
     /// Overrides the recordings root (`~/Movies/Meeting Master`); used by tests and power users.
     public var outputDirectory: String?
+    /// Enrolled voiceprints for live speaker naming; samples from another embedding model are ignored.
+    public var voiceprints: [VoiceprintSample]?
 
     /// Creates a preset.
     /// - Parameters: see the stored properties; everything is optional and audio is off by default.
     public init(title: String? = nil, windowID: UInt32? = nil, displayID: UInt32? = nil, microphoneUID: String? = nil,
                 systemAudio: Bool = false, captionLanguage: String? = nil, fps: Int? = nil,
-                outputDirectory: String? = nil) {
+                outputDirectory: String? = nil, voiceprints: [VoiceprintSample]? = nil) {
         self.title = title
         self.windowID = windowID
         self.displayID = displayID
@@ -34,10 +36,11 @@ public struct CapturePreset: Codable, Sendable, Equatable {
         self.captionLanguage = captionLanguage
         self.fps = fps
         self.outputDirectory = outputDirectory
+        self.voiceprints = voiceprints
     }
 
     private enum CodingKeys: String, CodingKey {
-        case title, windowID, displayID, microphoneUID, systemAudio, captionLanguage, fps, outputDirectory
+        case title, windowID, displayID, microphoneUID, systemAudio, captionLanguage, fps, outputDirectory, voiceprints
     }
 
     /// Decodes a preset, treating a missing `systemAudio` as `false`.
@@ -52,6 +55,7 @@ public struct CapturePreset: Codable, Sendable, Equatable {
         captionLanguage = try c.decodeIfPresent(String.self, forKey: .captionLanguage)
         fps = try c.decodeIfPresent(Int.self, forKey: .fps)
         outputDirectory = try c.decodeIfPresent(String.self, forKey: .outputDirectory)
+        voiceprints = try c.decodeIfPresent([VoiceprintSample].self, forKey: .voiceprints)
     }
 }
 

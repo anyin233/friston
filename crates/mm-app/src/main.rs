@@ -1,6 +1,8 @@
 //! Meeting Master desktop entry point.
 
 mod assign;
+#[cfg(test)]
+mod e2e;
 mod floating;
 mod logic;
 mod pages;

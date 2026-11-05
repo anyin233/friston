@@ -44,7 +44,7 @@ make run
 ## 下一步（建议顺序）
 
 1. 下载模型权重：EmbeddingGemma 2 bf16（约 1.6 GB），Qwen3-ASR 0.6B/1.7B、Sortformer、WeSpeaker（合计约 3.3 GB）。
-2. `mm-meetingd`：实现 `capture/start`，包括 ScreenCaptureKit 窗口录制、麦克风多声道保留和系统声音录制，再接入 Qwen3-ASR 流式字幕与 Sortformer。
+2. `mm-meetingd`：~~`capture/start` / `capture/stop`（窗口录制、麦克风多声道、系统声音、电平与状态通知）~~ 已完成；下一步接入 Qwen3-ASR 流式字幕与 Sortformer。
 3. `mm-app`：把原型的“会议中”页面和浮窗字幕做成真实页面，并注册原型里的主题色。
 4. 索引管线：vault 监听（FSEvents）→ `mm-index` → `mm-embedd` → `mm-store`。
 5. 用 `mm-llm` 驱动 `codex app-server`，生成纪要并写回 Obsidian。

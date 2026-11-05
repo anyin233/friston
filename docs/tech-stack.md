@@ -16,7 +16,7 @@
 | 存储 / 检索 | SQLite（rusqlite bundled）+ **sqlite-vec** + FTS5 trigram | rusqlite 0.41，sqlite-vec =0.1.9 | 已测试（KNN、中文全文） |
 | 笔记系统 | Obsidian 库（直接写 Markdown）+ `obsidian://` URI；Obsidian CLI 可选 | Obsidian 1.12+ | 已实现并测试 |
 | 纪要生成 | BYOK → **Codex app-server**（ChatGPT 登录）→ 本地 MLX | codex-cli 0.166.0 | 请求格式已对照官方 schema 测试 |
-| 录制 | ScreenCaptureKit（窗口级）、AVFoundation、Core Audio process tap | 系统框架 | 窗口枚举已实现 |
+| 录制 | ScreenCaptureKit（窗口级）、AVFoundation、Core Audio process tap | 系统框架 | 窗口枚举、窗口/显示器录制、麦克风多声道与系统声音录制已实现 |
 | 日程 | EventKit | 系统框架 | 已实现读取 |
 
 ## 关键决定与理由

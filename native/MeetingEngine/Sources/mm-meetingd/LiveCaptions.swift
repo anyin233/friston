@@ -121,6 +121,7 @@ final class CaptionStream: @unchecked Sendable {
     /// Device-rate frames consumed by the stereo analyzer so far.
     private var stereoFrames = 0
     private var frameCues: [(sample: Int, cue: StereoFrameCue)] = []
+    private var loggedJumps = 0
 
     // Sortformer speaker turns: a second timbre/turn signal next to the per-utterance embeddings.
     private let ids: UtteranceIDAllocator
@@ -353,18 +354,44 @@ final class CaptionStream: @unchecked Sendable {
             stereoFrames += n
             if let cue = stereo.analyze(a, b) { frameCues.append((centre, cue)) }
         }
+        logDelayJumps()
     }
 
     /// Summarises direction over an utterance.
-    /// - Returns: The fusion cue and the wire cue, or `nil`s for mono input / no usable frames.
-    func spatialCue(_ start: Int, _ end: Int) -> (SpatialCue?, CaptionSpatialCue?) {
-        guard let stereo else { return (nil, nil) }
+    /// - Returns: The cue for fusion, `caption/final.spatial` and `spatial/cue`, or `nil` for
+    ///   mono input / no usable frames.
+    func direction(_ start: Int, _ end: Int) -> UtteranceDirection? {
+        guard let stereo, let spatial else { return nil }
         let frames = frameCues.filter { $0.sample >= start && $0.sample < end }.map(\.cue)
-        guard let cue = stereo.segmentCue(frames) else { return (nil, nil) }
+        guard let cue = stereo.segmentCue(frames) else { return nil }
         let delays = frames.filter { $0.confidence >= stereo.config.minConfidence }.map(\.delaySamples).sorted()
         let median = delays.isEmpty ? 0 : delays[delays.count / 2]
-        return (cue, CaptionSpatialCue(azimuthDeg: nil, tdoaSamples: median, confidence: cue.confidence))
+        let azimuth = spatial.azimuthDeg(delaySamples: median)
+        return UtteranceDirection(
+            fusion: cue,
+            caption: CaptionSpatialCue(azimuthDeg: azimuth, tdoaSamples: median, confidence: cue.confidence),
+            position: stereo.reportedPosition(of: cue), azimuthDeg: azimuth)
     }
+
+    /// Logs once per detected inter-channel delay jump, so field logs show when a wireless
+    /// link re-paired and positions were re-learned.
+    private func logDelayJumps() {
+        guard let stereo, stereo.delayJumps > loggedJumps else { return }
+        loggedJumps = stereo.delayJumps
+        log("captions \(origin.rawValue): stereo delay jump #\(loggedJumps) detected; direction statistics restarted")
+    }
+}
+
+/// Direction of one utterance in the three shapes the engine needs.
+struct UtteranceDirection {
+    /// Relative cue for ``SpeakerFusion``.
+    let fusion: SpatialCue
+    /// `caption/final.spatial`.
+    let caption: CaptionSpatialCue
+    /// `spatial/cue` coordinates (screen convention, see ``StereoCueAnalyzer/reportedPosition(of:)``).
+    let position: [Float]
+    /// Degrees, positive to the right; only with a known mic spacing.
+    let azimuthDeg: Float?
 }
 
 /// Live captions for one capture session: two independent streams (origin is a hard speaker
@@ -416,7 +443,8 @@ final class LiveCaptioner: @unchecked Sendable {
         if let micRate {
             let inbox = CaptionInbox(sampleRate: micRate, maxSeconds: maxBacklogSeconds)
             // Virtual/aggregate devices and multichannel devices without a preset give no pair.
-            let spatial = mic.flatMap { try? SpatialArrayProfile.resolve(for: $0) } ?? nil
+            let spatial = (mic.flatMap { try? SpatialArrayProfile.resolve(for: $0) } ?? nil)?
+                .adjusted(flip: preset.spatialFlip, spacingCm: preset.spatialSpacingCm)
             micSpatial = spatial
             streams.append(CaptionStream(origin: .microphone, inbox: inbox, ids: ids, spatial: spatial))
             microphone = inbox
@@ -582,8 +610,8 @@ final class LiveCaptioner: @unchecked Sendable {
     private func attribute(_ audio: [Float], _ start: Int, _ end: Int, on stream: CaptionStream,
                            models: LiveModels) -> SpeakerLabel {
         guard audio.count >= CaptionStream.rate * 2 / 5, let embedding = embed(audio, models) else { return .unknown }
-        let (cue, _) = stream.spatialCue(start, end)
-        let observation = SpeechObservation(embedding: embedding, origin: stream.origin, spatial: cue,
+        let observation = SpeechObservation(embedding: embedding, origin: stream.origin,
+                                            spatial: stream.direction(start, end)?.fusion,
                                             turnSlot: stream.turnSlot(start, end))
         // Embeddings of short utterances scatter widely; letting them found clusters
         // splits one person into many "说话人 N".
@@ -598,13 +626,21 @@ final class LiveCaptioner: @unchecked Sendable {
         return label
     }
 
-    /// Sends one `caption/final`.
+    /// Sends one `caption/final`, then its `spatial/cue` when the utterance has a direction.
     private func sendFinal(id: Int, _ start: Int, _ end: Int, text: String, speaker: SpeakerLabel,
                            on stream: CaptionStream) {
+        let direction = stream.direction(start, end)
+        let (startMs, endMs) = (stream.ms(start), stream.ms(end))
         send(Methods.Meeting.nCaptionFinal, CaptionFinalEvent(
-            sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: stream.ms(start),
-            endMs: stream.ms(end), text: text, language: languageCode ?? ASRLanguage.guess(fromText: text),
-            speaker: speaker, spatial: stream.spatialCue(start, end).1))
+            sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs,
+            endMs: endMs, text: text, language: languageCode ?? ASRLanguage.guess(fromText: text),
+            speaker: speaker, spatial: direction?.caption))
+        // An empty final only retracts a partial: no utterance on screen to place.
+        guard let direction, !text.isEmpty else { return }
+        send(Methods.Meeting.nSpatialCue, SpatialCueEvent(
+            sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs, endMs: endMs,
+            position: direction.position, confidence: direction.fusion.confidence,
+            azimuthDeg: direction.azimuthDeg, speaker: speaker))
     }
 
     /// Runs Qwen3-ASR on 16 kHz audio.

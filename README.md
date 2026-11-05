@@ -39,7 +39,7 @@ make run
 | [native/MeetingEngine](native/MeetingEngine) | `mm-meetingd`：录制、ASR、说话人识别、日程 |
 | [native/EmbedEngine](native/EmbedEngine) | `mm-embedd`：EmbeddingGemma 2 多模态嵌入 |
 | [design/mockups](design/mockups) | 第一版界面原型（HTML/SVG） |
-| [docs](docs) | 文档：[技术栈](docs/tech-stack.md)、[架构](docs/architecture.md)、[说话人识别](docs/speaker-identification.md)、[引擎协议](docs/engine-protocol.md)、[方位可行性](docs/spatial-feasibility.md)、[iPhone 可行性](docs/ios-feasibility.md) |
+| [docs](docs) | 文档：[技术栈](docs/tech-stack.md)、[架构](docs/architecture.md)、[说话人识别](docs/speaker-identification.md)、[引擎协议](docs/engine-protocol.md)、[方位可行性](docs/spatial-feasibility.md)、[iPhone 可行性](docs/ios-feasibility.md)、[iPhone 互联](docs/companion-link.md) |
 
 ## 下一步（建议顺序）
 

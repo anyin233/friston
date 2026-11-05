@@ -58,6 +58,7 @@
 
 - iPhone App 只负责：采集 FOA → 计算每帧的方位线索（复用 MeetingCore）→ 通过局域网（Network.framework / Bonjour）把单声道语音和方位线索推给 Mac 上的 `mm-meetingd`。
 - Mac 继续负责其余一切：系统声音、窗口录制、ASR、声纹、索引、纪要。
+- 连接方式不依赖局域网（应对 AP 隔离），见 [companion-link.md](companion-link.md)。
 - 需要解决两个问题：
   - **时钟对齐**：iPhone 和 Mac 的时间戳不同源。线索只用于给说话人片段投票，按 100 ms 级别对齐就够了，不需要样本级同步。
   - **回声**：Mac 外放的远程声音也会被 iPhone 录进去，要靠流来源和时间对齐把它排除。
@@ -73,7 +74,7 @@
 
 ## 下一步需要实测的
 
-1. 你的 iPhone 机型上，`isMultichannelAudioModeSupported(.firstOrderAmbisonics)` 是否为 true，以及在一张会议桌上，FOA 声强向量方位的稳定性（可以沿用 spatial-feasibility.md 2.4 节的测试思路）。
+1. 你的 iPhone 17 Pro（iPhone18,1）上，`isMultichannelAudioModeSupported(.firstOrderAmbisonics)` 是否为 true，以及在一张会议桌上，FOA 声强向量方位的稳定性（可以沿用 spatial-feasibility.md 2.4 节的测试思路）。
 2. Qwen3-ASR 0.6B 在 iPhone 前台连续跑 60 分钟的延迟、发热降频和耗电。
 3. 另一个 App 通话时，本 App 能否继续录音（预期不能）。
 4. Core ML 的 Sortformer 和 WeSpeaker 能否在锁屏后继续运行。

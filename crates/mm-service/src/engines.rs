@@ -24,16 +24,20 @@ pub const EMBEDD: &str = "mm-embedd";
 ///
 /// Each engine lives in its own folder (`<name>/<name>` plus its resource bundles and
 /// `mlx.metallib`) because the two engines ship different MLX builds. Search order:
-/// `MM_ENGINES_DIR`; the app bundle's `Contents/Helpers`; next to the running executable;
+/// `MM_ENGINES_DIR`; the app bundle's `Contents/Resources/engines`; next to the running executable;
 /// then `target/engines/{Debug,Release}` in any ancestor folder (development runs from
 /// `target/debug`).
 ///
 /// Params: `name` – executable name.
 /// Returns: the path, or `None` when not built yet.
 pub fn locate_engine(name: &str) -> Option<PathBuf> {
-    engine_candidates(name, std::env::var_os("MM_ENGINES_DIR").map(PathBuf::from), std::env::current_exe().ok())
-        .into_iter()
-        .find(|p| p.is_file())
+    engine_candidates(
+        name,
+        std::env::var_os("MM_ENGINES_DIR").map(PathBuf::from),
+        std::env::current_exe().ok(),
+    )
+    .into_iter()
+    .find(|p| p.is_file())
 }
 
 /// Candidate paths for [`locate_engine`], in priority order (pure, for tests).
@@ -45,12 +49,18 @@ fn engine_candidates(name: &str, env_dir: Option<PathBuf>, exe: Option<PathBuf>)
     }
     if let Some(exe) = exe {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("../Helpers").join(name).join(name));
+            candidates.push(dir.join("../Resources/engines").join(name).join(name));
             candidates.push(dir.join(name).join(name));
         }
         for ancestor in exe.ancestors().skip(1) {
             for config in ["Debug", "Release"] {
-                candidates.push(ancestor.join("target/engines").join(config).join(name).join(name));
+                candidates.push(
+                    ancestor
+                        .join("target/engines")
+                        .join(config)
+                        .join(name)
+                        .join(name),
+                );
                 candidates.push(ancestor.join("engines").join(config).join(name).join(name));
             }
         }
@@ -458,9 +468,18 @@ mod tests {
             Some("/A.app/Contents/MacOS/meeting-master".into()),
         );
         assert_eq!(c[0], PathBuf::from("/e/mm-embedd/mm-embedd"));
-        assert_eq!(c[2], PathBuf::from("/A.app/Contents/MacOS/../Helpers/mm-embedd/mm-embedd"));
-        let dev = engine_candidates("mm-meetingd", None, Some("/repo/target/debug/meeting-master".into()));
-        assert!(dev.contains(&PathBuf::from("/repo/target/engines/Debug/mm-meetingd/mm-meetingd")));
+        assert_eq!(
+            c[2],
+            PathBuf::from("/A.app/Contents/MacOS/../Resources/engines/mm-embedd/mm-embedd")
+        );
+        let dev = engine_candidates(
+            "mm-meetingd",
+            None,
+            Some("/repo/target/debug/meeting-master".into()),
+        );
+        assert!(dev.contains(&PathBuf::from(
+            "/repo/target/engines/Debug/mm-meetingd/mm-meetingd"
+        )));
     }
 
     #[test]

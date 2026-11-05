@@ -2,17 +2,18 @@
 # Shared .app bundling for dev-app.sh and package-app.sh.
 #
 # write_bundle APP_PATH BIN BUNDLE_ID NAME ENGINES_DIR
-#   Lays out APP_PATH/Contents/{MacOS,Helpers,Info.plist}: the GUI binary in MacOS and each
-#   Swift engine with its own resource bundles and mlx.metallib in Helpers/<engine>/. TCC permissions belong to the app, so
+#   Lays out APP_PATH/Contents/{MacOS,Resources/engines,Info.plist}: the GUI binary in MacOS and each
+#   Swift engine with its own resource bundles and mlx.metallib in Resources/engines/<engine>/ (SwiftPM resource bundles have no Info.plist, so they must be sealed as resources, not nested code). TCC permissions belong to the app, so
 #   the privacy usage strings live here, not in the engines.
 
 # write_bundle: build the bundle directory; engines are optional (the app explains when missing).
 write_bundle() {
   local app="$1" bin="$2" bundle_id="$3" name="$4" engines="$5"
-  local macos="$app/Contents/MacOS" helpers="$app/Contents/Helpers"
+  local macos="$app/Contents/MacOS" helpers="$app/Contents/Resources/engines"
   mkdir -p "$macos"
   cp -f "$bin" "$macos/meeting-master"
-  rm -rf "$helpers"
+  # Contents/Helpers held engines in earlier builds; drop it so stale copies never get signed.
+  rm -rf "$helpers" "$app/Contents/Helpers"
   for engine in mm-meetingd mm-embedd; do
     if [[ -x "$engines/$engine/$engine" ]]; then
       # Each engine keeps its own folder: their MLX resource bundles share a name but not a version,
@@ -54,7 +55,7 @@ PLIST
 sign_bundle() {
   local app="$1" identity="${MM_SIGN_IDENTITY:--}"
   local f
-  for f in "$app/Contents/Helpers/mm-meetingd/mm-meetingd" "$app/Contents/Helpers/mm-embedd/mm-embedd"; do
+  for f in "$app/Contents/Resources/engines/mm-meetingd/mm-meetingd" "$app/Contents/Resources/engines/mm-embedd/mm-embedd"; do
     [[ -x "$f" ]] && codesign --force --sign "$identity" "$f" >/dev/null
   done
   codesign --force --sign "$identity" "$app" >/dev/null

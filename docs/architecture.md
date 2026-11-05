@@ -51,7 +51,7 @@
 | 模块 | 职责 |
 | --- | --- |
 | `config` | `~/Library/Application Support/Meeting Master/config.json`（可用 `MM_DATA_DIR` 覆盖），缺键用默认值 |
-| `engines` | 定位引擎（`MM_ENGINES_DIR` → App 包内 `Contents/MacOS` → `target/engines/{Debug,Release}`），类型化调用，权限错误单独区分 |
+| `engines` | 定位引擎（`MM_ENGINES_DIR` → App 包内 `Contents/Resources/engines/<引擎>/` → `target/engines/{Debug,Release}`），类型化调用，权限错误单独区分 |
 | `live` | 字幕板（易变/定稿/撤回/改标）与说话人目录（名字和色相：同一个人在所有界面同一色相） |
 | `flow` | 一场会议的各步：建笔记 → 录制预设（含已登记声纹）→ 定稿入库并写入笔记 `transcript` 区块 → 会后精转写合并 → 纪要写入 `minutes` / `actions` 区块 |
 | `indexer` | 后台线程：Obsidian 库 FSEvents → 防抖 → 增量分块 → 按模型戳补嵌入；会议进行时减小批量，把 GPU 让给字幕 |
@@ -62,7 +62,7 @@
 
 ## 打包
 
-- `scripts/dev-app.sh launch`：开发包 `target/debug/MeetingMasterDev.app`，内含 Debug 引擎及其资源包。
+- `scripts/dev-app.sh launch`：开发包 `target/debug/MeetingMasterDev.app`，内含 Debug 引擎；每个引擎带自己的资源包和 `mlx.metallib`，放在独立目录里（两个引擎的 MLX 版本不同，资源包同名）。
 - `scripts/package-app.sh`：发布包 `target/release/Meeting Master.app`（Release 引擎），`MM_SIGN_IDENTITY` 指定签名身份，默认 ad-hoc。
 - 两者共用 `scripts/lib/bundle.sh`：Info.plist 里写麦克风、日历、屏幕录制、系统声音的用途说明和 URL scheme。
 

@@ -14,6 +14,7 @@
 pub mod chunk;
 pub mod debounce;
 pub mod media;
+pub mod pipeline;
 pub mod sync;
 
 /// Scheduling priority for embedding jobs (lower value runs first).

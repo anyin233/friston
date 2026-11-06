@@ -23,6 +23,9 @@ dirs.workspace = true
 blake3.workspace = true
 async-channel.workspace = true
 notify = "8"
+percent-encoding.workspace = true
+ureq = { version = "3", features = ["json"] }
+keyring = { version = "3", features = ["apple-native"] }
 
 [dev-dependencies]
 tempfile.workspace = true

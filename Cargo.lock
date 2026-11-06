@@ -3888,6 +3888,7 @@ dependencies = [
  "blake3",
  "chrono",
  "dirs 6.0.0",
+ "keyring",
  "mm-core",
  "mm-engine",
  "mm-index",
@@ -3895,11 +3896,13 @@ dependencies = [
  "mm-store",
  "mm-vault",
  "notify",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "ureq",
 ]
 
 [[package]]

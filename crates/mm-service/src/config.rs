@@ -30,6 +30,8 @@ pub struct AppConfig {
     pub recordings_dir: Option<PathBuf>,
     /// Local EmbeddingGemma 2 checkpoint folder.
     pub embedding_model_dir: Option<PathBuf>,
+    /// Hugging Face repo the 下载 button fetches the embedding model from.
+    pub embedding_model_url: String,
     /// Local MLX instruct model folder for offline minutes (last resort provider).
     pub local_llm_dir: Option<PathBuf>,
     /// Configured BYOK provider (its key lives in the Keychain).
@@ -62,6 +64,7 @@ impl Default for AppConfig {
             fps: 15,
             recordings_dir: None,
             embedding_model_dir: None,
+            embedding_model_url: crate::hub::DEFAULT_EMBEDDING_REPO_URL.into(),
             local_llm_dir: None,
             byok: None,
             use_codex: true,
@@ -85,6 +88,14 @@ pub fn data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Meeting Master")
+}
+
+/// Folder downloaded models are written to.
+///
+/// Params: `data_dir` – the app's data folder.
+/// Returns: `<data_dir>/models`.
+pub fn models_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("models")
 }
 
 impl AppConfig {
@@ -172,6 +183,11 @@ mod tests {
             "files from before the spatial settings load"
         );
         assert_eq!(cfg.spatial_spacing_cm, None);
+        assert_eq!(
+            cfg.embedding_model_url,
+            crate::hub::DEFAULT_EMBEDDING_REPO_URL,
+            "files from before the download setting get the default repo"
+        );
         std::fs::write(dir.path().join("config.json"), "{").unwrap();
         assert!(
             AppConfig::load(dir.path())

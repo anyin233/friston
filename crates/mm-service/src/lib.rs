@@ -8,14 +8,16 @@
 //! * [`live`] – live caption board and speaker names/hues.
 //! * [`flow`] – note → recording → transcript → minutes steps of one meeting.
 //! * [`indexer`] – vault watcher, debouncing and background embedding.
+//! * [`hub`] – downloading model checkpoints from Hugging Face (token in the Keychain).
 
 pub mod config;
 pub mod engines;
 pub mod flow;
+pub mod hub;
 pub mod indexer;
 pub mod live;
 
-pub use config::{AppConfig, data_dir};
+pub use config::{AppConfig, data_dir, models_dir};
 
 /// Errors surfaced to the UI. Messages carry the path, method or value involved.
 #[derive(Debug, thiserror::Error)]
@@ -39,4 +41,6 @@ pub enum ServiceError {
     Indexing(#[from] mm_index::pipeline::IndexError),
     #[error(transparent)]
     Llm(#[from] mm_llm::LlmError),
+    #[error(transparent)]
+    Hub(#[from] hub::HubError),
 }

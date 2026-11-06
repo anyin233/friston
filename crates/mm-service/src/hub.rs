@@ -6,7 +6,7 @@
 //! request, so a 1.5 GB checkpoint survives a dropped connection or a cancel.
 //!
 //! The access token (needed for gated or private repos) lives in the macOS Keychain under
-//! service `Meeting Master`, account `huggingface`; `HF_TOKEN` is the fallback so tokens
+//! service `Friston`, account `huggingface`; `HF_TOKEN` is the fallback so tokens
 //! set up for `huggingface_hub` keep working.
 
 use std::io::{Read as _, Write as _};
@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use mm_llm::keychain::{SystemKeychain, read_secret, write_secret};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 
@@ -24,8 +25,7 @@ pub const DEFAULT_EMBEDDING_REPO_URL: &str =
 /// Hub used when the user gives a bare `owner/name` and `HF_ENDPOINT` is not set.
 const DEFAULT_ENDPOINT: &str = "https://huggingface.co";
 
-/// Keychain service and account holding the Hugging Face token.
-const KEYCHAIN_SERVICE: &str = "Meeting Master";
+/// Keychain account holding the Hugging Face token (service: `mm_llm::keychain::KEYCHAIN_SERVICE`).
 const KEYCHAIN_ACCOUNT: &str = "huggingface";
 
 /// Repo files that are Git plumbing, not part of the checkpoint.
@@ -499,15 +499,8 @@ pub fn download(
 ///
 /// Returns: the token, or `None` when none is stored.
 pub fn read_stored_token() -> Result<Option<String>, HubError> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .map_err(|e| HubError::Keychain(format!("{KEYCHAIN_ACCOUNT}: {e}")))?;
-    match entry.get_password() {
-        Ok(t) => Ok(Some(t)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(HubError::Keychain(format!(
-            "reading {KEYCHAIN_ACCOUNT}: {e}"
-        ))),
-    }
+    read_secret(&SystemKeychain, KEYCHAIN_ACCOUNT)
+        .map_err(|e| HubError::Keychain(format!("reading {KEYCHAIN_ACCOUNT}: {e}")))
 }
 
 /// Stores (or with `None`, deletes) the Hugging Face token in the Keychain.
@@ -515,16 +508,8 @@ pub fn read_stored_token() -> Result<Option<String>, HubError> {
 /// Params: `token`.
 /// Returns: `Ok(())` once the Keychain accepted the change.
 pub fn write_stored_token(token: Option<&str>) -> Result<(), HubError> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .map_err(|e| HubError::Keychain(format!("{KEYCHAIN_ACCOUNT}: {e}")))?;
-    let result = match token {
-        Some(t) => entry.set_password(t),
-        None => match entry.delete_credential() {
-            Err(keyring::Error::NoEntry) => Ok(()),
-            other => other,
-        },
-    };
-    result.map_err(|e| HubError::Keychain(format!("writing {KEYCHAIN_ACCOUNT}: {e}")))
+    write_secret(&SystemKeychain, KEYCHAIN_ACCOUNT, token)
+        .map_err(|e| HubError::Keychain(format!("writing {KEYCHAIN_ACCOUNT}: {e}")))
 }
 
 /// Token for downloads: the Keychain entry, else `HF_TOKEN`.

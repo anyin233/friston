@@ -10,6 +10,7 @@
 
 pub mod byok;
 pub mod codex;
+pub mod keychain;
 pub mod minutes;
 pub mod prompt;
 pub mod provider;

@@ -3888,7 +3888,6 @@ dependencies = [
  "blake3",
  "chrono",
  "dirs 6.0.0",
- "keyring",
  "mm-core",
  "mm-engine",
  "mm-index",

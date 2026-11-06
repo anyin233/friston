@@ -1,6 +1,6 @@
 //! Bring-your-own-key providers over plain HTTPS.
 //!
-//! Keys live in the macOS Keychain (service `Meeting Master`, account = provider kind)
+//! Keys live in the macOS Keychain (service `Friston`, account = provider kind)
 //! and are read only at request time.
 
 use base64::Engine as _;
@@ -9,8 +9,7 @@ use serde_json::{Value, json};
 use crate::provider::ByokProvider;
 use crate::{LlmError, Minutes, MinutesInput, instructions, minutes_json_schema};
 
-/// Keychain service name for API keys.
-pub const KEYCHAIN_SERVICE: &str = "Meeting Master";
+use crate::keychain::{SystemKeychain, read_secret, write_secret};
 
 /// Anthropic Messages API version header value.
 const ANTHROPIC_VERSION: &str = "2026-10-21";
@@ -37,16 +36,8 @@ pub fn keychain_account(p: &ByokProvider) -> &'static str {
 /// Params: `p` – provider.
 /// Returns: the key, or `None` if none is stored.
 pub fn read_key(p: &ByokProvider) -> Result<Option<String>, LlmError> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(p))
-        .map_err(|e| LlmError::Keychain(format!("{}: {e}", keychain_account(p))))?;
-    match entry.get_password() {
-        Ok(k) => Ok(Some(k)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(LlmError::Keychain(format!(
-            "reading {}: {e}",
-            keychain_account(p)
-        ))),
-    }
+    read_secret(&SystemKeychain, keychain_account(p))
+        .map_err(|e| LlmError::Keychain(format!("reading {}: {e}", keychain_account(p))))
 }
 
 /// Stores (or with `None`, deletes) a provider's API key in the Keychain.
@@ -54,16 +45,8 @@ pub fn read_key(p: &ByokProvider) -> Result<Option<String>, LlmError> {
 /// Params: `p` – provider; `key` – the secret.
 /// Returns: `Ok(())` once the Keychain accepted the change.
 pub fn write_key(p: &ByokProvider, key: Option<&str>) -> Result<(), LlmError> {
-    let entry = keyring::Entry::new(KEYCHAIN_SERVICE, keychain_account(p))
-        .map_err(|e| LlmError::Keychain(format!("{}: {e}", keychain_account(p))))?;
-    let result = match key {
-        Some(k) => entry.set_password(k),
-        None => match entry.delete_credential() {
-            Err(keyring::Error::NoEntry) => Ok(()),
-            other => other,
-        },
-    };
-    result.map_err(|e| LlmError::Keychain(format!("writing {}: {e}", keychain_account(p))))
+    write_secret(&SystemKeychain, keychain_account(p), key)
+        .map_err(|e| LlmError::Keychain(format!("writing {}: {e}", keychain_account(p))))
 }
 
 /// Guesses an image MIME type from the file extension.

@@ -834,9 +834,12 @@ impl Render for LivePage {
                 .size_full()
                 .child(self.capbar(live, cx_ref))
                 .child(
+                    // `h_flex` centers items on the cross axis; stretch them so every
+                    // pane fills the window height instead of shrinking to its content.
                     h_flex()
                         .flex_1()
                         .min_h_0()
+                        .items_stretch()
                         .child(self.captions(live, cx_ref))
                         .child(self.notes_pane(live, cx_ref))
                         .child(self.speakers_pane(live, cx_ref)),

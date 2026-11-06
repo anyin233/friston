@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,9 +24,10 @@ use mm_service::engines::{
     EMBEDD, EmbedEngine, EmbedStatus, LlmStatus, MEETINGD, MeetingEngine, MeetingNotice,
     decode_notice, locate_engine,
 };
+use mm_service::hub::{self, HubRepo};
 use mm_service::indexer::{Indexer, IndexerEvent, IndexerMsg, current_stamp};
 use mm_service::live::{CaptionBoard, SpeakerDirectory, person_hue};
-use mm_service::{AppConfig, ServiceError, data_dir, flow};
+use mm_service::{AppConfig, ServiceError, data_dir, flow, models_dir};
 use mm_store::{IndexStats, Store};
 
 use crate::logic::{self, ActionRow};
@@ -48,6 +50,22 @@ pub fn bg<V: 'static, T: Send + 'static>(
         let _ = this.update(cx, |v, cx| done(v, out, cx));
     })
     .detach();
+}
+
+/// A running Hugging Face download.
+#[derive(Debug, Clone)]
+pub struct ModelDownload {
+    /// `owner/name` being fetched.
+    pub repo: String,
+    pub progress: hub::Progress,
+    /// Set to stop the download; partial files stay for the next attempt.
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// Messages from the download thread to the UI.
+enum DownloadMsg {
+    Progress(hub::Progress),
+    Done(Result<PathBuf, hub::HubError>),
 }
 
 /// Something loaded in the background.
@@ -244,6 +262,10 @@ pub struct AppState {
     pub llm_status: Loadable<LlmStatus>,
     pub index_stats: Option<IndexStats>,
     pub byok_key_present: bool,
+    /// A Hugging Face token is stored in the Keychain.
+    pub hf_token_present: bool,
+    /// Model download in progress, if any.
+    pub model_download: Option<ModelDownload>,
     /// Person currently enrolling and when it started (countdown).
     pub enrolling: Option<(PersonId, Instant)>,
 
@@ -358,6 +380,8 @@ impl AppState {
             llm_status: Loadable::Idle,
             index_stats: None,
             byok_key_present: false,
+            hf_token_present: false,
+            model_download: None,
             enrolling: None,
             notes_pending: None,
             notes_task: None,
@@ -370,6 +394,7 @@ impl AppState {
         state.refresh_stats(cx);
         state.refresh_codex(cx);
         state.refresh_key_presence(cx);
+        state.refresh_hf_token(cx);
         if let Some(dir) = state.cfg.embedding_model_dir.clone() {
             state.load_embedding(dir, cx);
         }
@@ -1041,6 +1066,136 @@ impl AppState {
                 cx.notify();
             },
         );
+    }
+
+    /// Checks whether a Hugging Face token is stored in the Keychain.
+    ///
+    /// Params: `cx`.
+    pub fn refresh_hf_token(&mut self, cx: &mut Context<Self>) {
+        bg(
+            cx,
+            || hub::read_stored_token().map(|t| t.is_some_and(|t| !t.trim().is_empty())),
+            |this, res, cx| {
+                match res {
+                    Ok(present) => this.hf_token_present = present,
+                    Err(e) => this.notify(NoticeKind::Error, format!("读取钥匙串失败：{e}"), cx),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Stores or deletes the Hugging Face token in the Keychain.
+    ///
+    /// Params: `token` – `None` deletes; `cx`.
+    pub fn write_hf_token(&mut self, token: Option<String>, cx: &mut Context<Self>) {
+        bg(
+            cx,
+            move || hub::write_stored_token(token.as_deref()).map(|_| token.is_some()),
+            |this, res, cx| {
+                match res {
+                    Ok(saved) => {
+                        this.hf_token_present = saved;
+                        let msg = if saved {
+                            "Hugging Face 令牌已保存到钥匙串。"
+                        } else {
+                            "Hugging Face 令牌已删除。"
+                        };
+                        this.notify(NoticeKind::Success, msg, cx);
+                    }
+                    Err(e) => this.notify(NoticeKind::Error, format!("写入钥匙串失败：{e}"), cx),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Downloads the embedding model from Hugging Face, then loads it.
+    ///
+    /// Params: `url` – model page URL or `owner/name`; `cx`.
+    pub fn download_embedding(&mut self, url: String, cx: &mut Context<Self>) {
+        if self.model_download.is_some() {
+            self.notify(NoticeKind::Warning, "已有模型正在下载。", cx);
+            return;
+        }
+        let repo = match HubRepo::parse(&url) {
+            Ok(r) => r,
+            Err(e) => {
+                self.notify(NoticeKind::Warning, e.to_string(), cx);
+                return;
+            }
+        };
+        if self.cfg.embedding_model_url != url.trim() {
+            let u = url.trim().to_string();
+            self.update_config(cx, |c| c.embedding_model_url = u);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.model_download = Some(ModelDownload {
+            repo: repo.id.clone(),
+            progress: hub::Progress::default(),
+            cancel: cancel.clone(),
+        });
+        cx.notify();
+        let root = models_dir(&self.data_dir);
+        let (tx, rx) = async_channel::unbounded::<DownloadMsg>();
+        cx.background_spawn(async move {
+            let res = hub::resolve_token().and_then(|token| {
+                hub::download(&repo, &root, token.as_deref(), &cancel, &mut |p| {
+                    let _ = tx.try_send(DownloadMsg::Progress(p.clone()));
+                })
+            });
+            let _ = tx.try_send(DownloadMsg::Done(res));
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            while let Ok(msg) = rx.recv().await {
+                let done = matches!(msg, DownloadMsg::Done(_));
+                let _ = this.update(cx, |s, cx| {
+                    s.on_download_msg(msg, cx);
+                    cx.notify();
+                });
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Applies one message from the download thread.
+    ///
+    /// Params: `msg`; `cx`.
+    fn on_download_msg(&mut self, msg: DownloadMsg, cx: &mut Context<Self>) {
+        match msg {
+            DownloadMsg::Progress(p) => {
+                if let Some(d) = &mut self.model_download {
+                    d.progress = p;
+                }
+            }
+            DownloadMsg::Done(res) => {
+                self.model_download = None;
+                match res {
+                    Ok(dir) => {
+                        self.notify(NoticeKind::Success, "嵌入模型已下载，正在加载。", cx);
+                        self.load_embedding(dir, cx);
+                    }
+                    Err(hub::HubError::Cancelled) => {
+                        self.notify(NoticeKind::Info, "已取消下载，下次会从断点继续。", cx)
+                    }
+                    Err(e) => self.notify(NoticeKind::Error, e.to_string(), cx),
+                }
+            }
+        }
+    }
+
+    /// Stops the running download (partial files stay for resuming).
+    ///
+    /// Params: `cx`.
+    pub fn cancel_download(&mut self, cx: &mut Context<Self>) {
+        if let Some(d) = &self.model_download {
+            d.cancel.store(true, Ordering::Relaxed);
+        }
+        cx.notify();
     }
 
     // ---- settings ----------------------------------------------------------------------

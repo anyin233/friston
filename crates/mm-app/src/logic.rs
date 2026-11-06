@@ -478,6 +478,50 @@ pub fn spacing_text(cm: Option<f64>) -> String {
     cm.map(|v| format!("{v}")).unwrap_or_default()
 }
 
+/// Formats a byte count for people (decimal units, like Finder).
+///
+/// Params: `bytes`.
+/// Returns: e.g. `620 MB`, `1.5 GB`, `512 B`.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut v = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    while v >= 1000.0 && unit + 1 < UNITS.len() {
+        v /= 1000.0;
+        unit += 1;
+    }
+    // One decimal only where it carries information (1.5 GB, not 620.3 MB).
+    if v < 10.0 {
+        format!("{v:.1} {}", UNITS[unit])
+    } else {
+        format!("{v:.0} {}", UNITS[unit])
+    }
+}
+
+/// Describes a running model download for the settings page.
+///
+/// Params: `repo` – `owner/name`; `p` – progress.
+/// Returns: e.g. `正在下载 o/m：620 MB / 1.5 GB（41%），第 9/15 个文件`.
+pub fn download_line(repo: &str, p: &mm_service::hub::Progress) -> String {
+    if p.files_total == 0 {
+        return format!("正在获取 {repo} 的文件列表…");
+    }
+    let percent = (p.done_bytes * 100)
+        .checked_div(p.total_bytes)
+        .map(|pct| format!("（{pct}%）"))
+        .unwrap_or_default();
+    format!(
+        "正在下载 {repo}：{} / {}{percent}，第 {}/{} 个文件",
+        human_bytes(p.done_bytes),
+        human_bytes(p.total_bytes),
+        (p.files_done + 1).min(p.files_total),
+        p.files_total
+    )
+}
+
 /// Cues below this confidence say little about where someone sits.
 const MIN_CUE_CONFIDENCE: f32 = 0.15;
 /// Smoothing floor: after five cues the average becomes a moving one, so a speaker who
@@ -582,6 +626,39 @@ pub fn privacy_settings_url(message: &str) -> &'static str {
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
     } else {
         "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+    use mm_service::hub::Progress;
+
+    #[test]
+    fn bytes_and_download_progress_read_naturally() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(620_300_000), "620 MB");
+        assert_eq!(human_bytes(1_521_085_440), "1.5 GB");
+        assert_eq!(
+            download_line("o/m", &Progress::default()),
+            "正在获取 o/m 的文件列表…"
+        );
+        let p = Progress {
+            file: "model.safetensors".into(),
+            done_bytes: 620_000_000,
+            total_bytes: 1_500_000_000,
+            files_done: 8,
+            files_total: 15,
+        };
+        assert_eq!(
+            download_line("o/m", &p),
+            "正在下载 o/m：620 MB / 1.5 GB（41%），第 9/15 个文件"
+        );
+        let finished = Progress {
+            files_done: 15,
+            ..p
+        };
+        assert!(download_line("o/m", &finished).ends_with("第 15/15 个文件"));
     }
 }
 

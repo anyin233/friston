@@ -24,6 +24,7 @@ enum Field {
     Model,
     BaseUrl,
     EmbedDir,
+    EmbedUrl,
     LlmDir,
     Spacing,
 }
@@ -37,10 +38,14 @@ pub struct SettingsPage {
     base_url: Entity<InputState>,
     api_key: Entity<InputState>,
     embed_dir: Entity<InputState>,
+    embed_url: Entity<InputState>,
+    hf_token: Entity<InputState>,
     llm_dir: Entity<InputState>,
     spacing: Entity<InputState>,
     mics: Entity<SelectState<Vec<Choice>>>,
     mic_sig: Vec<String>,
+    /// Embedding folder last shown in `embed_dir`, to notice changes made elsewhere.
+    embed_dir_seen: Option<PathBuf>,
     /// BYOK kind chosen in the form (may differ from config until a model is typed).
     byok_kind: &'static str,
 }
@@ -120,6 +125,17 @@ impl SettingsPage {
             window,
             cx,
         );
+        let embed_url = mk(
+            cfg.embedding_model_url.clone(),
+            "模型地址，例如 https://huggingface.co/mlx-community/embeddinggemma-2-bf16",
+            window,
+            cx,
+        );
+        let hf_token = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("粘贴 Hugging Face 令牌（hf_…），保存后不会再显示")
+                .masked(true)
+        });
         let llm_dir = mk(
             path_text(&cfg.local_llm_dir),
             "本地纪要模型（MLX）文件夹",
@@ -147,6 +163,7 @@ impl SettingsPage {
             (&model, Field::Model),
             (&base_url, Field::BaseUrl),
             (&embed_dir, Field::EmbedDir),
+            (&embed_url, Field::EmbedUrl),
             (&llm_dir, Field::LlmDir),
             (&spacing, Field::Spacing),
         ] {
@@ -166,6 +183,7 @@ impl SettingsPage {
         })
         .detach();
         cx.observe_in(&app, window, |this, _, window, cx| {
+            this.sync_embed_dir(window, cx);
             this.sync_mics(window, cx)
         })
         .detach();
@@ -177,11 +195,27 @@ impl SettingsPage {
             base_url,
             api_key,
             embed_dir,
+            embed_url,
+            hf_token,
             llm_dir,
             spacing,
             mics,
             mic_sig: vec![],
+            embed_dir_seen: cfg.embedding_model_dir.clone(),
             byok_kind: kind,
+        }
+    }
+
+    /// Shows a model folder set elsewhere (a finished download) in the folder field.
+    ///
+    /// Params: `window`; `cx`.
+    fn sync_embed_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.app.read(cx).cfg.embedding_model_dir.clone();
+        if dir != self.embed_dir_seen {
+            let text = path_text(&dir);
+            self.embed_dir_seen = dir;
+            self.embed_dir
+                .update(cx, |s, cx| s.set_value(text, window, cx));
         }
     }
 
@@ -250,6 +284,14 @@ impl SettingsPage {
                 a.update_config(cx, |c| c.byok = p);
             }
             Field::EmbedDir => a.update_config(cx, |c| c.embedding_model_dir = parse_path(&value)),
+            Field::EmbedUrl => {
+                // An emptied field goes back to the suggested repo rather than to nothing.
+                let url = match value.trim() {
+                    "" => mm_service::hub::DEFAULT_EMBEDDING_REPO_URL.to_string(),
+                    v => v.to_string(),
+                };
+                a.update_config(cx, |c| c.embedding_model_url = url);
+            }
             Field::LlmDir => a.update_config(cx, |c| c.local_llm_dir = parse_path(&value)),
             Field::Spacing => match logic::parse_spacing_cm(&value) {
                 Ok(cm) => a.update_config(cx, |c| c.spatial_spacing_cm = cm),
@@ -732,7 +774,22 @@ impl SettingsPage {
             app.meeting_state.describe("字幕引擎 "),
             app.embed_state.describe("嵌入引擎 ")
         );
+        let download_line = app
+            .model_download
+            .as_ref()
+            .map(|d| logic::download_line(&d.repo, &d.progress));
+        let downloading = download_line.is_some();
+        let token_line = if app.hf_token_present {
+            "令牌已保存在钥匙串。"
+        } else if std::env::var_os("HF_TOKEN").is_some() {
+            "钥匙串里没有令牌，将使用环境变量 HF_TOKEN。"
+        } else {
+            "未设置：只能下载公开模型。"
+        };
         let (e_in, l_in) = (self.embed_dir.clone(), self.llm_dir.clone());
+        let u_in = self.embed_url.clone();
+        let (t_in, t_in2) = (self.hf_token.clone(), self.hf_token.clone());
+        let (a7, a8, a9) = (self.app.clone(), self.app.clone(), self.app.clone());
         let (a1, a2, a3, a4, a5, a6) = (
             self.app.clone(),
             self.app.clone(),
@@ -780,6 +837,85 @@ impl SettingsPage {
                             ),
                     )
                     .child(ui::muted(embed_line, cx)),
+                cx,
+            ))
+            .child(Self::row(
+                "从 Hugging Face 下载",
+                Some(format!(
+                    "下载到 {}，完成后自动加载。",
+                    mm_service::models_dir(&app.data_dir).display()
+                )),
+                v_flex()
+                    .gap_2()
+                    .child(Input::new(&self.embed_url))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .when(!downloading, |el| {
+                                el.child(
+                                    Button::new("embed-download")
+                                        .small()
+                                        .outline()
+                                        .icon(IconName::ArrowDown)
+                                        .label("下载并加载")
+                                        .on_click(move |_, _, cx| {
+                                            let url = u_in.read(cx).value().to_string();
+                                            a7.update(cx, |a, cx| a.download_embedding(url, cx));
+                                        }),
+                                )
+                            })
+                            .when(downloading, |el| {
+                                el.child(
+                                    Button::new("embed-download-cancel")
+                                        .small()
+                                        .ghost()
+                                        .label("取消下载")
+                                        .on_click(move |_, _, cx| {
+                                            a8.update(cx, |a, cx| a.cancel_download(cx))
+                                        }),
+                                )
+                            }),
+                    )
+                    .when_some(download_line, |el, line| el.child(ui::muted(line, cx))),
+                cx,
+            ))
+            .child(Self::row(
+                "Hugging Face 令牌",
+                Some("下载需要授权的模型时使用，只保存在 macOS 钥匙串。".into()),
+                v_flex()
+                    .gap_2()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(Input::new(&self.hf_token).mask_toggle()),
+                            )
+                            .child(
+                                Button::new("hf-token-save")
+                                    .outline()
+                                    .label("保存令牌")
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        let t = t_in.read(cx).value().trim().to_string();
+                                        if t.is_empty() {
+                                            return;
+                                        }
+                                        a9.update(cx, |a, cx| a.write_hf_token(Some(t), cx));
+                                        t_in.update(cx, |s, cx| s.set_value("", window, cx));
+                                    })),
+                            )
+                            .child(
+                                Button::new("hf-token-del")
+                                    .ghost()
+                                    .label("删除令牌")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        t_in2.update(cx, |s, cx| s.set_value("", window, cx));
+                                        this.app.update(cx, |a, cx| a.write_hf_token(None, cx));
+                                    })),
+                            ),
+                    )
+                    .child(ui::muted(token_line, cx)),
                 cx,
             ))
             .child(Self::row(

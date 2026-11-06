@@ -375,6 +375,11 @@ final class CaptionStream: @unchecked Sendable {
 
     /// Logs once per detected inter-channel delay jump, so field logs show when a wireless
     /// link re-paired and positions were re-learned.
+    /// Logs the learned stereo statistics (calibration aid); no-op for mono streams.
+    func logStereoSummary() {
+        if let stereo { log("captions \(origin.rawValue): stereo \(stereo.summary)") }
+    }
+
     private func logDelayJumps() {
         guard let stereo, stereo.delayJumps > loggedJumps else { return }
         loggedJumps = stereo.delayJumps
@@ -443,7 +448,9 @@ final class LiveCaptioner: @unchecked Sendable {
         if let micRate {
             let inbox = CaptionInbox(sampleRate: micRate, maxSeconds: maxBacklogSeconds)
             // Virtual/aggregate devices and multichannel devices without a preset give no pair.
-            let spatial = (mic.flatMap { try? SpatialArrayProfile.resolve(for: $0) } ?? nil)?
+            // Test rigs (loopback device fed a synthetic stereo signal) opt in by UID; the app never sets it.
+            let testUID = ProcessInfo.processInfo.environment["MM_SPATIAL_TEST_DEVICE_UID"]
+            let spatial = (mic.flatMap { try? SpatialArrayProfile.resolve(for: $0, testDeviceUID: testUID) } ?? nil)?
                 .adjusted(flip: preset.spatialFlip, spacingCm: preset.spatialSpacingCm)
             micSpatial = spatial
             streams.append(CaptionStream(origin: .microphone, inbox: inbox, ids: ids, spatial: spatial))
@@ -540,6 +547,7 @@ final class LiveCaptioner: @unchecked Sendable {
             if last { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
+        for stream in streams { stream.logStereoSummary() }
         log("captions \(sessionId): stopped")
     }
 

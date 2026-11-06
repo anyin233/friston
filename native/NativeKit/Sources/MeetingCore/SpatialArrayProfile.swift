@@ -49,13 +49,19 @@ public struct SpatialArrayProfile: Sendable, Equatable {
     /// - Parameters:
     ///   - device: The input as reported by ``AudioInputProbe``.
     ///   - preset: Explicit firmware layout for a multichannel array; `nil` to auto-detect.
+    ///   - testDeviceUID: UID of a loopback device used as a test rig (see the body).
     /// - Returns: A profile, or `nil` when the device carries no usable pair (mono, virtual, or a
     ///   multichannel device without a preset).
     /// - Throws: ``SpatialArrayProfileError`` when `preset` is given but the device does not match it.
-    public static func resolve(for device: AudioInputInfo, preset: SpatialArrayPreset? = nil) throws -> SpatialArrayProfile? {
+    public static func resolve(for device: AudioInputInfo, preset: SpatialArrayPreset? = nil,
+                               testDeviceUID: String? = nil) throws -> SpatialArrayProfile? {
         guard let preset else {
+            // Virtual devices are never mic arrays in normal use; the only exception is a test
+            // rig that feeds a loopback device a synthetic stereo signal and names its UID
+            // (`MM_SPATIAL_TEST_DEVICE_UID`, never set by the app).
+            let isTestRig = testDeviceUID != nil && device.uid == testDeviceUID
             // Only a plain stereo device is unambiguous; anything wider needs a preset.
-            guard device.supportsSpatialCues, device.channels == 2 else { return nil }
+            guard device.supportsSpatialCues || isTestRig, device.channels == 2 else { return nil }
             return SpatialArrayProfile(channelA: 0, channelB: 1, spacingMeters: nil,
                                        analyzerConfig: config(sampleRate: Float(device.sampleRate)))
         }

@@ -124,3 +124,13 @@ private let flexDevice = AudioInputInfo(uid: "flex", name: "reSpeaker Flex", cha
     #expect(abs(right - 30) < 0.5, "\(right)")
     #expect(try #require(spaced.azimuthDeg(delaySamples: 14)) < 0)
 }
+
+@Test func virtualDevicesStayNonSpatialUnlessNamedAsTheTestDevice() throws {
+    // A loopback driver carries mixed app audio, so it is never a mic array in normal use.
+    // Tests may feed it a synthetic stereo signal and name its UID explicitly.
+    let loopback = AudioInputInfo(uid: "loop", name: "WeMeet Audio Device", channels: 2, sampleRate: 48_000, isVirtual: true)
+    #expect(try SpatialArrayProfile.resolve(for: loopback) == nil)
+    #expect(try SpatialArrayProfile.resolve(for: loopback, testDeviceUID: "other") == nil)
+    let profile = try? SpatialArrayProfile.resolve(for: loopback, testDeviceUID: "loop")
+    #expect(profile?.channelA == 0 && profile?.channelB == 1)
+}

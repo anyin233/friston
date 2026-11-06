@@ -2,7 +2,7 @@
 
 # Friston
 
-> 原名 Meeting Master。仓库、crate、Bundle ID、数据目录（`~/Library/Application Support/Meeting Master`、`~/Movies/Meeting Master`）和钥匙串服务名暂时沿用旧名，以免丢失已有数据和系统授权。
+> 原名 Meeting Master。首次启动 Friston 时会把旧的数据文件夹、录音文件夹和钥匙串密钥迁移过来；Bundle ID 也换了，需要重新授权麦克风、录屏和日历。详见 `docs/architecture.md`。
 
 macOS 上的图形化会议工作台：录屏、录音、日程、实时字幕与说话人识别、自动转写、会议纪要生成与管理，以及全模态搜索（文字、图片、音频、视频）。笔记和纪要写进你的 Obsidian 库；没有自带 API 密钥时，通过本机 Codex 使用你的 ChatGPT 账号生成纪要。
 

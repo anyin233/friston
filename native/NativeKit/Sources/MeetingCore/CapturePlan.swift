@@ -19,7 +19,7 @@ public struct CapturePreset: Codable, Sendable, Equatable {
     public var captionLanguage: String?
     /// Screen frame rate; meetings are mostly static, so the default is low.
     public var fps: Int?
-    /// Overrides the recordings root (`~/Movies/Meeting Master`); used by tests and power users.
+    /// Overrides the recordings root (`~/Movies/Friston`; keep in sync with `default_recordings_dir` in mm-service); used by tests and power users.
     public var outputDirectory: String?
     /// Enrolled voiceprints for live speaker naming; samples from another embedding model are ignored.
     public var voiceprints: [VoiceprintSample]?
@@ -143,7 +143,7 @@ public struct CapturePlan: Sendable, Equatable {
 
     /// The default recordings root. Media stays outside the Obsidian vault; notes link to it.
     public static var defaultBaseDirectory: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Meeting Master", directoryHint: .isDirectory)
+        FileManager.default.homeDirectoryForCurrentUser.appending(path: "Movies/Friston", directoryHint: .isDirectory)
     }
 
     /// Validates a preset and lays out its output files. Does not touch the filesystem.

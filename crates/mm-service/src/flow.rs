@@ -20,7 +20,21 @@ use crate::config::AppConfig;
 use crate::live::SpeakerDirectory;
 
 /// URL scheme registered by the app; `open?meeting=<id>&t=<ms>` seeks a recording.
-pub const URL_SCHEME: &str = "meeting-master";
+pub const URL_SCHEME: &str = "friston";
+
+/// Scheme used before the rename. Still registered and parsed because existing Obsidian
+/// notes contain these links and we never rewrite text outside managed blocks.
+pub const LEGACY_URL_SCHEME: &str = "meeting-master";
+
+/// Whether `url` uses one of the app's schemes.
+///
+/// Params: `url`.
+/// Returns: `true` for `friston://…` and `meeting-master://…`.
+pub fn is_app_url(url: &str) -> bool {
+    [URL_SCHEME, LEGACY_URL_SCHEME]
+        .iter()
+        .any(|s| url.strip_prefix(s).is_some_and(|r| r.starts_with("://")))
+}
 
 /// Builds a seek link into a meeting.
 ///
@@ -35,7 +49,9 @@ pub fn seek_url(meeting: MeetingId, ms: u64) -> String {
 /// Params: `url` – as delivered by macOS.
 /// Returns: meeting and offset (0 when absent).
 pub fn parse_seek_url(url: &str) -> Option<(MeetingId, u64)> {
-    let query = url.strip_prefix(&format!("{URL_SCHEME}://open?"))?;
+    let query = [URL_SCHEME, LEGACY_URL_SCHEME]
+        .iter()
+        .find_map(|s| url.strip_prefix(&format!("{s}://open?")))?;
     let mut meeting = None;
     let mut t = 0;
     for pair in query.split('&') {
@@ -640,6 +656,10 @@ mod tests {
         let m = MeetingId::new();
         assert_eq!(parse_seek_url(&seek_url(m, 61_000)), Some((m, 61_000)));
         assert_eq!(parse_seek_url("https://x"), None);
+        assert!(seek_url(m, 0).starts_with("friston://"));
+        // Notes written before the rename keep the old scheme; they must still open.
+        let old = format!("meeting-master://open?meeting={m}&t=5");
+        assert_eq!(parse_seek_url(&old), Some((m, 5)));
     }
 
     #[test]

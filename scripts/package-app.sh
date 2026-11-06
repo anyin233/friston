@@ -14,7 +14,7 @@ if [[ "${1:-}" != "--skip-engines" ]]; then
   "$ROOT/scripts/build-engines.sh" Release
 fi
 (cd "$ROOT" && cargo build --release -p mm-app)
-rm -rf "$APP"
-write_bundle "$APP" "$ROOT/target/release/meeting-master" "dev.meetingmaster.app" "Friston" "$ROOT/target/engines/Release"
+rm -rf "$APP" "$ROOT/target/release/Meeting Master.app"
+write_bundle "$APP" "$ROOT/target/release/meeting-master" "dev.friston.app" "Friston" "$ROOT/target/engines/Release"
 sign_bundle "$APP"
 echo "$APP"

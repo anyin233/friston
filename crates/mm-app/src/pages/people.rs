@@ -31,8 +31,7 @@ impl PeoplePage {
     pub fn new(app: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("名字，例如 王伟"));
         let clip_path = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("录音文件路径，例如 ~/Movies/Meeting Master/…/mic.caf")
+            InputState::new(window, cx).placeholder("录音文件路径，例如 ~/Movies/Friston/…/mic.caf")
         });
         let clip_start = cx.new(|cx| InputState::new(window, cx).placeholder("开始（秒或 分:秒）"));
         let clip_end = cx.new(|cx| InputState::new(window, cx).placeholder("结束（秒或 分:秒）"));

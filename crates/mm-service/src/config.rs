@@ -26,7 +26,7 @@ pub struct AppConfig {
     pub caption_language: Option<String>,
     /// Screen frame rate.
     pub fps: u32,
-    /// Overrides `~/Movies/Meeting Master`.
+    /// Overrides `~/Movies/Friston` ([`default_recordings_dir`]).
     pub recordings_dir: Option<PathBuf>,
     /// Local EmbeddingGemma 2 checkpoint folder.
     pub embedding_model_dir: Option<PathBuf>,
@@ -78,16 +78,37 @@ impl Default for AppConfig {
     }
 }
 
+/// Folder name used for the app's data and recordings.
+pub const APP_DIR_NAME: &str = "Friston";
+
+/// Whether `MM_DATA_DIR` redirects the data folder (tests, sandboxes).
+///
+/// Returns: `true` when the override is set; legacy migration then stays out of the way.
+pub fn data_dir_overridden() -> bool {
+    std::env::var_os("MM_DATA_DIR").is_some()
+}
+
 /// Folder holding `config.json` and the database.
 ///
-/// Returns: `MM_DATA_DIR` if set (tests, sandboxes), else `~/Library/Application Support/Meeting Master`.
+/// Returns: `MM_DATA_DIR` if set (tests, sandboxes), else `~/Library/Application Support/Friston`.
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("MM_DATA_DIR") {
         return PathBuf::from(dir);
     }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Meeting Master")
+        .join(APP_DIR_NAME)
+}
+
+/// Where the engine writes recordings when `recordings_dir` is unset.
+///
+/// Must match `CaptureLayout`'s default in `native/NativeKit/Sources/MeetingCore/CapturePlan.swift`.
+/// Returns: `~/Movies/Friston`.
+pub fn default_recordings_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Movies")
+        .join(APP_DIR_NAME)
 }
 
 /// Folder downloaded models are written to.
@@ -131,6 +152,28 @@ impl AppConfig {
             .map_err(|e| ServiceError::Config(format!("writing {}: {e}", path.display())))
     }
 
+    /// Points folder settings that lived inside `old` at the same place inside `new`.
+    ///
+    /// Used after the data folder moved (models downloaded in-app live under it).
+    /// Params: `old` – previous folder; `new` – its new location.
+    /// Returns: `true` if any setting changed (the caller then saves).
+    pub fn rebase_paths(&mut self, old: &Path, new: &Path) -> bool {
+        let mut changed = false;
+        for slot in [
+            &mut self.recordings_dir,
+            &mut self.embedding_model_dir,
+            &mut self.local_llm_dir,
+        ] {
+            if let Some(p) = slot.as_ref()
+                && let Ok(rest) = p.strip_prefix(old)
+            {
+                *slot = Some(new.join(rest));
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Fills in a vault from Obsidian's registry when none is configured yet.
     ///
     /// Returns: `true` if a vault was adopted.
@@ -156,6 +199,29 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rebase_paths_only_touches_folders_inside_the_old_one() {
+        let old = std::path::Path::new("/u/AS/Meeting Master");
+        let new = std::path::Path::new("/u/AS/Friston");
+        let mut cfg = super::AppConfig {
+            embedding_model_dir: Some(old.join("models/google--embeddinggemma")),
+            local_llm_dir: Some("/u/AS/Meeting Master Old/llm".into()),
+            ..Default::default()
+        };
+
+        assert!(cfg.rebase_paths(old, new));
+
+        assert_eq!(
+            cfg.embedding_model_dir,
+            Some(new.join("models/google--embeddinggemma"))
+        );
+        assert_eq!(
+            cfg.local_llm_dir,
+            Some("/u/AS/Meeting Master Old/llm".into())
+        );
+        assert!(!cfg.rebase_paths(old, new));
+    }
+
     use super::*;
 
     #[test]

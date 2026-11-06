@@ -30,7 +30,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEV_APP_SCRIPT = REPO_ROOT / "scripts" / "dev-app.sh"
-DEFAULT_BUNDLE_ID = os.environ.get("MM_DEV_BUNDLE_ID", "dev.meetingmaster.app.dev")
+DEFAULT_BUNDLE_ID = os.environ.get("MM_DEV_BUNDLE_ID", "dev.friston.app.dev")
 CUA_SERVICE_APP = Path.home() / ".codex" / "computer-use" / "Codex Computer Use.app"
 STATUSES = ("pass", "fail", "blocked")
 HARNESS_ERROR = 3

@@ -42,7 +42,7 @@
 | `systemAudio` | 录系统声音（不含本进程），48 kHz 立体声写入 `system.caf` |
 | `captionLanguage` | 字幕语言提示（BCP-47，如 `zh`、`en-US`）；缺省、`auto` 或模型不支持的语言都交给模型自动识别 |
 | `fps` | 1–60，默认 15 |
-| `outputDirectory` | 覆盖默认根目录 `~/Movies/Meeting Master` |
+| `outputDirectory` | 覆盖默认根目录 `~/Movies/Friston` |
 | `voiceprints` | 可选，预录声纹 `[{personId, model, vector:[Float]}]`；`model` 与 `initialize` 返回的 `capabilities.speakerEmbeddingModel` 不同的向量会被忽略 |
 | `spatialFlip` | 可选，默认 `false`。左右翻转：交换方位分析用的两个声道，所有方位线索镜像 |
 | `spatialSpacingCm` | 可选，两支麦克风的间距（厘米）。知道间距时引擎会给出 `azimuthDeg`；硬件预设（如 ReSpeaker）自带的间距优先 |

@@ -1,7 +1,7 @@
 # 架构
 
 ```
-┌───────────────────────── Meeting Master.app ──────────────────────────┐
+┌───────────────────────────── Friston.app ─────────────────────────────┐
 │                                                                       │
 │  meeting-master (Rust, GPUI Kit)                                      │
 │  ├─ mm-app      界面：今天 / 日程 / 会议中 / 纪要库 / 说话人 / 设置 + 浮窗字幕 │
@@ -30,7 +30,7 @@
 ## 一场会议的数据流
 
 1. **会前**：`calendar/events` 拉取日程，识别会议链接；为会议创建 Obsidian 笔记（frontmatter、参会者 `[[双链]]`、空的受管区块）。
-2. **开始记录**：`capture/start` 按预设启动：ScreenCaptureKit 只录指定窗口；麦克风（多声道时保留原始声道用于 GCC-PHAT）；系统声音。音视频由引擎直接写入 `~/Movies/Meeting Master/`，不经过 IPC。
+2. **开始记录**：`capture/start` 按预设启动：ScreenCaptureKit 只录指定窗口；麦克风（多声道时保留原始声道用于 GCC-PHAT）；系统声音。音视频由引擎直接写入 `~/Movies/Friston/`，不经过 IPC。
 3. **实时字幕**：引擎推送 `caption/partial`（易变）和 `caption/final`（定稿，带说话人标签、流来源、方位），以及会话中途的 `speaker/relabel`（例如用户把“说话人 4”命名为赵磊）。GPUI 同时更新主窗口的字幕区和浮窗字幕。
 4. **边开会边记笔记**：笔记编辑器即时保存到 Obsidian 文件；`⌘↩` 插入当前时间戳（链接回转写），截图直接嵌入笔记。
 5. **自动索引**（全程无需操作）：
@@ -50,21 +50,21 @@
 
 | 模块 | 职责 |
 | --- | --- |
-| `config` | `~/Library/Application Support/Meeting Master/config.json`（可用 `MM_DATA_DIR` 覆盖），缺键用默认值 |
+| `config` | `~/Library/Application Support/Friston/config.json`（可用 `MM_DATA_DIR` 覆盖），缺键用默认值 |
 | `engines` | 定位引擎（`MM_ENGINES_DIR` → App 包内 `Contents/Resources/engines/<引擎>/` → `target/engines/{Debug,Release}`），类型化调用，权限错误单独区分 |
 | `live` | 字幕板（易变/定稿/撤回/改标）与说话人目录（名字和色相：同一个人在所有界面同一色相） |
 | `flow` | 一场会议的各步：建笔记 → 录制预设（含已登记声纹）→ 定稿入库并写入笔记 `transcript` 区块 → 会后精转写合并 → 纪要写入 `minutes` / `actions` 区块 |
-| `hub` | 从 Hugging Face（或镜像）下载模型：按提交固定版本、逐文件写 `.part` 后改名、断点续传、可取消，写到 `<数据文件夹>/models/<作者>--<模型>/`；令牌存钥匙串（服务 `Meeting Master`，账户 `huggingface`），没有时用 `HF_TOKEN` |
+| `hub` | 从 Hugging Face（或镜像）下载模型：按提交固定版本、逐文件写 `.part` 后改名、断点续传、可取消，写到 `<数据文件夹>/models/<作者>--<模型>/`；令牌存钥匙串（服务 `Friston`，账户 `huggingface`），没有时用 `HF_TOKEN` |
 | `indexer` | 后台线程：Obsidian 库 FSEvents → 防抖 → 增量分块 → 按模型戳补嵌入；会议进行时减小批量，把 GPU 让给字幕 |
 
 纪要提供方按 BYOK → Codex → 本地 MLX 的顺序选择。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。
 
-纪要里的时间戳链接形如 `meeting-master://open?meeting=<id>&t=<毫秒>`，App 注册了这个 URL scheme。
+纪要里的时间戳链接形如 `friston://open?meeting=<id>&t=<毫秒>`。App 同时注册 `friston` 和旧的 `meeting-master`，因为更名前写进笔记的链接仍用旧 scheme。
 
 ## 打包
 
-- `scripts/dev-app.sh launch`：开发包 `target/debug/MeetingMasterDev.app`，内含 Debug 引擎；每个引擎带自己的资源包和 `mlx.metallib`，放在独立目录里（两个引擎的 MLX 版本不同，资源包同名）。
-- `scripts/package-app.sh`：发布包 `target/release/Meeting Master.app`（Release 引擎），`MM_SIGN_IDENTITY` 指定签名身份，默认 ad-hoc。
+- `scripts/dev-app.sh launch`：开发包 `target/debug/FristonDev.app`（Bundle ID `dev.friston.app.dev`），内含 Debug 引擎；每个引擎带自己的资源包和 `mlx.metallib`，放在独立目录里（两个引擎的 MLX 版本不同，资源包同名）。
+- `scripts/package-app.sh`：发布包 `target/release/Friston.app`（Bundle ID `dev.friston.app`）（Release 引擎），`MM_SIGN_IDENTITY` 指定签名身份，默认 ad-hoc。
 - 两者共用 `scripts/lib/bundle.sh`：Info.plist 里写麦克风、日历、屏幕录制、系统声音的用途说明和 URL scheme。
 
 ## 进程与权限
@@ -86,3 +86,13 @@ design/mockups/  界面原型（HTML/SVG），index.html 可直接打开
 docs/            本文档、技术栈、说话人识别、引擎协议
 scripts/         bootstrap.sh、build-engines.sh；dev-app.sh + gui_agent.py（GUI 自动化测试，见 docs/agent-gui-testing.md）
 ```
+
+## 从 Meeting Master 更名为 Friston
+
+启动时 `mm_service::legacy` 做一次性迁移，之后不再触发：
+
+- `~/Library/Application Support/Meeting Master` 改名为 `…/Friston`；设置里指向旧文件夹内部的路径（如应用内下载的模型）一并改写。
+- 没自定义录音文件夹时，`~/Movies/Meeting Master` 改名为 `~/Movies/Friston`，数据库里的 `meetings.recording_dir`、素材 `sources.uri` 和声纹片段路径随之改写（`Store::rebase_paths`）。
+- 新旧文件夹同时存在时两边都不动，只提示用户。设置了 `MM_DATA_DIR` 时跳过迁移。
+- 钥匙串密钥在第一次读取时从服务 `Meeting Master` 移到 `Friston`（`mm_llm::keychain`）。
+- Bundle ID 从 `dev.meetingmaster.app(.dev)` 换成 `dev.friston.app(.dev)`，所以麦克风、录屏、日历权限和 Computer Use 授权要重新给一次。

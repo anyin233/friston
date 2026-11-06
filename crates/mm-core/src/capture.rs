@@ -38,7 +38,7 @@ pub struct CapturePreset {
     /// Screen frame rate, 1–60; the engine defaults to 15.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
-    /// Overrides `~/Movies/Meeting Master`.
+    /// Overrides `~/Movies/Friston`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_directory: Option<PathBuf>,
     /// Enrolled voiceprints so live captions can name known people.

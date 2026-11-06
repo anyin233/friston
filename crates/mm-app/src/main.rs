@@ -26,12 +26,12 @@ fn main() {
         )
         .init();
 
-    // URLs (meeting-master://open?…) arrive from macOS before or after launch; queue them
+    // URLs (friston://open?…, or meeting-master:// from older notes) arrive from macOS before or after launch; queue them
     // until the state exists. Command-line arguments with the scheme are treated the same,
     // which also makes the handler testable without registering the scheme.
     let (url_tx, url_rx) = async_channel::unbounded::<String>();
     for arg in std::env::args().skip(1) {
-        if arg.starts_with(&format!("{}://", mm_service::flow::URL_SCHEME)) {
+        if mm_service::flow::is_app_url(&arg) {
             let _ = url_tx.send_blocking(arg);
         }
     }

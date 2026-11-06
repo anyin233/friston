@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUNDLE_ID="${MM_DEV_BUNDLE_ID:-dev.meetingmaster.app.dev}"
+BUNDLE_ID="${MM_DEV_BUNDLE_ID:-dev.friston.app.dev}"
 APP_NAME="Friston Dev"
 BIN_NAME="meeting-master"
 
@@ -28,7 +28,9 @@ target_dir() {
   fi
 }
 
-APP_PATH="$(target_dir)/debug/MeetingMasterDev.app"
+APP_PATH="$(target_dir)/debug/FristonDev.app"
+# Bundle from before the Friston rename; removed on build so it cannot claim the URL schemes.
+LEGACY_APP_PATH="$(target_dir)/debug/MeetingMasterDev.app"
 # shellcheck source=lib/bundle.sh
 source "$REPO_ROOT/scripts/lib/bundle.sh"
 
@@ -53,6 +55,7 @@ build() {
   bin="$(target_dir)/debug/$BIN_NAME"
   [[ -x "$bin" ]] || { echo "error: expected binary at $bin after build" >&2; exit 1; }
 
+  rm -rf "$LEGACY_APP_PATH"
   write_bundle "$APP_PATH" "$bin" "$BUNDLE_ID" "$APP_NAME" "${MM_ENGINES_DIR:-$REPO_ROOT/target/engines/Debug}"
   local identity
   identity="$(sign_identity)"
@@ -63,9 +66,11 @@ build() {
   echo "$APP_PATH"
 }
 
-# pids: print PIDs of running dev-bundle instances (empty if none).
+# pids: print PIDs of running dev-bundle instances (empty if none), including a pre-rename build
+#   still running from the legacy path, so `launch` never leaves two copies fighting over the data folder.
 pids() {
   pgrep -f "$APP_PATH/Contents/MacOS/$BIN_NAME" || true
+  pgrep -f "$LEGACY_APP_PATH/Contents/MacOS/$BIN_NAME" || true
 }
 
 # stop: terminate running dev instances, escalating to SIGKILL if they ignore SIGTERM.

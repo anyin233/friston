@@ -20,12 +20,14 @@ use mm_core::{
     VoiceprintSource,
 };
 use mm_engine::EngineEvent;
+use mm_service::config::{data_dir_overridden, default_recordings_dir};
 use mm_service::engines::{
     EMBEDD, EmbedEngine, EmbedStatus, LlmStatus, MEETINGD, MeetingEngine, MeetingNotice,
     decode_notice, locate_engine,
 };
 use mm_service::hub::{self, HubRepo};
 use mm_service::indexer::{Indexer, IndexerEvent, IndexerMsg, current_stamp};
+use mm_service::legacy::{self, FolderMove};
 use mm_service::live::{CaptionBoard, SpeakerDirectory, person_hue};
 use mm_service::{AppConfig, ServiceError, data_dir, flow, models_dir};
 use mm_store::{IndexStats, Store};
@@ -286,6 +288,28 @@ impl AppState {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let dir = data_dir();
         let mut notices = Vec::new();
+        // The rename to Friston moved the data folder; tests that redirect it never had one.
+        let legacy_data = legacy::legacy_sibling(&dir);
+        let data_moved = !data_dir_overridden()
+            && match legacy::move_folder(&legacy_data, &dir) {
+                Ok(FolderMove::Moved) => true,
+                Ok(FolderMove::BothExist) => {
+                    notices.push((
+                        NoticeKind::Warning,
+                        format!(
+                            "旧数据文件夹 {} 还在，没有合并到 {}。确认不需要后可以删掉它。",
+                            legacy_data.display(),
+                            dir.display()
+                        ),
+                    ));
+                    false
+                }
+                Ok(FolderMove::NothingToMove) => false,
+                Err(e) => {
+                    notices.push((NoticeKind::Error, format!("迁移数据文件夹失败：{e}")));
+                    false
+                }
+            };
         if let Err(e) = std::fs::create_dir_all(&dir) {
             notices.push((
                 NoticeKind::Error,
@@ -323,6 +347,41 @@ impl AppState {
             if let Err(e) = cfg.save(&dir) {
                 notices.push((NoticeKind::Error, e.to_string()));
             }
+        }
+        if data_moved
+            && cfg.rebase_paths(&legacy_data, &dir)
+            && let Err(e) = cfg.save(&dir)
+        {
+            notices.push((NoticeKind::Error, e.to_string()));
+        }
+        if !data_dir_overridden() {
+            let new_rec = default_recordings_dir();
+            let old_rec = legacy::legacy_sibling(&new_rec);
+            match legacy::migrate_recordings(&store, &cfg, &old_rec, &new_rec) {
+                Ok(FolderMove::Moved) => notices.push((
+                    NoticeKind::Info,
+                    format!("录音已移到 {}。", new_rec.display()),
+                )),
+                Ok(FolderMove::BothExist) => notices.push((
+                    NoticeKind::Warning,
+                    format!(
+                        "旧录音文件夹 {} 还在，没有合并到 {}，旧会议仍从原位置读取。",
+                        old_rec.display(),
+                        new_rec.display()
+                    ),
+                )),
+                Ok(FolderMove::NothingToMove) => {}
+                Err(e) => notices.push((NoticeKind::Error, format!("迁移录音文件夹失败：{e}"))),
+            }
+        }
+        if data_moved {
+            notices.push((
+                NoticeKind::Info,
+                format!(
+                    "Meeting Master 已更名为 Friston，数据已移到 {}。",
+                    dir.display()
+                ),
+            ));
         }
         let store = Arc::new(Mutex::new(store));
         let (indexer, index_events) = Indexer::start(store.clone(), cfg.vault_path.clone());
@@ -1972,7 +2031,7 @@ impl AppState {
 
     // ---- links ---------------------------------------------------------------------------
 
-    /// Handles a `meeting-master://open?meeting=…&t=…` URL.
+    /// Handles a `friston://open?meeting=…&t=…` URL.
     ///
     /// Params: `url`; `cx`.
     pub fn open_url(&mut self, url: &str, cx: &mut Context<Self>) {

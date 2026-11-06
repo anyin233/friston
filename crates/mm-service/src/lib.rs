@@ -1,9 +1,9 @@
-//! Headless application services for Meeting Master.
+//! Headless application services for Friston.
 //!
 //! The GPUI app owns windows and rendering; everything it *does* lives here so it can
 //! be tested without a display or engines:
 //!
-//! * [`config`] – settings persisted in `~/Library/Application Support/Meeting Master`.
+//! * [`config`] – settings persisted in `~/Library/Application Support/Friston`.
 //! * [`engines`] – locating and calling `mm-meetingd` / `mm-embedd` with typed results.
 //! * [`live`] – live caption board and speaker names/hues.
 //! * [`flow`] – note → recording → transcript → minutes steps of one meeting.
@@ -15,6 +15,7 @@ pub mod engines;
 pub mod flow;
 pub mod hub;
 pub mod indexer;
+pub mod legacy;
 pub mod live;
 
 pub use config::{AppConfig, data_dir, models_dir};

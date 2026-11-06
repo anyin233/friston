@@ -48,7 +48,7 @@ write_bundle() {
   <key>CFBundleURLTypes</key>
   <array><dict>
     <key>CFBundleURLName</key><string>$bundle_id.open</string>
-    <key>CFBundleURLSchemes</key><array><string>meeting-master</string></array>
+    <key>CFBundleURLSchemes</key><array><string>friston</string><string>meeting-master</string></array>
   </dict></array>
 </dict></plist>
 PLIST

@@ -23,7 +23,7 @@ fn clock(ms: u64) -> String {
 /// the user's task queries.
 ///
 /// Params: `m` – minutes; `seek` – builds a link for a transcript offset (e.g. a
-/// `meeting-master://` URL), or `None` to print plain timestamps.
+/// `friston://` URL), or `None` to print plain timestamps.
 /// Returns: the two block bodies.
 pub fn render_minutes(m: &Minutes, seek: Option<&dyn Fn(u64) -> String>) -> RenderedMinutes {
     let mut minutes = format!("### 摘要\n\n{}\n", m.summary.trim());

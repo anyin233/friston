@@ -10,7 +10,7 @@ running app through OpenAI's Codex Computer Use and get a structured pass/fail r
 your agent ──shell──▶ scripts/gui_agent.py run "<task>"
                           │  codex exec (headless, read-only, JSON-schema output)
                           ▼
-                     Codex ──cua_repl──▶ Codex Computer Use service ──AX/screenshots──▶ MeetingMasterDev.app (shown as Friston Dev)
+                     Codex ──cua_repl──▶ Codex Computer Use service ──AX/screenshots──▶ FristonDev.app
 ```
 
 - The Computer Use service (`~/.codex/computer-use/Codex Computer Use.app`) only accepts
@@ -19,7 +19,7 @@ your agent ──shell──▶ scripts/gui_agent.py run "<task>"
   delegate to `codex exec` instead of wiring the MCP server into other agents.
 - Computer Use addresses apps by name, bundle id or `.app` path and rejects bare cargo
   binaries (`Invalid app`). `scripts/dev-app.sh` wraps the debug build into
-  `target/debug/MeetingMasterDev.app` with the stable bundle id `dev.meetingmaster.app.dev`,
+  `target/debug/FristonDev.app` with the stable bundle id `dev.friston.app.dev`,
   so the one-time approval keeps working across rebuilds.
 
 ## One-time setup (human)
@@ -85,8 +85,8 @@ approved / app not running) · `3` harness error (codex missing, timeout, malfor
   launchctl unsetenv MM_DATA_DIR
   ```
 
-- `Computer Use server error -10005: noWindowsAvailable` 是间歇性的：先 `osascript -e 'tell application id "dev.meetingmaster.app.dev" to activate'`，确认只有一个实例在运行，再重试。
+- `Computer Use server error -10005: noWindowsAvailable` 是间歇性的：先 `osascript -e 'tell application id "dev.friston.app.dev" to activate'`，确认只有一个实例在运行，再重试。
 - TCC 按签名的"指定要求"识别 App。`scripts/dev-app.sh` 默认用钥匙串里第一个 `Apple Development` 身份签名，指定要求只包含 bundle id 和证书，重建后不变，所以麦克风、屏幕与系统录音只需授权一次。第一次签名时钥匙串会询问 codesign 能否使用私钥，选"始终允许"。
 - 没有 `Apple Development` 身份时，脚本会提示并改用 ad-hoc 签名。这时指定要求是 cdhash，每次重建都会被当成新 App，需要重新授权。没有开发者账号的 Mac 可以在"钥匙串访问"里自建一张代码签名证书，再用 `MM_SIGN_IDENTITY` 指定它。用 `scripts/dev-app.sh sign-identity` 查看当前使用的身份，用 `codesign -d -r- "$(scripts/dev-app.sh path)"` 确认指定要求里没有 `cdhash`。
-- 换了签名身份（比如从 ad-hoc 换成证书）之后，需要再授权一次。要从头测授权流程，只重置开发包，例如 `tccutil reset Microphone dev.meetingmaster.app.dev`。
+- 换了签名身份（比如从 ad-hoc 换成证书）之后，需要再授权一次。要从头测授权流程，只重置开发包，例如 `tccutil reset Microphone dev.friston.app.dev`。
 - 从终端或 Claude 启动的进程，权限算在启动它的 App（终端、Claude）头上，而不是 Friston Dev。

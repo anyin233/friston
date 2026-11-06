@@ -19,11 +19,25 @@ public final class GCCPHAT {
     private let fftSize: Int
     private let forward: vDSP.DiscreteFourierTransform<Float>
     private let inverse: vDSP.DiscreteFourierTransform<Float>
+    /// Per-bin weight (1 inside the analysis band, 0 outside); all ones for full band.
+    private let bandMask: [Float]
+    /// PHAT exponent: 1 is classic PHAT; 0.8 when a sample rate (speech band) is given.
+    private let phatBeta: Float
 
     /// Creates an estimator for frames of `frameCount` samples.
-    /// - Parameter frameCount: Samples per channel per estimate (e.g. 1024 at 16 kHz ≈ 64 ms).
+    ///
+    /// PHAT gives every frequency bin the same weight, so bins with no speech are as loud as
+    /// bins with speech. When those empty bins carry noise that is identical in both channels
+    /// (upsampled audio, loopback drivers, USB electrical noise) the peak locks onto lag 0
+    /// (measured: 48 kHz capture of 16 kHz speech read ±24 samples as ~0). Restricting the
+    /// weighting to the speech band, and skipping bins far below the frame's strongest one,
+    /// keeps the peak on the talker.
+    /// - Parameters:
+    ///   - frameCount: Samples per channel per estimate (e.g. 1024 at 16 kHz ≈ 64 ms).
+    ///   - sampleRate: Capture rate in Hz; `nil` analyses the full band (no frequency mapping).
+    ///   - band: Analysis band in Hz, used when `sampleRate` is given.
     /// - Throws: If vDSP cannot create a transform of the padded size.
-    public init(frameCount: Int) throws {
+    public init(frameCount: Int, sampleRate: Float? = nil, band: ClosedRange<Float> = 80...6_000) throws {
         self.frameCount = frameCount
         // Zero-pad to ≥ 2× so circular correlation does not wrap real lags.
         var n = 16
@@ -33,6 +47,15 @@ public final class GCCPHAT {
             count: n, direction: .forward, transformType: .complexComplex, ofType: Float.self)
         inverse = try vDSP.DiscreteFourierTransform(
             count: n, direction: .inverse, transformType: .complexComplex, ofType: Float.self)
+        phatBeta = sampleRate == nil ? 1 : 0.8
+        if let sampleRate {
+            bandMask = (0..<n).map { k in
+                let hz = Float(min(k, n - k)) * sampleRate / Float(n)
+                return band.contains(hz) ? 1 : 0
+            }
+        } else {
+            bandMask = [Float](repeating: 1, count: n)
+        }
     }
 
     /// Estimates the delay of `b` relative to `a`.
@@ -49,14 +72,28 @@ public final class GCCPHAT {
         let (br, bi) = forward.transform(real: pad(b), imaginary: zeros)
 
         // R = A · conj(B), then PHAT: R / |R|.
+        var cre = [Float](repeating: 0, count: fftSize)
+        var cim = [Float](repeating: 0, count: fftSize)
+        var mags = [Float](repeating: 0, count: fftSize)
+        var strongest: Float = 0
+        for k in 0..<fftSize where bandMask[k] > 0 {
+            cre[k] = ar[k] * br[k] + ai[k] * bi[k]
+            cim[k] = ai[k] * br[k] - ar[k] * bi[k]
+            mags[k] = (cre[k] * cre[k] + cim[k] * cim[k]).squareRoot()
+            strongest = max(strongest, mags[k])
+        }
+        // Bins 60 dB below the strongest carry no speech at all.
+        let floor = max(strongest * 1e-6, 1e-12)
         var rr = [Float](repeating: 0, count: fftSize)
         var ri = [Float](repeating: 0, count: fftSize)
-        for k in 0..<fftSize {
-            let re = ar[k] * br[k] + ai[k] * bi[k]
-            let im = ai[k] * br[k] - ar[k] * bi[k]
-            let mag = max((re * re + im * im).squareRoot(), 1e-12)
-            rr[k] = re / mag
-            ri[k] = im / mag
+        var used: Float = 0
+        for k in 0..<fftSize where bandMask[k] > 0 && mags[k] > floor {
+            // PHAT-β: dividing by |R|^β (β < 1) keeps part of the magnitude, so bins where the
+            // talker is loud outweigh noise-only bins, while the peak stays sharp in reverb.
+            let w = 1 / pow(mags[k], phatBeta)
+            rr[k] = cre[k] * w
+            ri[k] = cim[k] * w
+            used += pow(mags[k], 1 - phatBeta)
         }
         let (corr, _) = inverse.transform(real: rr, imaginary: ri)
 
@@ -73,7 +110,8 @@ public final class GCCPHAT {
         let denom = l - 2 * c + r
         let offset = abs(denom) > 1e-9 ? 0.5 * (l - r) / denom : 0
         let peak = Float(bestLag) + max(-0.5, min(0.5, offset))
-        return TDOAEstimate(delaySamples: -peak, confidence: max(0, min(1, best / Float(fftSize))))
+        // Normalise by the bins that took part, so band-limiting does not shrink confidence.
+        return TDOAEstimate(delaySamples: -peak, confidence: max(0, min(1, best / max(used, 1))))
     }
 
     /// Converts a delay into an azimuth for a two-microphone array.

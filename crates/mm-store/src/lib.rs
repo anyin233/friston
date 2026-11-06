@@ -170,6 +170,37 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Rewrites stored absolute paths after a folder was moved (the Meeting Master → Friston rename).
+    ///
+    /// Covers `meetings.recording_dir`, asset `sources.uri` and voiceprint clip paths. Only paths
+    /// equal to `old` or below it change; `old` is matched as a whole path component, so a sibling
+    /// such as `<old> Old/` keeps its value.
+    ///
+    /// Params: `old` – the folder's previous location; `new` – where it lives now.
+    /// Returns: the number of rows rewritten.
+    pub fn rebase_paths(&self, old: &Path, new: &Path) -> Result<usize, StoreError> {
+        let old = old.to_string_lossy();
+        let new = new.to_string_lossy();
+        let old_dir = format!("{old}/");
+        let new_dir = format!("{new}/");
+        // substr() instead of LIKE: folder names may contain `%` or `_`.
+        let n = self.conn.execute(
+            "UPDATE meetings SET recording_dir = ?2 || substr(recording_dir, length(?1) + 1)
+             WHERE recording_dir = ?1 OR substr(recording_dir, 1, length(?3)) = ?3",
+            params![old, new, old_dir],
+        )? + self.conn.execute(
+            "UPDATE sources SET uri = ?2 || substr(uri, length(?1) + 1)
+             WHERE kind = 'asset' AND (uri = ?1 OR substr(uri, 1, length(?3)) = ?3)",
+            params![old, new, old_dir],
+        )? + self.conn.execute(
+            // serde_json leaves `/`, spaces and CJK unescaped, so the path appears verbatim.
+            "UPDATE voiceprints SET source_json = replace(source_json, ?1, ?2)
+             WHERE instr(source_json, ?1) > 0",
+            params![old_dir, new_dir],
+        )?;
+        Ok(n)
+    }
+
     /// Direct access for crates that own their own queries (indexer, search).
     pub fn conn(&self) -> &Connection {
         &self.conn
@@ -198,6 +229,60 @@ pub(crate) fn f32_from_bytes(b: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rebase_paths_moves_only_paths_under_the_old_root() {
+        let store = Store::open_in_memory().unwrap();
+        let c = store.conn();
+        c.execute_batch(
+            "INSERT INTO meetings(id, title, starts_at, status, venue_json, recording_dir) VALUES
+               ('m1', 'a', '2026-11-05T00:00:00Z', 'done', '{}', '/u/Movies/Meeting Master/2026 a'),
+               ('m2', 'b', '2026-11-05T00:00:00Z', 'done', '{}', '/u/Movies/Meeting Master Old/x'),
+               ('m3', 'c', '2026-11-05T00:00:00Z', 'done', '{}', NULL);
+             INSERT INTO sources(kind, uri, content_hash, updated_at) VALUES
+               ('asset', '/u/Movies/Meeting Master/2026 a/mic.caf', 'h', 'now'),
+               ('note', 'Meetings/a.md', 'h', 'now');
+             INSERT INTO people(id, display_name) VALUES ('p1', '甲');
+             INSERT INTO voiceprints(id, person_id, model, vector, source_json, speech_ms) VALUES
+               ('v1', 'p1', 'm', x'', '{\"kind\":\"clip\",\"asset_path\":\"/u/Movies/Meeting Master/2026 a/mic.caf\"}', 1);",
+        )
+        .unwrap();
+
+        let n = store
+            .rebase_paths(
+                Path::new("/u/Movies/Meeting Master"),
+                Path::new("/u/Movies/Friston"),
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+
+        let dirs: Vec<Option<String>> = c
+            .prepare("SELECT recording_dir FROM meetings ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            dirs,
+            vec![
+                Some("/u/Movies/Friston/2026 a".into()),
+                // A sibling folder that merely shares the prefix must stay untouched.
+                Some("/u/Movies/Meeting Master Old/x".into()),
+                None
+            ]
+        );
+        let uri: String = c
+            .query_row("SELECT uri FROM sources WHERE kind = 'asset'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(uri, "/u/Movies/Friston/2026 a/mic.caf");
+        let json: String = c
+            .query_row("SELECT source_json FROM voiceprints", [], |r| r.get(0))
+            .unwrap();
+        assert!(json.contains("/u/Movies/Friston/2026 a/mic.caf"), "{json}");
+    }
 
     fn unit(dim_hot: usize) -> Vec<f32> {
         let mut v = vec![0.0; EMBEDDING_DIMS];

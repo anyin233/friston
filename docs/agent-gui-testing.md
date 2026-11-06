@@ -1,6 +1,6 @@
 # Agent-driven GUI testing (Codex Computer Use)
 
-Meeting Master is a GPUI desktop app, so unit tests cannot cover real interaction.
+Friston (formerly Meeting Master) is a GPUI desktop app, so unit tests cannot cover real interaction.
 This harness lets **any** coding agent (Claude Code, Codex, OpenCode, CI scripts…) drive the
 running app through OpenAI's Codex Computer Use and get a structured pass/fail report.
 
@@ -10,7 +10,7 @@ running app through OpenAI's Codex Computer Use and get a structured pass/fail r
 your agent ──shell──▶ scripts/gui_agent.py run "<task>"
                           │  codex exec (headless, read-only, JSON-schema output)
                           ▼
-                     Codex ──cua_repl──▶ Codex Computer Use service ──AX/screenshots──▶ Meeting Master Dev.app
+                     Codex ──cua_repl──▶ Codex Computer Use service ──AX/screenshots──▶ MeetingMasterDev.app (shown as Friston Dev)
 ```
 
 - The Computer Use service (`~/.codex/computer-use/Codex Computer Use.app`) only accepts
@@ -30,10 +30,10 @@ your agent ──shell──▶ scripts/gui_agent.py run "<task>"
    so do it once interactively:
 
    ```bash
-   codex -C . "Use Computer Use to get the app state of 'Meeting Master Dev'"
+   codex -C . "Use Computer Use to get the app state of 'Friston Dev'"
    ```
 
-   and choose **Always allow** when asked about *Meeting Master Dev*. The bridge then reuses
+   and choose **Always allow** when asked about *Friston Dev*. The bridge then reuses
    that stored approval by running `codex exec -c approval_policy="on-request"`: exec's default
    policy (`never`) makes Computer Use reject even approved apps.
 4. Verify: `scripts/gui_agent.py check`, then a smoke test (below) must return `pass`.
@@ -42,7 +42,7 @@ your agent ──shell──▶ scripts/gui_agent.py run "<task>"
 
 ```bash
 scripts/dev-app.sh launch                       # rebuild + (re)start the app
-scripts/gui_agent.py run "Verify the main window shows the text 'Meeting Master'."
+scripts/gui_agent.py run "Verify the main window shows the text 'Friston'."
 scripts/gui_agent.py run --launch "<task>"      # rebuild + relaunch, then test
 echo "<long multi-line task>" | scripts/gui_agent.py run -
 scripts/dev-app.sh stop
@@ -89,4 +89,4 @@ approved / app not running) · `3` harness error (codex missing, timeout, malfor
 - TCC 按签名的"指定要求"识别 App。`scripts/dev-app.sh` 默认用钥匙串里第一个 `Apple Development` 身份签名，指定要求只包含 bundle id 和证书，重建后不变，所以麦克风、屏幕与系统录音只需授权一次。第一次签名时钥匙串会询问 codesign 能否使用私钥，选"始终允许"。
 - 没有 `Apple Development` 身份时，脚本会提示并改用 ad-hoc 签名。这时指定要求是 cdhash，每次重建都会被当成新 App，需要重新授权。没有开发者账号的 Mac 可以在"钥匙串访问"里自建一张代码签名证书，再用 `MM_SIGN_IDENTITY` 指定它。用 `scripts/dev-app.sh sign-identity` 查看当前使用的身份，用 `codesign -d -r- "$(scripts/dev-app.sh path)"` 确认指定要求里没有 `cdhash`。
 - 换了签名身份（比如从 ad-hoc 换成证书）之后，需要再授权一次。要从头测授权流程，只重置开发包，例如 `tccutil reset Microphone dev.meetingmaster.app.dev`。
-- 从终端或 Claude 启动的进程，权限算在启动它的 App（终端、Claude）头上，而不是 Meeting Master Dev。
+- 从终端或 Claude 启动的进程，权限算在启动它的 App（终端、Claude）头上，而不是 Friston Dev。

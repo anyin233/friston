@@ -125,13 +125,17 @@ impl Render for SchedulePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let today = Local::now().date_naive();
         let body = match &self.app.read(cx).events {
-            Loadable::Ready(evs) if evs.is_empty() => ui::muted("未来 7 天没有日历上的会议。", cx).into_any_element(),
+            Loadable::Ready(evs) if evs.is_empty() => {
+                ui::muted("未来 7 天没有日历上的会议。", cx).into_any_element()
+            }
             Loadable::Ready(evs) => {
                 let groups = logic::group_by_day(evs);
                 let mut ix = 0;
                 let mut sections = Vec::new();
                 for (day, evs) in groups {
-                    let mut section = v_flex().gap_2().child(ui::section_title(logic::day_heading(day, today)));
+                    let mut section = v_flex()
+                        .gap_2()
+                        .child(ui::section_title(logic::day_heading(day, today)));
                     for ev in &evs {
                         ix += 1;
                         section = section.child(self.event(ix, ev, cx));
@@ -144,7 +148,10 @@ impl Render for SchedulePage {
                 .gap_2()
                 .child(ui::load_error("cal-err", e, cx))
                 .when(e.permission, |el| {
-                    el.child(ui::muted("在“系统设置 › 隐私与安全性 › 日历”里允许 Meeting Master 访问日历，然后点“刷新”。", cx))
+                    el.child(ui::muted(
+                        "在“系统设置 › 隐私与安全性 › 日历”里允许 Friston 访问日历，然后点“刷新”。",
+                        cx,
+                    ))
                 })
                 .into_any_element(),
             _ => ui::loading("正在读取日历…", cx).into_any_element(),

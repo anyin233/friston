@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, bundle and run Meeting Master as a macOS .app for agent-driven GUI testing.
+# Build, bundle and run Friston as a macOS .app for agent-driven GUI testing.
 #
 # Why a bundle: Codex Computer Use addresses apps by name, bundle id or .app path and
 # refuses bare executables ("Invalid app"). Its per-app approval is keyed to the app, so
@@ -16,7 +16,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUNDLE_ID="${MM_DEV_BUNDLE_ID:-dev.meetingmaster.app.dev}"
-APP_NAME="Meeting Master Dev"
+APP_NAME="Friston Dev"
 BIN_NAME="meeting-master"
 
 # target_dir: print cargo's target directory (honours CARGO_TARGET_DIR and config).

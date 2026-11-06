@@ -42,7 +42,7 @@ impl CodexInput {
 /// Params: `version` – this app's version string.
 /// Returns: params with `clientInfo`.
 pub fn initialize_params(version: &str) -> Value {
-    json!({"clientInfo": {"name": "meeting-master", "title": "Meeting Master", "version": version}})
+    json!({"clientInfo": {"name": "meeting-master", "title": "Friston", "version": version}})
 }
 
 /// `thread/start` params for a side-effect-free minutes thread.

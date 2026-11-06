@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Friston</title>
+  <!-- macOS icon grid: 824px squircle-ish tile centred in a 1024px canvas. -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="#1d1c24"/>
+  <ellipse cx="512" cy="852" rx="300" ry="26" fill="#14131a"/>
+
+  <!-- Back ball wheel, behind everything. -->
+  <circle cx="712" cy="772" r="66" fill="#34333c"/>
+  <path d="M664 760a52 52 0 0 1 60-44" stroke="#4a4953" stroke-width="14" stroke-linecap="round" fill="none"/>
+
+  <!-- Side battery cylinder with checker band. -->
+  <rect x="770" y="352" width="66" height="214" rx="22" fill="#2b2a32"/>
+  <rect x="770" y="352" width="22" height="214" rx="11" fill="#38373f"/>
+  <g fill="#e8e4dc">
+    <rect x="770" y="488" width="16.5" height="16"/><rect x="803" y="488" width="16.5" height="16"/>
+    <rect x="786.5" y="504" width="16.5" height="16"/><rect x="819.5" y="504" width="16.5" height="16"/>
+  </g>
+
+  <!-- Neck. -->
+  <rect x="380" y="640" width="270" height="60" rx="16" fill="#2b2a32"/>
+
+  <!-- Body shell: two flat tones stand in for the render's lighting. -->
+  <rect x="250" y="292" width="500" height="372" rx="72" fill="#a3a495"/>
+  <path d="M600 292h78a72 72 0 0 1 72 72v228a72 72 0 0 1-72 72h-78z" fill="#87897b"/>
+  <rect x="660" y="420" width="64" height="14" rx="7" fill="#6e7064"/>
+  <rect x="660" y="448" width="64" height="14" rx="7" fill="#6e7064"/>
+  <rect x="660" y="476" width="64" height="14" rx="7" fill="#6e7064"/>
+  <circle cx="692" cy="574" r="17" fill="#f2efe8"/>
+  <path d="M692 557a17 17 0 0 1 17 17h-17zM692 591a17 17 0 0 1-17-17h17z" fill="#e8662c"/>
+
+  <!-- Orange trim and the dark red glass face. -->
+  <rect x="276" y="330" width="22" height="300" rx="11" fill="#e8662c"/>
+  <rect x="300" y="330" width="296" height="300" rx="54" fill="#3b1d23"/>
+  <path d="M354 330h188a54 54 0 0 1 54 54v20H300v-20a54 54 0 0 1 54-54z" fill="#4a2730"/>
+  <rect x="480" y="352" width="84" height="14" rx="7" fill="#6a3a44"/>
+
+  <!-- Face: glowing eye, the white doodle mark, and chibi blush. -->
+  <circle cx="448" cy="492" r="92" fill="#ff3d3d" opacity="0.18"/>
+  <circle cx="448" cy="492" r="62" fill="#ff3d3d"/>
+  <circle cx="448" cy="492" r="30" fill="none" stroke="#ffe9e2" stroke-width="10"/>
+  <circle cx="428" cy="468" r="11" fill="#fff6f2"/>
+  <path d="M374 476c-4 48 12 92 74 92s78-44 74-92" fill="none" stroke="#f6f1e8" stroke-width="12" stroke-linecap="round"/>
+  <path d="M366 414h164" stroke="#f6f1e8" stroke-width="12" stroke-linecap="round"/>
+  <path d="M398 364l8 30M448 358v36M498 364l-8 30" stroke="#f6f1e8" stroke-width="11" stroke-linecap="round"/>
+  <ellipse cx="350" cy="568" rx="24" ry="14" fill="#f2a3a0" opacity="0.85"/>
+  <ellipse cx="548" cy="568" rx="24" ry="14" fill="#f2a3a0" opacity="0.85"/>
+
+  <!-- Camera module on the top-left corner. -->
+  <rect x="200" y="232" width="146" height="108" rx="26" fill="#55574e"/>
+  <rect x="200" y="232" width="146" height="40" rx="20" fill="#6b6d63"/>
+  <rect x="284" y="244" width="40" height="18" rx="6" fill="#ffe3a3"/>
+  <circle cx="250" cy="300" r="24" fill="#1d1c24"/>
+  <circle cx="250" cy="300" r="24" fill="none" stroke="#cfcfc3" stroke-width="7"/>
+
+  <!-- Front grille panel. -->
+  <rect x="352" y="684" width="250" height="132" rx="26" fill="#2f2e36"/>
+  <g fill="none" stroke="#4b4a54" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M384 716l22 18 22-18M456 716l22 18 22-18M528 716l22 18 22-18"/>
+    <path d="M384 768l22 18 22-18M456 768l22 18 22-18M528 768l22 18 22-18"/>
+  </g>
+
+  <!-- Orange wheel pods and wheels. -->
+  <rect x="236" y="700" width="118" height="104" rx="32" fill="#e8662c"/>
+  <rect x="236" y="760" width="118" height="44" rx="22" fill="#c9521f"/>
+  <rect x="590" y="690" width="136" height="114" rx="34" fill="#e8662c"/>
+  <rect x="590" y="756" width="136" height="48" rx="24" fill="#c9521f"/>
+  <circle cx="290" cy="814" r="52" fill="#26252c"/>
+  <circle cx="290" cy="814" r="22" fill="#cfcfc3"/>
+  <circle cx="290" cy="814" r="8" fill="#26252c"/>
+  <circle cx="632" cy="814" r="52" fill="#26252c"/>
+  <circle cx="632" cy="814" r="22" fill="#cfcfc3"/>
+  <circle cx="632" cy="814" r="8" fill="#26252c"/>
+</svg>

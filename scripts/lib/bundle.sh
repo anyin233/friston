@@ -10,8 +10,10 @@
 write_bundle() {
   local app="$1" bin="$2" bundle_id="$3" name="$4" engines="$5"
   local macos="$app/Contents/MacOS" helpers="$app/Contents/Resources/engines"
-  mkdir -p "$macos"
+  mkdir -p "$macos" "$app/Contents/Resources"
   cp -f "$bin" "$macos/meeting-master"
+  # The icon is committed as .icns (regenerate with scripts/make-icon.sh) so bundling needs no rasteriser.
+  cp -f "$(dirname "${BASH_SOURCE[0]}")/../../crates/mm-app/assets/Friston.icns" "$app/Contents/Resources/Friston.icns"
   # Contents/Helpers held engines in earlier builds; drop it so stale copies never get signed.
   rm -rf "$helpers" "$app/Contents/Helpers"
   for engine in mm-meetingd mm-embedd; do
@@ -32,6 +34,7 @@ write_bundle() {
   <key>CFBundleIdentifier</key><string>$bundle_id</string>
   <key>CFBundleName</key><string>$name</string>
   <key>CFBundleDisplayName</key><string>$name</string>
+  <key>CFBundleIconFile</key><string>Friston</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>

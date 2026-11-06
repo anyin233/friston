@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent-agnostic GUI test bridge: drive Meeting Master through Codex Computer Use.
+"""Agent-agnostic GUI test bridge: drive Friston through Codex Computer Use.
 
 Any agent (Claude Code, Codex, OpenCode, a CI job…) that can run a shell command can
 use this to interact with the running GUI. It hands a natural-language task to a
@@ -74,9 +74,9 @@ def build_prompt(task: str, bundle_id: str) -> str:
     Returns:
         The full prompt for ``codex exec``.
     """
-    return f"""You are a GUI test executor for the Meeting Master desktop app under development.
+    return f"""You are a GUI test executor for the Friston desktop app under development.
 
-Target app: bundle id `{bundle_id}` (name "Meeting Master Dev"). It is already running.
+Target app: bundle id `{bundle_id}` (name "Friston Dev"). It is already running.
 Use Computer Use to operate it. Do not interact with any other app, do not edit files,
 and do not run shell commands that change state.
 
@@ -185,7 +185,7 @@ def check() -> int:
     for name, ok in checks:
         print(f"[{'ok' if ok else 'MISSING'}] {name}")
     print(
-        "note: Computer Use must be approved once for 'Meeting Master Dev' "
+        "note: Computer Use must be approved once for 'Friston Dev' "
         "(see docs/agent-gui-testing.md)."
     )
     return 0 if all(ok for _, ok in checks) else HARNESS_ERROR

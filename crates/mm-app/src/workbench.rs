@@ -6,7 +6,7 @@ use gpui_kit::component::sidebar::{
     Sidebar, SidebarFooter, SidebarGroup, SidebarHeader, SidebarMenu, SidebarMenuItem,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, Sizable as _, TitleBar, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -20,6 +20,24 @@ use crate::pages::schedule::SchedulePage;
 use crate::pages::settings::SettingsPage;
 use crate::pages::today::TodayPage;
 use crate::state::{AppEvent, AppState, EngineState, NoticeKind};
+
+/// Product name shown in the title bar and sidebar.
+pub const APP_NAME: &str = "Friston";
+
+/// The app icon rasterised by `scripts/make-icon.sh`, so the sidebar logo matches the Dock icon.
+const LOGO_PNG: &[u8] = include_bytes!("../assets/friston-logo-64.png");
+
+/// Builds the full-colour sidebar logo from the embedded PNG.
+///
+/// Returns: an image element sized for the sidebar header.
+fn logo() -> impl IntoElement {
+    // `svg()` tints every path one colour and `img()` drew this SVG blank, so use a PNG.
+    img(std::sync::Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        LOGO_PNG.to_vec(),
+    )))
+    .size_5()
+}
 
 /// Top-level workbench state.
 pub struct Workbench {
@@ -137,12 +155,8 @@ impl Workbench {
                 SidebarHeader::new().child(
                     h_flex()
                         .gap_2()
-                        .child(Icon::new(IconName::Mic).small())
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child("Meeting Master"),
-                        ),
+                        .child(logo())
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(APP_NAME)),
                 ),
             )
             .child(SidebarGroup::new("工作台").child(SidebarMenu::new().children(items)))
@@ -203,7 +217,7 @@ impl Workbench {
                 .w_full()
                 .pr_3()
                 .justify_between()
-                .child("Meeting Master")
+                .child(APP_NAME)
                 .child(
                     h_flex()
                         .gap_3()

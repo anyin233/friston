@@ -53,7 +53,7 @@ fn main() {
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| Workbench::new(s, window, cx))
         })
-        .expect("failed to open the Meeting Master window");
+        .expect("failed to open the Friston window");
         cx.spawn(async move |cx| {
             while let Ok(url) = url_rx.recv().await {
                 state.update(cx, |s, cx| s.open_url(&url, cx));

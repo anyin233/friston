@@ -53,7 +53,7 @@ scripts/package-app.sh
 1. 打开 App 后在“设置”里确认 Obsidian 库（会自动发现）。
 2. 第一次开始记录时，macOS 会请求麦克风、屏幕录制（录窗口和系统声音）和日历权限，需要逐一允许。
 3. 实时字幕模型（Qwen3-ASR 0.6B、Silero VAD、WeSpeaker，约 0.7 GB）第一次录制时自动下载到 `~/Library/Caches/qwen3-speech`。
-4. 搜索的语义部分需要在“设置”里选择 EmbeddingGemma 2 文件夹并加载；没有它时只用关键词检索。
+4. 搜索的语义部分需要 EmbeddingGemma 2。在“设置 → 本地模型与搜索索引”点“下载并加载”，默认从 `https://huggingface.co/mlx-community/embeddinggemma-2-bf16` 下载（约 1.5 GB，可换成镜像地址，例如 `https://hf-mirror.com/…`），完成后自动加载；也可以直接填已有的模型文件夹。下载需要授权的模型时，在同一页保存 Hugging Face 令牌（存进钥匙串，没有时使用环境变量 `HF_TOKEN`）。没有嵌入模型时只用关键词检索。
 5. 纪要提供方：配置了 API 密钥就用 BYOK；否则用已登录的 `codex`（ChatGPT 账号）；都没有时可以加载本地模型（如 Qwen3-4B-Instruct 4bit）。
 
 ## 已知限制

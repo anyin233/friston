@@ -54,6 +54,7 @@
 | `engines` | 定位引擎（`MM_ENGINES_DIR` → App 包内 `Contents/Resources/engines/<引擎>/` → `target/engines/{Debug,Release}`），类型化调用，权限错误单独区分 |
 | `live` | 字幕板（易变/定稿/撤回/改标）与说话人目录（名字和色相：同一个人在所有界面同一色相） |
 | `flow` | 一场会议的各步：建笔记 → 录制预设（含已登记声纹）→ 定稿入库并写入笔记 `transcript` 区块 → 会后精转写合并 → 纪要写入 `minutes` / `actions` 区块 |
+| `hub` | 从 Hugging Face（或镜像）下载模型：按提交固定版本、逐文件写 `.part` 后改名、断点续传、可取消，写到 `<数据文件夹>/models/<作者>--<模型>/`；令牌存钥匙串（服务 `Meeting Master`，账户 `huggingface`），没有时用 `HF_TOKEN` |
 | `indexer` | 后台线程：Obsidian 库 FSEvents → 防抖 → 增量分块 → 按模型戳补嵌入；会议进行时减小批量，把 GPU 让给字幕 |
 
 纪要提供方按 BYOK → Codex → 本地 MLX 的顺序选择。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。

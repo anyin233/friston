@@ -77,7 +77,7 @@
 | Cargo 依赖 | gpui-kit 0.9、rusqlite（bundled SQLite）、sqlite-vec 0.1.9 等，见 `Cargo.lock` |
 | SwiftPM 依赖 | mlx-swift 0.33.0、mlx-swift-lm main、swift-transformers 1.4.0、swift-huggingface 0.13.0、speech-swift 0.0.29 及其传递依赖，见各包的 `Package.resolved` |
 
-已下载到 Hugging Face 缓存（`~/.cache/huggingface/hub`）：`mlx-community/embeddinggemma-2-bf16`（1.5 GB）、`mlx-community/Qwen3-4B-Instruct-2507-4bit`（离线纪要，约 2.3 GB）。在“设置”里选择对应的 snapshot 文件夹即可加载。
+已下载到 Hugging Face 缓存（`~/.cache/huggingface/hub`）：`mlx-community/embeddinggemma-2-bf16`（1.5 GB）、`mlx-community/Qwen3-4B-Instruct-2507-4bit`（离线纪要，约 2.3 GB）。在“设置”里选择对应的 snapshot 文件夹即可加载；嵌入模型也可以在设置页直接从 Hugging Face 下载（`mm-service::hub`，用 `ureq`，默认地址即上面的 bf16 仓库）。
 
 ## 实测（2026-11-05，M5 Pro）
 

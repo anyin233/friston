@@ -203,3 +203,29 @@ private func turns(_ analyzer: StereoCueAnalyzer, talkers: [Int], offset: Int, r
     let louderOnA = analyzer.reportedPosition(of: cues[1]!)[0]
     #expect(louderOnB > 0.7 && louderOnA < -0.7, "\(louderOnB) / \(louderOnA)")
 }
+
+@Test func quietCommonNoiseBetweenTurnsDoesNotSkewPositions() throws {
+    // Between turns the pair hears only low-level noise that is the same in both channels
+    // (USB electrical noise, loopback drivers). Those frames correlate at lag 0; if they feed
+    // the learned range, its centre drifts and the talkers stop sitting symmetrically.
+    let analyzer = try StereoCueAnalyzer()
+    var frames: [[StereoFrameCue]] = [[], []]
+    var seed: UInt64 = 500
+    for _ in 0..<20 {
+        for (i, delay) in [-24, 24].enumerated() {
+            for _ in 0..<3 {
+                let (a, b) = talker(delay: delay, seed: seed); seed += 1
+                if let cue = analyzer.analyze(a, b) { frames[i].append(cue) }
+            }
+            for _ in 0..<4 {
+                let common = noise(frame, seed: seed).map { $0 * 0.01 }
+                let own = noise(frame, seed: seed &+ 77).map { $0 * 0.0005 }
+                seed += 1
+                _ = analyzer.analyze(common, zip(common, own).map { $0 + $1 })
+            }
+        }
+    }
+    let x = frames.map { analyzer.segmentCue($0)!.position[0] }
+    #expect(x[0] < -0.7 && x[1] > 0.7, "positions \(x)")
+    #expect(abs(x[0] + x[1]) < 0.3, "talkers should sit symmetrically: \(x)")
+}

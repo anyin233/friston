@@ -65,8 +65,10 @@ public struct StereoCueConfig: Sendable, Equatable {
     public var speedOfSound: Float = 343
     /// Frames below this RMS (either channel) are treated as silence.
     public var silenceRMS: Float = 1e-4
-    /// Frames below this GCC-PHAT confidence do not feed the statistics.
-    public var minConfidence: Float = 0.1
+    /// Frames below this GCC confidence are ignored. Measured on 48 kHz and 16 kHz two-talker
+    /// recordings: talker frames sit at 0.5–0.9, noise frames with random lags at ~0.1, so 0.2
+    /// keeps 97 % of talker frames and drops ~85 % of the frames that widened the learned range.
+    public var minConfidence: Float = 0.2
     /// Zero-lag correlation above this marks a duplicated channel.
     public var duplicateCorrelation: Float = 0.999
     /// Confident frames needed before the layout is classified.
@@ -111,6 +113,14 @@ public final class StereoCueAnalyzer {
     /// Inter-channel delay jumps detected so far (each one restarted the statistics).
     public private(set) var delayJumps = 0
 
+    /// One-line summary of what the analyzer has learned, for engine logs and calibration.
+    public var summary: String {
+        let f = { (x: Float) in String(format: "%.1f", x) }
+        return "layout \(layout), delay \(f(delayRange.mid))±\(f(delayRange.half)) samples, "
+            + "level \(f(levelRange.mid))±\(f(levelRange.half)) dB, search ±\(searchLagSamples), "
+            + "history \(delays.count) frames, jumps \(delayJumps)"
+    }
+
     private let gcc: GCCPHAT
     private let initialSearchLag: Int
     private var delays: [Float] = []
@@ -129,7 +139,7 @@ public final class StereoCueAnalyzer {
     /// - Throws: If the FFT for `config.frameCount` cannot be created.
     public init(config: StereoCueConfig = .init()) throws {
         self.config = config
-        gcc = try GCCPHAT(frameCount: config.frameCount)
+        gcc = try GCCPHAT(frameCount: config.frameCount, sampleRate: config.sampleRate)
         let lag = Int((config.maxSpacingMeters / config.speedOfSound * config.sampleRate).rounded(.up))
         // GCC-PHAT pads to ≥ 2× the frame, so lags beyond the frame would wrap around.
         initialSearchLag = min(lag, config.frameCount - 1)

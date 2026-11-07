@@ -10,7 +10,7 @@
 | 应用语言 | Rust（edition 2024） | rustc 1.99.1，`rust-toolchain.toml` 锁定 | 已安装 |
 | 原生引擎 | Swift 6 可执行文件 × 2，通过 stdio JSON-RPC 与 Rust 通信 | Xcode 27.1 / Swift 6.4，macOS 15+ | 已编译、已冒烟测试 |
 | 推理框架 | **MLX**（GPU，M5 神经加速器）+ **Core ML**（神经引擎） | mlx-swift 0.33.0 | 已编译 |
-| 实时字幕 / 转写 | Qwen3-ASR（0.6B 流式 / 1.7B 会后）+ Qwen3-ForcedAligner，来自 speech-swift | speech-swift 0.0.29 | 依赖已编译，模型未下载 |
+| 实时字幕 / 转写 | Qwen3-ASR（1.7B 4bit 实时 / 1.7B 8bit 会后）+ Qwen3-ForcedAligner，来自 speech-swift | speech-swift 0.0.29 | 依赖已编译，模型未下载 |
 | 说话人 | Sortformer 流式分离 + WeSpeaker/CAM++ 声纹 + GCC-PHAT 方位（自研） | 同上 | 融合逻辑已实现并测试 |
 | 多模态嵌入 | **EmbeddingGemma 2**（文字/图片/音频/视频，768 维，MRL） | mlx-swift-lm `main@c8dabc6` | 已实测：文字检索排序正确，录音按时间窗嵌入可用 |
 | 存储 / 检索 | SQLite（rusqlite bundled）+ **sqlite-vec** + FTS5 trigram | rusqlite 0.41，sqlite-vec =0.1.9 | 已测试（KNN、中文全文） |
@@ -46,7 +46,7 @@
 - 权重：`mlx-community/embeddinggemma-2-bf16`（官方 MLX 转换），约 1.6 GB。mlx-vlm 的测试表明 8-bit 几乎无损，但普通 4-bit 达不到精度要求，所以默认用 bf16。
 
 ### 4. 语音：Qwen3-ASR + Sortformer + 声纹 + 方位
-- Qwen3-ASR 支持中、英、日、韩以及 22 种中文方言，有流式模式。实时字幕用 0.6B，会后精转写用 1.7B，再用 ForcedAligner 得到逐字时间戳。
+- Qwen3-ASR 支持中、英、日、韩以及 22 种中文方言，有流式模式。实时字幕用 1.7B 4bit（2026-11-06 从 0.6B 换来，字错误率 4.78% → 3.63%，见 [asr-model-survey.md](asr-model-survey.md) 第 5 节），会后精转写用 1.7B 8bit，再用 ForcedAligner 得到逐字时间戳。
 - 说话人识别的设计见 [speaker-identification.md](speaker-identification.md)。
 - 备选：Apple SpeechAnalyzer（系统自带，零下载），可以作为实时字幕的降级方案。
 
@@ -84,11 +84,12 @@
 | 项目 | 结果 | 复跑 |
 | --- | --- | --- |
 | 实时字幕中文准确率（Qwen3-ASR 0.6B 4bit，合成语音 58 秒、8 句） | 字错误率 2.4% | 测试脚本见会话记录：`caption/simulateFile` 以实时速度回放，与参考文本按字比对 |
-| 定稿字幕延迟（从一句话结束到字幕定稿） | 中位数约 3.6 秒，p90 约 4.9 秒（多次运行在 3.2–3.7 秒间波动）；其中约 1 秒是等 Sortformer 确认说话人 | 同上 |
-| 第一条易变字幕（从真实开口算起） | 中位数 2.5 秒（第一条在说满 0.5 秒时就解码，之前 3.1 秒） | 同上 |
+| 定稿字幕延迟（从一句话结束到字幕定稿） | 中位数 0.77 秒，p90 0.88 秒（AISHELL-1 拼接 7 分钟）。2026-11-06 之前的 3.6 秒偏高：`caption/simulateFile` 每 100 ms 固定睡眠，回放比实时慢约 4%，延迟随时长累积；现已按时钟定步 | 同上 |
+| 第一条易变字幕（从真实开口算起） | 中位数 1.15 秒，p90 4.45 秒（同上，已修正回放定步） | 同上 |
+| 实时字幕 0.6B 对 1.7B（AISHELL-1 测试集 70 句拼成 7 分钟） | 字错误率 0.6B 4bit 4.78%、1.7B 4bit 3.63%、1.7B 8bit 3.63%；定稿延迟 0.77 / 0.81 / 0.84 秒；内存峰值 0.82 / 1.66 / 2.49 GB | [asr-model-survey.md](asr-model-survey.md) 第 5 节 |
 | 会后精转写速度（Qwen3-ASR 1.7B 8bit） | 约 0.2–0.3 倍实时（50 秒录音 14–15 秒） | `transcribe/file` |
 | 说话人分离 | 见 [speaker-identification.md](speaker-identification.md) 的 AMI 评测 | `scripts/eval-diarization.py` |
-| 内存：`mm-meetingd` 实时字幕模型（0.6B + VAD + WeSpeaker + Sortformer） | 约 1.0 GB | `footprint` |
+| 内存：`mm-meetingd` 实时字幕模型（1.7B 4bit + VAD + WeSpeaker + Sortformer） | 进程峰值约 1.7 GB（换模型前 0.6B 为 0.8 GB） | `ps` 采样 RSS |
 | 内存：`mm-embedd` 加载 EmbeddingGemma 2 | 约 0.75 GB；再加载本地 Qwen3-4B 纪要模型后约 2.9 GB | `footprint` |
 | 会后 1.7B 模型 | 用完即释放；MLX 缓存会占住约 1 GB，现在转写结束后主动清空（MLX 活跃内存回到 0.7 GB） | 引擎日志 `MLX active … cache … → 0 MB` |
 

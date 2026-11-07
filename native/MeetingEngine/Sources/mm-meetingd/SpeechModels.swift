@@ -7,8 +7,11 @@ import MeetingCore
 
 /// Model ids reported in `initialize` and stamped on voiceprints.
 enum SpeechModelIDs {
-    /// Live captions: small and fast (RTF ≈ 0.012 on Apple silicon).
-    static let liveASR = Qwen3ASRModel.defaultModelId
+    /// Live captions: 1.7B 4bit. On AISHELL-1 through the live pipeline it cut CER from 4.78 %
+    /// (0.6B 4bit) to 3.63 % while adding only ~40 ms of final latency on an M5 Pro; 8bit gave
+    /// identical text for 0.8 GB more (docs/asr-model-survey.md §5). Preferred from an existing
+    /// Hugging Face cache, otherwise downloaded by speech-swift.
+    static let liveASR = "mlx-community/Qwen3-ASR-1.7B-4bit"
     /// `transcribe/file`, preferred from an existing Hugging Face cache (no second download).
     static let offlineASRHub = "mlx-community/Qwen3-ASR-1.7B-8bit"
     /// Fallback for `transcribe/file` when the hub copy is missing; downloaded by speech-swift.
@@ -124,7 +127,13 @@ actor SpeechModels {
     static let shared = SpeechModels()
 
     private let live = LazyModel<Qwen3ASRModel>(id: SpeechModelIDs.liveASR) {
-        try await loadCacheFirst(SpeechModelIDs.liveASR) { offline in
+        // Reuse a `huggingface_hub` copy when there is one, so the 1.2 GB model is not fetched twice.
+        if let hub = HubCacheLocator.snapshot(repo: SpeechModelIDs.liveASR) {
+            log("model \(SpeechModelIDs.liveASR): loading from \(hub.path)")
+            return try await Qwen3ASRModel.fromPretrained(modelId: SpeechModelIDs.liveASR, cacheDir: hub, offlineMode: true,
+                                                          progressHandler: SpeechModels.progress(SpeechModelIDs.liveASR))
+        }
+        return try await loadCacheFirst(SpeechModelIDs.liveASR) { offline in
             try await Qwen3ASRModel.fromPretrained(modelId: SpeechModelIDs.liveASR, offlineMode: offline,
                                                    progressHandler: SpeechModels.progress(SpeechModelIDs.liveASR))
         }
@@ -161,7 +170,7 @@ actor SpeechModels {
         }
     }
 
-    /// Qwen3-ASR 0.6B for live captions.
+    /// Qwen3-ASR 1.7B 4bit for live captions.
     /// - Returns: The shared model.
     /// - Throws: ``SpeechModelError`` when download or loading fails.
     func liveASR() async throws -> Unchecked<Qwen3ASRModel> { try await live.get() }

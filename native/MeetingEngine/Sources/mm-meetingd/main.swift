@@ -35,7 +35,7 @@ await server.register(Methods.initialize) { _ in
         "capabilities": .object([
             "windowCapture": .bool(true),
             "capture": .string("window/display HEVC + multichannel mic + system audio"),
-            "liveCaptions": .string("Qwen3-ASR 0.6B per Silero-VAD utterance, partials every 1 s"),
+            "liveCaptions": .string("Qwen3-ASR 1.7B 4bit per Silero-VAD utterance, partials every 1 s"),
             "diarization": .string("live: Sortformer streaming turns + WeSpeaker embeddings + spatial fusion; file: Pyannote + WeSpeaker clustering"),
             "models": .object([
                 "liveASR": .string(SpeechModelIDs.liveASR),

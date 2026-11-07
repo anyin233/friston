@@ -53,7 +53,7 @@
 
 ### 实时字幕
 
-录制开始后，引擎在后台加载 Qwen3-ASR 0.6B、Silero VAD、WeSpeaker 和 Sortformer 流式分离模型（Core ML，首次使用时由 speech-swift 下载到 `~/Library/Caches/qwen3-speech/`）。ASR 或 VAD 加载失败时只在 stderr 记日志，录制照常进行，只是没有字幕；WeSpeaker 失败时说话人为 `unknown`；Sortformer 失败时退回只用声纹向量（和方位）判断说话人，字幕照常。麦克风和系统声音各自切分、各自识别、各自运行一个 Sortformer 会话，流来源是说话人的硬分区。
+录制开始后，引擎在后台加载 Qwen3-ASR 1.7B 4bit、Silero VAD、WeSpeaker 和 Sortformer 流式分离模型（Sortformer 是 Core ML）。首次使用时由 speech-swift 下载到 `~/Library/Caches/qwen3-speech/`；Hugging Face 缓存里已有 `mlx-community/Qwen3-ASR-1.7B-4bit` 时直接使用。ASR 或 VAD 加载失败时只在 stderr 记日志，录制照常进行，只是没有字幕；WeSpeaker 失败时说话人为 `unknown`；Sortformer 失败时退回只用声纹向量（和方位）判断说话人，字幕照常。麦克风和系统声音各自切分、各自识别、各自运行一个 Sortformer 会话，流来源是说话人的硬分区。
 
 - 断句：Silero VAD，停顿 ≥ 0.5 s 结束一句；连续讲话超过 12 s 强制断句。
 - 说话过程中约每 1 s 发一次 `caption/partial`；处理落后于实时时会跳过中间的 partial，只保证 final。

@@ -40,16 +40,26 @@ public struct UtteranceSegmenter: Sendable {
         public var maxDuration: Double
         /// Utterances shorter than this are dropped unless a partial was already shown.
         public var minFinalDuration: Double
+        /// Once an utterance is this long, it is finalized at the next speech pause (≥ `minPause`)
+        /// even if the VAD has not ended it. Speakers who chain sentences with short gaps
+        /// otherwise produce one 12 s caption: its final arrives late, and every partial
+        /// re-decodes the whole growing span. Needs `advance(to:audio:)`.
+        public var splitAfter: Double
+        /// Shortest gap that counts as a pause for `splitAfter`; shorter dips are breaths or plosives.
+        public var minPause: Double
 
         /// Creates a config.
         /// - Parameters: see the stored properties.
         public init(sampleRate: Int = 16_000, partialInterval: Double = 1.0, firstPartialDelay: Double = 0.5,
-                    maxDuration: Double = 12, minFinalDuration: Double = 0.3) {
+                    maxDuration: Double = 12, minFinalDuration: Double = 0.3, splitAfter: Double = 8,
+                    minPause: Double = 0.2) {
             self.sampleRate = sampleRate
             self.partialInterval = partialInterval
             self.firstPartialDelay = firstPartialDelay
             self.maxDuration = maxDuration
             self.minFinalDuration = minFinalDuration
+            self.splitAfter = splitAfter
+            self.minPause = minPause
         }
     }
 
@@ -62,8 +72,10 @@ public struct UtteranceSegmenter: Sendable {
         case final(id: Int, start: Int, end: Int, hadPartial: Bool)
     }
 
-    public let config: Config
+    public private(set) var config: Config
     private let ids: UtteranceIDAllocator
+    /// Next sample `advance(to:audio:)` checks for a pause; avoids rescanning on every VAD step.
+    private var nextPauseCheck = 0
     private var id: Int?
     /// Start of the utterance in progress, or `nil` between utterances. Audio before it can be dropped.
     public private(set) var activeStart: Int?
@@ -88,6 +100,7 @@ public struct UtteranceSegmenter: Sendable {
         activeStart = sample
         id = ids.next()
         lastPartialEnd = nil
+        nextPauseCheck = 0
         return []
     }
 
@@ -109,14 +122,67 @@ public struct UtteranceSegmenter: Sendable {
     /// - Returns: A forced final (and a fresh utterance) when the current one is too long,
     ///   otherwise a partial when one is due.
     public mutating func advance(to sample: Int) -> [Action] {
-        guard let start = activeStart, let id else { return [] }
-        if sample - start >= samples(config.maxDuration) {
-            let action = Action.final(id: id, start: start, end: sample, hadPartial: lastPartialEnd != nil)
-            activeStart = sample
-            self.id = ids.next()
-            lastPartialEnd = nil
-            return [action]
+        guard let start = activeStart else { return [] }
+        if sample - start >= samples(config.maxDuration) { return split(at: sample) }
+        return partialIfDue(at: sample)
+    }
+
+    /// Advances the stream clock and, with access to the audio, splits long utterances at pauses.
+    ///
+    /// After `splitAfter` seconds the utterance is finalized at the longest pause the audio shows
+    /// (speech on both sides); at `maxDuration` it is cut at the quietest point of its last two
+    /// seconds instead of exactly at the limit, which used to land mid-word.
+    /// - Parameters:
+    ///   - sample: Samples processed so far.
+    ///   - audio: Returns the stream audio for a sample range (clamped to what is buffered).
+    /// - Returns: A split final (and a fresh utterance), otherwise a partial when one is due.
+    public mutating func advance(to sample: Int, audio: (Range<Int>) -> [Float]) -> [Action] {
+        guard let start = activeStart else { return [] }
+        let duration = sample - start
+        // Pieces shorter than this before a cut would be captions of one or two words.
+        let minPiece = samples(1)
+        if duration >= samples(config.splitAfter), sample >= nextPauseCheck {
+            // Rechecking every 0.1 s of audio is enough: a pause has to be ≥ 0.2 s to count.
+            nextPauseCheck = sample + samples(0.1)
+            let from = start + minPiece
+            if sample > from,
+               let pause = PauseFinder.longestPause(in: audio(from..<sample), sampleRate: config.sampleRate,
+                                                 minPause: config.minPause) {
+                return split(at: from + (pause.lowerBound + pause.upperBound) / 2)
+            }
         }
+        if duration >= samples(config.maxDuration) {
+            let window = max(start + minPiece, sample - samples(2))
+            let cut = window < sample
+                ? window + PauseFinder.quietestPoint(in: audio(window..<sample), sampleRate: config.sampleRate)
+                : sample
+            return split(at: cut)
+        }
+        return partialIfDue(at: sample)
+    }
+
+    /// Changes how much speech separates consecutive partials (see ``PartialPacer``).
+    /// - Parameter seconds: New interval; the first partial keeps `firstPartialDelay`.
+    public mutating func setPartialInterval(_ seconds: Double) {
+        config.partialInterval = seconds
+    }
+
+    /// Finalizes the utterance in progress at `sample` and opens a new one there.
+    /// - Parameter sample: Cut position, inside the utterance.
+    /// - Returns: The final of the closed part.
+    private mutating func split(at sample: Int) -> [Action] {
+        guard let start = activeStart, let id else { return [] }
+        let action = Action.final(id: id, start: start, end: sample, hadPartial: lastPartialEnd != nil)
+        activeStart = sample
+        self.id = ids.next()
+        lastPartialEnd = nil
+        nextPauseCheck = 0
+        return [action]
+    }
+
+    /// A partial covering the utterance so far, when enough new speech has arrived.
+    private mutating func partialIfDue(at sample: Int) -> [Action] {
+        guard let start = activeStart, let id else { return [] }
         let since = sample - (lastPartialEnd ?? start)
         let due = lastPartialEnd == nil ? config.firstPartialDelay : config.partialInterval
         if since >= samples(due) {

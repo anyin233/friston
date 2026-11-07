@@ -55,8 +55,9 @@
 
 录制开始后，引擎在后台加载 Qwen3-ASR 1.7B 4bit、Silero VAD、WeSpeaker 和 Sortformer 流式分离模型（Sortformer 是 Core ML）。首次使用时由 speech-swift 下载到 `~/Library/Caches/qwen3-speech/`；Hugging Face 缓存里已有 `mlx-community/Qwen3-ASR-1.7B-4bit` 时直接使用。ASR 或 VAD 加载失败时只在 stderr 记日志，录制照常进行，只是没有字幕；WeSpeaker 失败时说话人为 `unknown`；Sortformer 失败时退回只用声纹向量（和方位）判断说话人，字幕照常。麦克风和系统声音各自切分、各自识别、各自运行一个 Sortformer 会话，流来源是说话人的硬分区。
 
-- 断句：Silero VAD，停顿 ≥ 0.5 s 结束一句；连续讲话超过 12 s 强制断句。
-- 说话过程中约每 1 s 发一次 `caption/partial`；处理落后于实时时会跳过中间的 partial，只保证 final。
+- 断句：Silero VAD，停顿 ≥ 0.5 s 结束一句。一句超过 8 s 后，在其中最长的停顿（≥ 0.2 s，按能量判断，前后都有语音）处切开；到 12 s 仍没有停顿时，在最后 2 s 里最安静的 100 ms 处切开，不再切在词中间。
+- 开口约 0.4 s 后发第一条 `caption/partial`，之后按本机解码速度自适应刷新：间隔 = 最近 partial 解码耗时的滑动平均 × 2.5，限制在 0.3–1.5 s（M5 Pro 上 1.7B 4bit 解码约 0.1 s，所以约 0.3 s 一次）。处理落后于实时（一次取到 > 1.5 s 的音频）时跳过 partial，只保证 final。
+- 字幕停止时，引擎日志会写一行每路的解码统计（partial/final 解码耗时中位数与 p90、跳过的 partial 数、最终刷新间隔），用来判断这台机器是否跟得上实时。
 - 说话人轮次：Sortformer 每 480 ms 处理一块音频（另需 560 ms 前瞻），给出最多 4 个说话人槽位的逐帧活动（80 ms 一帧）。槽位编号在本路流内稳定。final 会先等 Sortformer 确认到这句的结尾（通常晚 1–1.5 s，最多等 2.5 s）再发出，所以 final 比没有 Sortformer 时晚约 1 s；partial 不等。
 - 换人切分：一句话里 Sortformer 听到换人（前后各有 ≥ 1 s 的语音）时，在换人处切开，交给融合分别判断说话人。两边判为同一人就合回一句（Sortformer 偶尔会把同一个人分到两个槽位）；判为不同的人就发多条 final：第一段沿用原 `utteranceId`（替换屏幕上的 partial），后面各段用新的 `utteranceId`。
 - 说话人：每句 final（或切开后的每一段）计算 WeSpeaker 声纹，交给 `SpeakerFusion` 与预录声纹和本场的匿名簇比对；这句话里占主导的 Sortformer 槽位作为额外证据（见 [speaker-identification.md](speaker-identification.md)）；麦克风有 ≥ 2 个真实声道时再加上方位线索。短于 1.5 s 的句子只和已有的人比对、不新建说话人，比对不上或不足 0.4 s 时标为 `unknown`。

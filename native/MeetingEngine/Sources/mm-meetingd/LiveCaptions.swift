@@ -107,6 +107,10 @@ final class CaptionStream: @unchecked Sendable {
     private var resampler: StreamingResampler
     private var vad: StreamingVADProcessor?
     private var segmenter: UtteranceSegmenter
+    /// Adapts the partial refresh to this machine's decode speed.
+    private var pacer = PartialPacer(initial: CaptionStream.segmenterConfig.partialInterval)
+    /// Decode timings for the end-of-session log line.
+    private(set) var stats = DecodeStats()
     private var clock: CaptionClock?
     /// 16 kHz audio; `audio[0]` is stream sample `audioBase`.
     private var audio: [Float] = []
@@ -155,7 +159,7 @@ final class CaptionStream: @unchecked Sendable {
         self.inbox = inbox
         self.ids = ids
         resampler = StreamingResampler(inputRate: inbox.sampleRate, outputRate: Double(Self.rate))
-        segmenter = UtteranceSegmenter(config: .init(sampleRate: Self.rate), ids: ids)
+        segmenter = UtteranceSegmenter(config: Self.segmenterConfig, ids: ids)
         self.spatial = spatial
         if let spatial {
             do { stereo = try StereoCueAnalyzer(config: spatial.analyzerConfig) } catch {
@@ -195,7 +199,7 @@ final class CaptionStream: @unchecked Sendable {
                 }
             }
             processed += end - offset
-            actions += segmenter.advance(to: processed)
+            actions += segmenter.advance(to: processed) { [self] range in exactSlice(range) }
             offset = end
         }
         pushTurns(samples, models: models)
@@ -308,6 +312,40 @@ final class CaptionStream: @unchecked Sendable {
     /// captions break at phrase boundaries instead of every breath.
     static let vadConfig = VADConfig(onset: 0.5, offset: 0.35, minSpeechDuration: 0.25, minSilenceDuration: 0.5,
                                      windowDuration: 0.032, stepRatio: 1.0)
+
+    /// Segmentation: first partial after 0.4 s of speech, then as often as ``PartialPacer``
+    /// allows (starting at 0.5 s); utterances past 8 s are cut at their longest pause, past 12 s at
+    /// the quietest point. See `docs/engine-protocol.md` › 实时字幕.
+    static let segmenterConfig = UtteranceSegmenter.Config(
+        sampleRate: rate, partialInterval: 0.5, firstPartialDelay: 0.4, maxDuration: 12, splitAfter: 8, minPause: 0.2)
+
+    /// Records how long a partial took and retunes the refresh interval.
+    /// - Parameter seconds: Wall time of the partial's transcription.
+    func recordPartialDecode(seconds: Double) {
+        stats.partials.append(seconds)
+        pacer.record(decodeSeconds: seconds)
+        segmenter.setPartialInterval(pacer.interval)
+    }
+
+    /// Records how long a final took to transcribe.
+    /// - Parameter seconds: Wall time of the final's transcription.
+    func recordFinalDecode(seconds: Double) { stats.finals.append(seconds) }
+
+    /// Counts a partial dropped because the loop was behind real time.
+    func recordSkippedPartial() { stats.skippedPartials += 1 }
+
+    /// The partial refresh interval in use, for the summary log.
+    var partialInterval: Double { pacer.interval }
+
+    /// Audio for exactly `range` (16 kHz stream samples), clamped to what is buffered; used by
+    /// the segmenter's pause search, which needs positions to line up with the range start.
+    private func exactSlice(_ range: Range<Int>) -> [Float] {
+        let lo = max(audioBase, range.lowerBound) - audioBase
+        let hi = min(audioBase + audio.count, range.upperBound) - audioBase
+        // A range starting before the buffer would shift every position; return nothing instead.
+        guard range.lowerBound >= audioBase, hi > lo else { return [] }
+        return Array(audio[lo..<hi])
+    }
 
     /// Audio for `start..<end` (16 kHz stream samples), with a little pre-roll for the first phoneme.
     func slice(_ start: Int, _ end: Int) -> [Float] {
@@ -547,7 +585,11 @@ final class LiveCaptioner: @unchecked Sendable {
             if last { break }
             try? await Task.sleep(for: .milliseconds(100))
         }
-        for stream in streams { stream.logStereoSummary() }
+        for stream in streams {
+            stream.logStereoSummary()
+            log("captions \(sessionId) \(stream.origin.rawValue): \(stream.stats.summary), "
+                + "partial interval \(Int(stream.partialInterval * 1000)) ms")
+        }
         log("captions \(sessionId): stopped")
     }
 
@@ -565,9 +607,14 @@ final class LiveCaptioner: @unchecked Sendable {
     private func perform(_ work: CaptionWork, on stream: CaptionStream, models: LiveModels, skipPartials: Bool) {
         switch work {
         case .partial(let id, let start, let end):
-            guard !skipPartials else { return }
+            guard !skipPartials else {
+                stream.recordSkippedPartial()
+                return
+            }
             let audio = stream.slice(start, end)
+            let began = DispatchTime.now()
             let text = transcribe(audio, models)
+            stream.recordPartialDecode(seconds: Self.seconds(since: began))
             guard !text.isEmpty else { return }
             var speaker = SpeakerLabel.unknown
             if audio.count >= CaptionStream.rate * 3 / 2, let embedding = embed(audio, models) {
@@ -580,7 +627,9 @@ final class LiveCaptioner: @unchecked Sendable {
 
         case .final(let id, let start, let end, let hadPartial, let cuts) where cuts.isEmpty:
             let audio = stream.slice(start, end)
+            let began = DispatchTime.now()
             let text = transcribe(audio, models)
+            stream.recordFinalDecode(seconds: Self.seconds(since: began))
             guard !text.isEmpty || hadPartial else { return }
             let speaker = text.isEmpty ? SpeakerLabel.unknown : attribute(audio, start, end, on: stream, models: models)
             sendFinal(id: id, start, end, text: text, speaker: speaker, on: stream)
@@ -649,6 +698,11 @@ final class LiveCaptioner: @unchecked Sendable {
             sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs, endMs: endMs,
             position: direction.position, confidence: direction.fusion.confidence,
             azimuthDeg: direction.azimuthDeg, speaker: speaker))
+    }
+
+    /// Seconds elapsed since `start` on the monotonic clock.
+    private static func seconds(since start: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
     }
 
     /// Runs Qwen3-ASR on 16 kHz audio.

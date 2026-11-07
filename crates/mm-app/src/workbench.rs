@@ -39,6 +39,29 @@ fn logo() -> impl IntoElement {
     .size_5()
 }
 
+/// Shows notices raised before the window existed (migration, unreadable settings, …).
+///
+/// Params: `notices` – kind and message pairs; `window`/`cx` – the view being built.
+/// Returns: nothing; the toasts appear on the window.
+fn show_startup_notices<V: 'static>(
+    notices: Vec<(NoticeKind, String)>,
+    window: &mut Window,
+    cx: &mut Context<V>,
+) {
+    if notices.is_empty() {
+        return;
+    }
+    // Called from the view's constructor, inside `gpui_kit::open_window`'s build closure. The
+    // window's Root, which owns the notification layer, is created only after that closure
+    // returns, so pushing now panics ("component window state is missing"). On macOS the panic
+    // unwinds through the launch Apple Event and aborts the app. Defer past the build instead.
+    cx.defer_in(window, move |_, window, cx| {
+        for (kind, msg) in notices {
+            window.push_notification(toast(kind, msg), cx);
+        }
+    });
+}
+
 /// Top-level workbench state.
 pub struct Workbench {
     app: Entity<AppState>,
@@ -98,9 +121,7 @@ impl Workbench {
         )
         .detach();
         let pending = app.update(cx, |a, _| a.take_startup_notices());
-        for (kind, msg) in pending {
-            window.push_notification(toast(kind, msg), cx);
-        }
+        show_startup_notices(pending, window, cx);
         Self {
             app,
             page: Page::Today,

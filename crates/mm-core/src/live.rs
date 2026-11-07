@@ -203,6 +203,9 @@ pub struct FileTranscript {
     #[serde(default)]
     pub language: Option<String>,
     pub segments: Vec<FileSegment>,
+    /// Qwen3-ASR checkpoint that produced the text; absent from older engines.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// `permissions/status` result: macOS privacy grants as attributed to the app.

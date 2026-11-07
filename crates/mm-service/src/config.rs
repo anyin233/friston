@@ -40,6 +40,10 @@ pub struct AppConfig {
     pub use_codex: bool,
     /// Re-transcribe recordings after the meeting with the larger model.
     pub refine_after_meeting: bool,
+    /// Qwen3-ASR checkpoint for the post-meeting pass (Hugging Face repo id or absolute
+    /// folder); `None` uses the engine default, Qwen3-ASR 1.7B 8bit. Live captions keep their
+    /// own fast model, so a stronger refine model costs nothing during the meeting.
+    pub refine_asr_model: Option<String>,
     /// Generate minutes automatically when a meeting ends.
     pub auto_minutes: bool,
     /// Show the always-on-top caption window during meetings.
@@ -69,6 +73,7 @@ impl Default for AppConfig {
             byok: None,
             use_codex: true,
             refine_after_meeting: true,
+            refine_asr_model: None,
             auto_minutes: true,
             floating_captions: true,
             minutes_language: "zh".into(),

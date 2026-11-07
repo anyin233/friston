@@ -5,12 +5,12 @@
 //! failing step never discards what earlier steps produced (the recording, the live
 //! transcript).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use mm_core::{AudioOrigin, CaptureFiles, CaptureStarted, CaptureStopped, Meeting};
+use mm_core::{AudioOrigin, CaptureFiles, CaptureStarted, CaptureStopped, FileTranscript, Meeting};
 use mm_llm::{LlmError, byok, codex};
-use mm_service::engines::{EmbedEngine, MeetingEngine};
+use mm_service::engines::{EmbedEngine, MeetingEngine, RefineRequest};
 use mm_service::{AppConfig, flow};
 use mm_store::Store;
 
@@ -266,24 +266,32 @@ fn refine(
     warnings: &mut Vec<String>,
 ) {
     let mut parts = Vec::new();
-    let lang = ctx.cfg.caption_language.as_deref();
+    let mut req = RefineRequest {
+        language: ctx.cfg.caption_language.clone(),
+        model: ctx.cfg.refine_asr_model.clone(),
+        ..Default::default()
+    };
     // Same voiceprints as the live preset, so enrolled people come back as `known`.
-    let voiceprints = match lock(&ctx.store)
+    match lock(&ctx.store)
         .and_then(|s| flow::build_preset(&ctx.cfg, &s, meeting, None).map_err(|e| e.to_string()))
     {
-        Ok(p) => p.voiceprints,
-        Err(e) => {
-            warnings.push(format!("读取声纹失败，精转写只按音色聚类：{e}"));
-            vec![]
-        }
-    };
+        Ok(p) => req.voiceprints = p.voiceprints,
+        Err(e) => warnings.push(format!("读取声纹失败，精转写只按音色聚类：{e}")),
+    }
+    // Names and note terms steer the decoder toward the right spelling of people and projects.
+    match lock(&ctx.store)
+        .and_then(|s| flow::refine_context_for(&ctx.cfg, &s, meeting).map_err(|e| e.to_string()))
+    {
+        Ok(c) => req.context = c,
+        Err(e) => warnings.push(format!("读取参会人和笔记失败，精转写不带提示词：{e}")),
+    }
     for (origin, path, label) in [
         (AudioOrigin::Microphone, &files.microphone, "麦克风录音"),
         (AudioOrigin::System, &files.system_audio, "系统声音录音"),
     ] {
         let Some(path) = path else { continue };
         progress(format!("正在精转写{label}…"));
-        match engine.transcribe_file_with_voiceprints(path, lang, &voiceprints) {
+        match refine_one(engine, path, &mut req, warnings) {
             Ok(t) => parts.push((origin, t)),
             Err(e) => warnings.push(format!("精转写 {} 失败：{e}", path.display())),
         }
@@ -299,6 +307,27 @@ fn refine(
     });
     if let Err(e) = result {
         warnings.push(format!("保存精转写失败：{e}"));
+    }
+}
+
+/// Transcribes one file; when a custom refine model fails, retries with the engine default
+/// and keeps using the default for the remaining files.
+///
+/// Params: `engine`; `path`; `req` – its `model` is cleared after a fallback; `warnings`.
+/// Returns: the transcript, or the error of the last attempt.
+fn refine_one(
+    engine: &MeetingEngine,
+    path: &Path,
+    req: &mut RefineRequest,
+    warnings: &mut Vec<String>,
+) -> Result<FileTranscript, mm_service::ServiceError> {
+    match engine.refine_file(path, req) {
+        Err(e) if req.model.is_some() => {
+            let model = req.model.take().unwrap_or_default();
+            warnings.push(format!("精转模型 {model} 不可用，已改用默认模型：{e}"));
+            engine.refine_file(path, req)
+        }
+        other => other,
     }
 }
 

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use chrono::{Local, Utc};
 use mm_core::{
     AudioOrigin, CalendarEvent, CapturePreset, CaptureStarted, CaptureStopped, FileTranscript,
-    Meeting, MeetingId, MeetingStatus, MeetingVenue, PresetVoiceprint, SpeakerLabel,
+    Meeting, MeetingId, MeetingStatus, MeetingVenue, PersonId, PresetVoiceprint, SpeakerLabel,
     TranscriptSegment,
 };
 use mm_llm::{Minutes, MinutesInput, TranscriptLine, render_minutes};
@@ -504,6 +504,83 @@ fn find_in_vault(vault: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Longest decoder hint sent to the refine pass; the engine caps it at 600 characters too.
+pub const REFINE_CONTEXT_CHARS: usize = 600;
+/// Names in the hint: attendees first, then other people with a voiceprint.
+const REFINE_CONTEXT_NAMES: usize = 30;
+
+/// Builds the Qwen3-ASR context hint for the post-meeting pass.
+///
+/// Qwen3-ASR conditions on free text in its system prompt; names and project terms that
+/// appear there are transcribed correctly far more often (the live pass, which has no hint,
+/// writes homophones). The user's own notes are the best source of terms.
+/// Params: `title` – meeting title; `names` – people, most relevant first; `notes` – the
+/// user's note text without managed blocks.
+/// Returns: the hint, at most [`REFINE_CONTEXT_CHARS`] characters, or `None` when empty.
+pub fn refine_context(title: &str, names: &[String], notes: &str) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<&str> = names
+        .iter()
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty() && seen.insert(*n))
+        .take(REFINE_CONTEXT_NAMES)
+        .collect();
+    let notes = notes.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut parts = Vec::new();
+    if !title.trim().is_empty() {
+        parts.push(format!("会议：{}", title.trim()));
+    }
+    if !names.is_empty() {
+        parts.push(format!("参会人：{}", names.join("、")));
+    }
+    if !notes.is_empty() {
+        parts.push(format!("笔记：{notes}"));
+    }
+    let text: String = parts
+        .join("\n")
+        .chars()
+        .take(REFINE_CONTEXT_CHARS)
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The refine hint for a stored meeting: title, attendees and enrolled people, note terms.
+///
+/// Params: `cfg` – for the note location; `store`; `meeting`.
+/// Returns: the hint, or `None` when there is nothing to say.
+pub fn refine_context_for(
+    cfg: &AppConfig,
+    store: &Store,
+    meeting: &Meeting,
+) -> Result<Option<String>, ServiceError> {
+    let people = store.people()?;
+    let name_of = |id: &PersonId| {
+        people
+            .iter()
+            .find(|(p, _)| p.id == *id)
+            .map(|(p, _)| p.display_name.clone())
+    };
+    let mut names: Vec<String> = meeting.participants.iter().filter_map(name_of).collect();
+    names.extend(
+        store
+            .voiceprints(None)?
+            .iter()
+            .filter_map(|v| name_of(&v.person_id)),
+    );
+    let notes = match note_path(cfg, meeting).map(|p| (std::fs::read_to_string(&p), p)) {
+        Some((Ok(md), _)) => notes_section(&md),
+        Some((Err(e), p)) => {
+            tracing::warn!(
+                "refine hint without notes; cannot read {}: {e}",
+                p.display()
+            );
+            String::new()
+        }
+        None => String::new(),
+    };
+    Ok(refine_context(&meeting.title, &names, &notes))
+}
+
 /// Assembles the material for minutes generation.
 ///
 /// Params: `cfg`; `store`; `meeting`.
@@ -801,10 +878,32 @@ mod tests {
     }
 
     #[test]
+    fn refine_context_lists_title_names_and_note_terms() {
+        let names = vec![
+            "赵磊".to_string(),
+            " 钱敏 ".into(),
+            "赵磊".into(),
+            "".into(),
+        ];
+        let ctx = refine_context("订单迁移周会", &names, "## 待办\n- 退款接口  联调\n").unwrap();
+        assert_eq!(
+            ctx,
+            "会议：订单迁移周会\n参会人：赵磊、钱敏\n笔记：## 待办 - 退款接口 联调"
+        );
+        assert_eq!(refine_context(" ", &[], " \n "), None);
+        let long = "术".repeat(2_000);
+        assert_eq!(
+            refine_context("t", &[], &long).unwrap().chars().count(),
+            REFINE_CONTEXT_CHARS
+        );
+    }
+
+    #[test]
     fn file_transcripts_merge_with_distinct_remote_clusters() {
         let m = MeetingId::new();
         let ft = |segs: Vec<(u64, &str)>| FileTranscript {
             language: Some("zh".into()),
+            model: None,
             segments: segs
                 .into_iter()
                 .map(|(s, t)| FileSegment {

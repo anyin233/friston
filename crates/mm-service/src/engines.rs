@@ -121,6 +121,37 @@ pub fn decode_notice(method: &str, params: Value) -> Result<MeetingNotice, Servi
     })
 }
 
+/// What the post-meeting pass asks of `transcribe/file`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RefineRequest {
+    /// Language hint (`zh`, `en`, …); `None` auto-detects.
+    pub language: Option<String>,
+    /// Enrolled voiceprints, so known people come back as `known`.
+    pub voiceprints: Vec<mm_core::PresetVoiceprint>,
+    /// Qwen3-ASR checkpoint (repo id or absolute folder); `None` = engine default.
+    pub model: Option<String>,
+    /// Decoder hint: meeting title, names, terms.
+    pub context: Option<String>,
+}
+
+/// Builds `transcribe/file` params, leaving out what the request does not set.
+///
+/// Params: `path` – audio file; `req` – the request.
+/// Returns: the JSON params.
+pub fn refine_params(path: &Path, req: &RefineRequest) -> Value {
+    let mut params = json!({"path": path, "voiceprints": req.voiceprints});
+    for (key, value) in [
+        ("language", &req.language),
+        ("model", &req.model),
+        ("context", &req.context),
+    ] {
+        if let Some(v) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            params[key] = json!(v);
+        }
+    }
+    params
+}
+
 /// Typed client for `mm-meetingd`. Every call blocks; run it off the UI thread.
 #[derive(Clone)]
 pub struct MeetingEngine {
@@ -260,6 +291,18 @@ impl MeetingEngine {
             params["language"] = json!(l);
         }
         self.call(meeting::TRANSCRIBE_FILE, params)
+    }
+
+    /// Post-meeting transcription with a chosen model and a decoder hint.
+    ///
+    /// Params: `path` – audio file; `req` – language, voiceprints, model and context.
+    /// Returns: the transcript, whose `model` names the checkpoint actually used.
+    pub fn refine_file(
+        &self,
+        path: &Path,
+        req: &RefineRequest,
+    ) -> Result<FileTranscript, ServiceError> {
+        self.call(meeting::TRANSCRIBE_FILE, refine_params(path, req))
     }
 
     /// Asks the engine to finish recordings and exit.
@@ -475,6 +518,35 @@ mod tests {
             decode_notice("spatial/summary", json!({})).unwrap(),
             MeetingNotice::Other { .. }
         ));
+    }
+
+    #[test]
+    fn refine_params_send_only_what_is_set() {
+        let bare = refine_params(Path::new("/r/mic.caf"), &RefineRequest::default());
+        assert_eq!(bare, json!({"path": "/r/mic.caf", "voiceprints": []}));
+        let full = refine_params(
+            Path::new("/r/mic.caf"),
+            &RefineRequest {
+                language: Some("zh".into()),
+                voiceprints: vec![],
+                model: Some(" mlx-community/Qwen3-ASR-1.7B-8bit ".into()),
+                context: Some("会议：周会".into()),
+            },
+        );
+        assert_eq!(full["language"], "zh");
+        assert_eq!(full["model"], "mlx-community/Qwen3-ASR-1.7B-8bit");
+        assert_eq!(full["context"], "会议：周会");
+        let blank = refine_params(
+            Path::new("/r/mic.caf"),
+            &RefineRequest {
+                model: Some("  ".into()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            blank.get("model").is_none(),
+            "a blank setting means the default"
+        );
     }
 
     #[test]

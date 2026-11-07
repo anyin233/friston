@@ -27,6 +27,7 @@ enum Field {
     EmbedUrl,
     LlmDir,
     Spacing,
+    RefineModel,
 }
 
 /// The 设置 page.
@@ -42,6 +43,7 @@ pub struct SettingsPage {
     hf_token: Entity<InputState>,
     llm_dir: Entity<InputState>,
     spacing: Entity<InputState>,
+    refine_model: Entity<InputState>,
     mics: Entity<SelectState<Vec<Choice>>>,
     mic_sig: Vec<String>,
     /// Embedding folder last shown in `embed_dir`, to notice changes made elsewhere.
@@ -148,6 +150,12 @@ impl SettingsPage {
             window,
             cx,
         );
+        let refine_model = mk(
+            cfg.refine_asr_model.clone().unwrap_or_default(),
+            "默认 mlx-community/Qwen3-ASR-1.7B-8bit",
+            window,
+            cx,
+        );
         let mics = cx.new(|cx| {
             SelectState::new(
                 vec![Choice::new("", "系统默认麦克风")],
@@ -166,6 +174,7 @@ impl SettingsPage {
             (&embed_url, Field::EmbedUrl),
             (&llm_dir, Field::LlmDir),
             (&spacing, Field::Spacing),
+            (&refine_model, Field::RefineModel),
         ] {
             cx.subscribe(input, move |this, state, ev: &InputEvent, cx| {
                 if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -199,6 +208,7 @@ impl SettingsPage {
             hf_token,
             llm_dir,
             spacing,
+            refine_model,
             mics,
             mic_sig: vec![],
             embed_dir_seen: cfg.embedding_model_dir.clone(),
@@ -293,6 +303,10 @@ impl SettingsPage {
                 a.update_config(cx, |c| c.embedding_model_url = url);
             }
             Field::LlmDir => a.update_config(cx, |c| c.local_llm_dir = parse_path(&value)),
+            Field::RefineModel => {
+                let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                a.update_config(cx, |c| c.refine_asr_model = model);
+            }
             Field::Spacing => match logic::parse_spacing_cm(&value) {
                 Ok(cm) => a.update_config(cx, |c| c.spatial_spacing_cm = cm),
                 Err(msg) => a.notify(NoticeKind::Warning, msg, cx),
@@ -504,6 +518,12 @@ impl SettingsPage {
                     cfg.refine_after_meeting,
                     |c, v| c.refine_after_meeting = v,
                 ),
+                cx,
+            ))
+            .child(Self::row(
+                "精转模型",
+                Some("实时字幕固定用快速模型。这里可以填更大的 Qwen3-ASR 模型：Hugging Face 仓库名或本地文件夹，名字里要带 0.6B 或 1.7B。留空用默认。".into()),
+                Input::new(&self.refine_model).small(),
                 cx,
             ))
     }

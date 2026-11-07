@@ -194,11 +194,14 @@ public struct FileTranscript: Codable, Sendable, Equatable {
     /// BCP-47 code: the requested language, or the majority guess over segments.
     public var language: String?
     public var segments: [FileTranscriptSegment]
+    /// Qwen3-ASR checkpoint that produced the text (`nil` when there was no audio to decode).
+    public var model: String?
 
     /// Creates the result.
     /// - Parameters: see the stored properties.
-    public init(language: String?, segments: [FileTranscriptSegment]) {
+    public init(language: String?, segments: [FileTranscriptSegment], model: String? = nil) {
         self.language = language
         self.segments = segments
+        self.model = model
     }
 }

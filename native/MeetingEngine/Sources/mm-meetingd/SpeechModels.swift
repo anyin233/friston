@@ -191,12 +191,15 @@ actor SpeechModels {
     /// - Throws: ``SpeechModelError``.
     func turnDiarizer() async throws -> Unchecked<SortformerDiarizer> { try await sortformer.get() }
 
-    /// Loads Qwen3-ASR 1.7B, preferring an existing `huggingface_hub` copy.
+    /// Loads the refine model: the requested checkpoint, or Qwen3-ASR 1.7B 8bit preferring an
+    /// existing `huggingface_hub` copy.
+    /// - Parameter source: A validated checkpoint from `transcribe/file.model`, or `nil` for the default.
     /// - Returns: A fresh model owned by the caller, and the id actually used.
     /// - Throws: ``SpeechModelError``.
-    func offlineASR() async throws -> (Unchecked<Qwen3ASRModel>, String) {
-        let hub = HubCacheLocator.snapshot(repo: SpeechModelIDs.offlineASRHub)
-        let model = hub != nil ? SpeechModelIDs.offlineASRHub : SpeechModelIDs.offlineASRDownload
+    func offlineASR(_ source: ASRModelSource? = nil) async throws -> (Unchecked<Qwen3ASRModel>, String) {
+        let hub = source.map(\.directory) ?? HubCacheLocator.snapshot(repo: SpeechModelIDs.offlineASRHub)
+        let model = source?.modelId
+            ?? (hub != nil ? SpeechModelIDs.offlineASRHub : SpeechModelIDs.offlineASRDownload)
         do {
             let loaded = try await MLXGate.shared.load {
                 Unchecked(try await Qwen3ASRModel.fromPretrained(

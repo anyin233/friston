@@ -25,6 +25,10 @@ struct TranscribeFileParams: Decodable {
     var path: String
     var language: String?
     var voiceprints: [VoiceprintSample]?
+    /// Qwen3-ASR checkpoint for this pass (hub id or absolute folder); default 1.7B 8bit.
+    var model: String?
+    /// Decoder hint: meeting title, attendee names, terms. Improves names and jargon.
+    var context: String?
 }
 
 /// Offline speech requests: voiceprints and whole-file transcription.
@@ -106,7 +110,7 @@ enum SpeechRequests {
             range = try VoiceprintAnalysis.sampleRange(totalSamples: all.count, sampleRate: rate,
                                                        startMs: params.startMs, endMs: params.endMs)
         } catch let error as VoiceprintAnalysisError {
-            throw RPCError.invalidParams("\(method) \(params.path): \(error.description)")
+            throw RPCError.invalidParams("\(method) \(params.path): \(error)")
         }
         return try await voiceprint(from: Array(all[range]), context: "\(method) \(params.path)")
     }
@@ -161,6 +165,19 @@ enum SpeechRequests {
     static func transcribeFile(_ params: TranscribeFileParams) async throws -> FileTranscript {
         let method = Methods.Meeting.transcribeFile
         let samples = try loadAudio(path: params.path, method: method)
+        // Validate the model before the minutes-long diarization, so a typo fails fast.
+        let source: ASRModelSource?
+        do {
+            source = try params.model.map {
+                try ASRModelChoice.resolve($0, hubSnapshot: { HubCacheLocator.snapshot(repo: $0) },
+                                           isDirectory: { path in
+                                               var dir: ObjCBool = false
+                                               return FileManager.default.fileExists(atPath: path, isDirectory: &dir) && dir.boolValue
+                                           })
+            }
+        } catch {
+            throw RPCError.invalidParams("\(method) \(params.path): \(error)")
+        }
         let started = Date()
         let rate = rate
         guard !samples.isEmpty else { return FileTranscript(language: ASRLanguage.primaryCode(for: params.language), segments: []) }
@@ -190,7 +207,8 @@ enum SpeechRequests {
         let windows = TurnPlanner.windows(from: turns, maxGap: 0.8, maxDuration: 25)
         let labels = speakerLabels(centroids: centroids, voiceprints: params.voiceprints ?? [])
 
-        let (segments, model) = try await transcribeWindows(samples, windows: windows, labels: labels, params: params)
+        let (segments, model) = try await transcribeWindows(samples, windows: windows, labels: labels, params: params,
+                                                            source: source)
         // The 1.7B model is gone once transcribeWindows returns, but MLX keeps its buffers in a
         // cache (~1.3 GB measured); clearing it is what actually returns the memory.
         let freed = try? await MLXGate.shared.run { () -> String in
@@ -201,9 +219,10 @@ enum SpeechRequests {
         log("\(method): \(freed ?? "MLX cache not cleared")")
         let language = ASRLanguage.primaryCode(for: params.language) ?? majorityLanguage(segments)
         log("\(method) \(params.path): \(segments.count) segments, \(Set(windows.map(\.speaker)).count) speakers, "
-            + "\(model), \(String(format: "%.1f", Date().timeIntervalSince(started))) s for "
+            + "\(model), context \(ASRModelChoice.context(params.context)?.count ?? 0) chars, "
+            + "\(String(format: "%.1f", Date().timeIntervalSince(started))) s for "
             + "\(String(format: "%.1f", Double(samples.count) / Double(rate))) s of audio")
-        return FileTranscript(language: language, segments: segments)
+        return FileTranscript(language: language, segments: segments, model: model)
     }
 
     /// Loads the offline model, transcribes each window and drops the model on return.
@@ -211,15 +230,18 @@ enum SpeechRequests {
     ///   - samples: 16 kHz mono audio.
     ///   - windows: Speaker-homogeneous windows to decode.
     ///   - labels: Diarized speaker id → label.
-    ///   - params: Request params (path, language).
+    ///   - params: Request params (path, language, context).
+    ///   - source: Requested checkpoint, or `nil` for the default refine model.
     /// - Returns: Segments and the model id used.
     /// - Throws: Model load errors with the method name.
     private static func transcribeWindows(
-        _ samples: [Float], windows: [SpeakerTurn], labels: [Int: SpeakerLabel], params: TranscribeFileParams
+        _ samples: [Float], windows: [SpeakerTurn], labels: [Int: SpeakerLabel], params: TranscribeFileParams,
+        source: ASRModelSource?
     ) async throws -> ([FileTranscriptSegment], String) {
         let method = Methods.Meeting.transcribeFile
         let rate = rate
-        let (asr, model) = try await loadOrFail(method) { try await SpeechModels.shared.offlineASR() }
+        let (asr, model) = try await loadOrFail(method) { try await SpeechModels.shared.offlineASR(source) }
+        let context = ASRModelChoice.context(params.context)
         var segments: [FileTranscriptSegment] = []
         for w in windows {
             let lo = max(0, Int(w.start * Float(rate))), hi = min(samples.count, Int(w.end * Float(rate)))
@@ -227,7 +249,7 @@ enum SpeechRequests {
             let slice = Array(samples[lo..<hi])
             let options = Qwen3DecodingOptions(
                 maxTokens: ASRLanguage.maxTokens(forSeconds: Double(slice.count) / Double(rate)),
-                language: ASRLanguage.qwenName(for: params.language))
+                language: ASRLanguage.qwenName(for: params.language), context: context)
             // One gate turn per window, so live captions can interleave with a long file.
             let text = try await MLXGate.shared.run {
                 asr.value.transcribe(audio: slice, sampleRate: rate, options: options)

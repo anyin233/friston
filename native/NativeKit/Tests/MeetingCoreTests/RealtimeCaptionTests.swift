@@ -130,3 +130,49 @@ private func silence(_ seconds: Double, level: Float = 0) -> [Float] {
     stats.finals = [0.5]
     #expect(stats.summary == "partials 5 (decode median 300 ms, p90 1000 ms, 2 skipped), finals 1 (decode median 500 ms, p90 500 ms)")
 }
+
+// MARK: Refine model choice
+
+@Test func refineModelResolvesHubIdsToTheirCachedSnapshot() throws {
+    let cached = URL(filePath: "/hub/models--mlx-community--Qwen3-ASR-1.7B-8bit/snapshots/abc")
+    let source = try ASRModelChoice.resolve("mlx-community/Qwen3-ASR-1.7B-8bit",
+                                            hubSnapshot: { $0 == "mlx-community/Qwen3-ASR-1.7B-8bit" ? cached : nil },
+                                            isDirectory: { _ in false })
+    #expect(source == ASRModelSource(modelId: "mlx-community/Qwen3-ASR-1.7B-8bit", directory: cached))
+    // Not cached: speech-swift downloads it by id.
+    let remote = try ASRModelChoice.resolve(" aufklarer/Qwen3-ASR-1.7B-MLX-8bit ", hubSnapshot: { _ in nil },
+                                            isDirectory: { _ in false })
+    #expect(remote == ASRModelSource(modelId: "aufklarer/Qwen3-ASR-1.7B-MLX-8bit", directory: nil))
+}
+
+@Test func refineModelAcceptsLocalFoldersNamedLikeTheCheckpoint() throws {
+    let snap = "/Users/me/.cache/huggingface/hub/models--mlx-community--Qwen3-ASR-1.7B-8bit/snapshots/abc"
+    let fromSnapshot = try ASRModelChoice.resolve(snap, hubSnapshot: { _ in nil }, isDirectory: { _ in true })
+    // speech-swift reads size and bits from the id, so a snapshot keeps its repo name.
+    #expect(fromSnapshot.modelId == "mlx-community/Qwen3-ASR-1.7B-8bit")
+    #expect(fromSnapshot.directory?.path == snap)
+    let plain = try ASRModelChoice.resolve("/models/Qwen3-ASR-1.7B-5bit/", hubSnapshot: { _ in nil },
+                                           isDirectory: { _ in true })
+    #expect(plain.modelId == "Qwen3-ASR-1.7B-5bit")
+}
+
+@Test func refineModelRejectsWhatQwen3ASRCannotLoad() {
+    let none: (String) -> URL? = { _ in nil }
+    for bad in ["", "openai/whisper-large-v3", "mlx-community/Qwen3-ASR-bf16", "Qwen3-ASR-1.7B-8bit",
+                "a/b/Qwen3-ASR-1.7B-8bit"] {
+        #expect(throws: ASRModelChoiceError.self) {
+            try ASRModelChoice.resolve(bad, hubSnapshot: none, isDirectory: { _ in false })
+        }
+    }
+    #expect(throws: ASRModelChoiceError.self) {
+        try ASRModelChoice.resolve("/missing/Qwen3-ASR-1.7B-8bit", hubSnapshot: none, isDirectory: { _ in false })
+    }
+}
+
+@Test func refineContextIsTrimmedAndCapped() {
+    #expect(ASRModelChoice.context(nil) == nil)
+    #expect(ASRModelChoice.context("  \n ") == nil)
+    #expect(ASRModelChoice.context(" 会议：周会 ") == "会议：周会")
+    let long = String(repeating: "名", count: 2_000)
+    #expect(ASRModelChoice.context(long)?.count == ASRModelChoice.maxContextCharacters)
+}

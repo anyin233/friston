@@ -72,11 +72,19 @@ pub fn turn_start_params(thread_id: &str, inputs: &[CodexInput], output_schema: 
     })
 }
 
-/// Finds a `codex` executable: `$PATH` first, then Homebrew's usual prefixes (GUI apps
-/// launched from Finder do not inherit the shell's PATH).
+/// Finds a `codex` executable.
 ///
 /// Returns: the path, if found.
 pub fn find_codex() -> Option<PathBuf> {
+    find_executable("codex")
+}
+
+/// Finds a CLI tool: `$PATH` first, then Homebrew's usual prefixes and `~/.local/bin` (GUI
+/// apps launched from Finder do not inherit the shell's PATH).
+///
+/// Params: `name` – executable file name.
+/// Returns: the path, if found.
+pub fn find_executable(name: &str) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
@@ -84,9 +92,7 @@ pub fn find_codex() -> Option<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".local/bin"));
     }
-    dirs.into_iter()
-        .map(|d| d.join("codex"))
-        .find(|p| p.is_file())
+    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 /// Whether Codex is signed in, and as whom.

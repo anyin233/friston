@@ -44,6 +44,11 @@ pub struct AppConfig {
     /// folder); `None` uses the engine default, Qwen3-ASR 1.7B 8bit. Live captions keep their
     /// own fast model, so a stronger refine model costs nothing during the meeting.
     pub refine_asr_model: Option<String>,
+    /// Who does the post-meeting pass: the local Qwen3-ASR engine, or Gemini through the
+    /// Antigravity CLI (which then also writes the minutes).
+    pub refine_backend: RefineBackend,
+    /// `agy --model` id for [`RefineBackend::Antigravity`].
+    pub antigravity_model: String,
     /// Generate minutes automatically when a meeting ends.
     pub auto_minutes: bool,
     /// Show the always-on-top caption window during meetings.
@@ -74,6 +79,8 @@ impl Default for AppConfig {
             use_codex: true,
             refine_after_meeting: true,
             refine_asr_model: None,
+            refine_backend: RefineBackend::Local,
+            antigravity_model: mm_llm::antigravity::DEFAULT_MODEL.into(),
             auto_minutes: true,
             floating_captions: true,
             minutes_language: "zh".into(),
@@ -81,6 +88,18 @@ impl Default for AppConfig {
             spatial_spacing_cm: None,
         }
     }
+}
+
+/// Engine for the post-meeting re-transcription.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefineBackend {
+    /// Qwen3-ASR in `mm-meetingd`; minutes come from the regular provider chain.
+    #[default]
+    Local,
+    /// Gemini hears the recordings via `agy`, then writes the minutes in a second run.
+    /// Falls back to [`RefineBackend::Local`] when it fails.
+    Antigravity,
 }
 
 /// Folder name used for the app's data and recordings.

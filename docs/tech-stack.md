@@ -58,6 +58,21 @@
   - 线程设为 `ephemeral` + `read-only` sandbox + `approvalPolicy: never`，不碰文件系统。
 - 注意：OpenAI 文档写明 app-server 认证**不得**用于商业或托管服务。本项目是个人本地应用，可以使用；如果将来要分发，需要改用 “Sign in with ChatGPT”。
 
+### 5b. 会后精转写的外部工具：Antigravity（Gemini 3.8 Flash）（2026-11-08）
+- 选项在设置“精转方式”里，默认仍是本地 Qwen3-ASR。选 Antigravity 后录音会上传到 Google。
+- 调用方式：`agy -p … --model gemini-3.8-flash-medium --output-format json --json-schema … --settings '{"permissions":{"allow":["read_file(<工作目录>/**)"]}}'`。工作目录里只有准备好的录音；无头模式下其他需要权限的工具（运行命令、写文件）自动拒绝，不传 `--dangerously-skip-permissions`。
+- agy 可能以退出码 0 返回 `status: "ERROR"`（服务端 500 后报 "The stream was interrupted"），所以必须检查 `status`；失败时重试一次。噪声多的录音上，Flash 偶尔在 JSON 之后继续生成直到被切断（3 句话输出 1.7 万 token），此时已有的结构化结果是完整的，只在没有干净结果时使用，并在会后报告里提示可能不完整。
+- **Codex 不能直接听音频**：`model/list` 里 `gpt-6.1-terra`、`gpt-6.1-sol` 等都只声明 `text`、`image` 输入；把录音作为 `localAudio` 发过去，两者都回复“无法读取音频”，terra 还会自己去找本机的 whisper 来跑。所以 Codex 不做这条路，只保留原来的纪要提供方角色。
+- 实测（M5 Pro，`gemini-3.8-flash-medium`）：
+
+| 录音 | 结果 |
+| --- | --- |
+| 合成两人会议 10 分 25 秒，64 句 | 52 秒完成；64 句全对，时间戳误差约 1 秒，说话人交替正确，末尾的金额和待办都写进纪要 |
+| 真实录音 2 分钟，麦克风大部分是键盘声，系统声音为数字静音 | 只转出 98–110 秒的几句话，正确报告系统声音没有人声；部分运行被服务端中断（见上） |
+| 同上，改用 `gemini-3.8-flash-low` | **编造了一整场“模型服务优化”会议**，还带人名。所以不提供 low，并且静音音轨不发送 |
+
+- 复跑：`cargo test -p mm-service --test antigravity_live -- --ignored --nocapture`（`MM_AGY_RECORDING=<录音>` 换成真实录音）。
+
 ### 6. 存储：SQLite + sqlite-vec + FTS5
 - 单个数据库文件，可备份、可查看。向量表 `vec0(float[768], cosine)`；FTS5 用 trigram 分词，中文不需要分词器（测试已覆盖“预算评审”这类子串）。
 - `sqlite-vec` 锁在 **=0.1.9**：0.1.10-alpha.4 发布的源码缺少 `sqlite-vec-diskann.c`，无法编译（已实测）。

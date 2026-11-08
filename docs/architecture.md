@@ -42,6 +42,7 @@
    - 优先级：会中笔记 > 会后编辑和转写 > 媒体回填。会议进行时嵌入任务主动让出 GPU。
    - 每个向量都带模型戳 `embeddinggemma-2@768/p1`；换模型或改了提示词时，后台自动重建索引。
 6. **结束**：会后精转写和全局说话人聚类 → `mm-llm` 选择提供方生成结构化纪要（JSON Schema 约束）→ 写入笔记的 `minutes` / `actions` 受管区块 → 纪要本身也进入索引。
+   - 设置里“精转方式”选 **Antigravity · Gemini** 时，会后精转写改走外部工具：录音转成 16 kHz 单声道 AAC，按 15 分钟切段，静音的音轨不发送；Antigravity CLI（`agy -p`）让 Gemini 3.8 Flash 直接听录音并输出带时间戳的逐句 JSON，说话人身份按时间重叠沿用实时分离的结果（同一个人色相不变）；然后同一个模型根据新转写写纪要。任何一步失败都会提示，并回退到本地 Qwen3-ASR 和常规纪要提供方。
 7. **检索**：用户的问题先转成 `search_query` 向量，再与 FTS5 的 trigram 结果融合（RRF）。结果可能是转写、笔记、截图、录音窗口或录屏窗口，点击后跳到对应的时间点。
 
 ## 服务层（`mm-service`）
@@ -55,6 +56,7 @@
 | `live` | 字幕板（易变/定稿/撤回/改标）与说话人目录（名字和色相：同一个人在所有界面同一色相） |
 | `flow` | 一场会议的各步：建笔记 → 录制预设（含已登记声纹）→ 定稿入库并写入笔记 `transcript` 区块 → 会后精转写合并 → 纪要写入 `minutes` / `actions` 区块 |
 | `hub` | 从 Hugging Face（或镜像）下载模型：按提交固定版本、逐文件写 `.part` 后改名、断点续传、可取消，写到 `<数据文件夹>/models/<作者>--<模型>/`；令牌存钥匙串（服务 `Friston`，账户 `huggingface`），没有时用 `HF_TOKEN` |
+| `external` | 外部语音模型精转写的纯逻辑：`.caf` → 分段 AAC（`afconvert`，静音检测 −70 dBFS）、读写 16 位 WAV、把模型听到的句子映射回本场会议的说话人；调用 `agy` 的部分在 `mm_llm::antigravity` |
 | `indexer` | 后台线程：Obsidian 库 FSEvents → 防抖 → 增量分块 → 按模型戳补嵌入；会议进行时减小批量，把 GPU 让给字幕 |
 
 纪要提供方按 BYOK → Codex → 本地 MLX 的顺序选择。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。

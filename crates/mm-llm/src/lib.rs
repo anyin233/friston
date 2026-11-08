@@ -7,7 +7,11 @@
 //!    accepts text, local images and local audio inputs plus an `outputSchema`
 //!    that constrains the final message to our minutes JSON.
 //! 3. **On-device MLX** – optional offline fallback through `mm-embedd`.
+//!
+//! Separately, [`antigravity`] can replace the whole post-meeting pass: Gemini hears the
+//! recordings through the Antigravity CLI and the same CLI then writes the minutes.
 
+pub mod antigravity;
 pub mod byok;
 pub mod codex;
 pub mod keychain;
@@ -34,6 +38,8 @@ pub enum LlmError {
     Codex(String),
     #[error("local model: {0}")]
     Local(String),
+    #[error("Antigravity: {0}")]
+    Antigravity(String),
 }
 
 /// Runs the chosen provider.

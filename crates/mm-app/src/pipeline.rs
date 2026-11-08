@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use mm_core::{AudioOrigin, CaptureFiles, CaptureStarted, CaptureStopped, FileTranscript, Meeting};
-use mm_llm::{LlmError, byok, codex};
+use mm_llm::{LlmError, antigravity, byok, codex};
 use mm_service::engines::{EmbedEngine, MeetingEngine, RefineRequest};
-use mm_service::{AppConfig, flow};
+use mm_service::{AppConfig, RefineBackend, external, flow};
 use mm_store::Store;
 
 use crate::logic::provider_config;
@@ -204,22 +204,27 @@ pub fn finish_meeting(job: FinishJob, progress: &dyn Fn(String)) -> Result<Finis
         warnings.push(format!("同步转写到笔记失败：{e}"));
     }
 
-    if cfg.refine_after_meeting {
+    let files = merged_files(&stopped.files, &started.files);
+    let mut minutes_done = false;
+    // Antigravity first when chosen; any failure there falls through to the local pass.
+    let mut refined = false;
+    if cfg.refine_after_meeting && cfg.refine_backend == RefineBackend::Antigravity {
+        match antigravity_pass(&minutes, &mut meeting, &files, progress, &mut warnings) {
+            Ok(wrote_minutes) => {
+                refined = true;
+                minutes_done = wrote_minutes;
+            }
+            Err(e) => warnings.push(format!("Antigravity 精转写失败，改用本地精转写：{e}")),
+        }
+    }
+    if cfg.refine_after_meeting && !refined {
         match &engine {
-            Some(engine) => refine(
-                engine,
-                &minutes,
-                &meeting,
-                &merged_files(&stopped.files, &started.files),
-                progress,
-                &mut warnings,
-            ),
+            Some(engine) => refine(engine, &minutes, &meeting, &files, progress, &mut warnings),
             None => warnings.push("字幕引擎不可用，跳过会后精转写".into()),
         }
     }
 
-    let mut minutes_done = false;
-    if cfg.auto_minutes {
+    if cfg.auto_minutes && !minutes_done {
         progress("正在生成纪要…".into());
         match generate_minutes(&minutes, &mut meeting) {
             Ok(label) => {
@@ -307,6 +312,147 @@ fn refine(
     });
     if let Err(e) = result {
         warnings.push(format!("保存精转写失败：{e}"));
+    }
+}
+
+/// Removes a scratch folder when dropped, so every exit path cleans up the converted audio.
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.0)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("removing {}: {e}", self.0.display());
+        }
+    }
+}
+
+/// Longest wait for one agy run (one audio part, or the minutes); agy retries 500s itself.
+const AGY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+
+/// Post-meeting pass through the Antigravity CLI: Gemini hears the recordings, the result
+/// replaces the transcript, then (with automatic minutes on) the same model writes minutes.
+///
+/// Params: `ctx`; `meeting` – status updated when minutes are written; `files`; `progress`;
+/// `warnings` – gets non-fatal problems (a failed minutes step keeps the new transcript).
+/// Returns: whether minutes were written, or why the transcript step failed (the caller then
+/// runs the local pass).
+fn antigravity_pass(
+    ctx: &MinutesCtx,
+    meeting: &mut Meeting,
+    files: &CaptureFiles,
+    progress: &dyn Fn(String),
+    warnings: &mut Vec<String>,
+) -> Result<bool, String> {
+    let agy = antigravity::find_agy()
+        .ok_or("没有找到 Antigravity CLI（agy）。安装 Antigravity 后在终端运行一次 agy 并登录。")?;
+    let model = ctx.cfg.antigravity_model.as_str();
+    let label = antigravity::model_label(model);
+    let recordings: Vec<(AudioOrigin, PathBuf)> = [
+        (AudioOrigin::Microphone, &files.microphone),
+        (AudioOrigin::System, &files.system_audio),
+    ]
+    .into_iter()
+    .filter_map(|(o, p)| p.clone().map(|p| (o, p)))
+    .collect();
+    if recordings.is_empty() {
+        return Err("这场会议没有录音文件".into());
+    }
+    progress("正在准备录音…".into());
+    let work = ScratchDir(std::env::temp_dir().join(format!("friston-agy-{}", meeting.id)));
+    let chunks = external::prepare_recordings(&recordings, &work.0)
+        .map_err(|e| format!("准备录音失败：{e}"))?;
+    if chunks.is_empty() {
+        return Err("录音里没有声音".into());
+    }
+    let context = match lock(&ctx.store)
+        .and_then(|s| flow::refine_context_for(&ctx.cfg, &s, meeting).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(format!("读取参会人和笔记失败，识别时不带提示词：{e}"));
+            None
+        }
+    };
+    let live = lock(&ctx.store)?
+        .transcript(meeting.id)
+        .map_err(|e| format!("读取实时转写失败：{e}"))?;
+    let language = ctx.cfg.caption_language.clone();
+    let mut segments = Vec::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        progress(if chunks.len() == 1 {
+            format!("正在用 {label} 识别录音…")
+        } else {
+            format!(
+                "正在用 {label} 识别录音（第 {}/{} 段）…",
+                i + 1,
+                chunks.len()
+            )
+        });
+        let heard = antigravity::transcribe(
+            &agy,
+            &chunk.dir,
+            &chunk.tracks,
+            context.as_deref(),
+            language.as_deref(),
+            model,
+            AGY_TIMEOUT,
+        )
+        .map_err(|e| format!("第 {} 段：{e}", i + 1))?;
+        if heard.interrupted.is_some() {
+            warnings.push(format!(
+                "{label} 识别第 {} 段时被中断，这一段的转写可能不完整",
+                i + 1
+            ));
+        }
+        segments.extend(external::heard_to_segments(
+            meeting.id,
+            chunk.offset_ms,
+            &heard.lines,
+            &live,
+            language.clone(),
+        ));
+    }
+    if segments.is_empty() {
+        return Err(format!("{label} 没有识别出任何语句"));
+    }
+    segments.sort_by_key(|s| (s.start_ms, s.end_ms));
+    {
+        let mut store = lock(&ctx.store)?;
+        flow::store_final_transcript(&mut store, meeting.id, &segments)
+            .and_then(|_| flow::sync_transcript(&ctx.cfg, &mut store, meeting))
+            .map_err(|e| format!("保存识别结果失败：{e}"))?;
+    }
+    if !ctx.cfg.auto_minutes {
+        return Ok(false);
+    }
+    progress(format!("正在用 {label} 生成纪要…"));
+    // An empty working directory: the minutes run has nothing to read but its prompt.
+    let minutes_dir = work.0.join("minutes");
+    let written = std::fs::create_dir_all(&minutes_dir)
+        .map_err(|e| format!("创建 {}：{e}", minutes_dir.display()))
+        .and_then(|_| {
+            flow::minutes_input(&ctx.cfg, &*lock(&ctx.store)?, meeting)
+                .map_err(|e| format!("整理纪要素材失败：{e}"))
+        })
+        .and_then(|input| {
+            antigravity::generate_minutes(&agy, &minutes_dir, &input, model, AGY_TIMEOUT)
+                .map_err(|e| e.to_string())
+        })
+        .and_then(|minutes| {
+            flow::apply_minutes(&ctx.cfg, &mut *lock(&ctx.store)?, meeting, &minutes)
+                .map_err(|e| format!("写入纪要失败：{e}"))
+        });
+    match written {
+        Ok(()) => {
+            progress(format!("纪要已由{label}（Antigravity）生成并写入笔记"));
+            Ok(true)
+        }
+        Err(e) => {
+            warnings.push(format!("{label} 生成纪要失败，改用常规纪要方式：{e}"));
+            Ok(false)
+        }
     }
 }
 

@@ -10,7 +10,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme as _, IconName, IndexPath, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use mm_service::AppConfig;
+use mm_llm::antigravity;
+use mm_service::{AppConfig, RefineBackend};
 
 use crate::logic::{self, BYOK_KINDS, CAPTION_LANGUAGES, MINUTES_LANGUAGES};
 use crate::state::{AppState, Loadable, NoticeKind};
@@ -521,11 +522,47 @@ impl SettingsPage {
                 cx,
             ))
             .child(Self::row(
-                "精转模型",
-                Some("实时字幕固定用快速模型。这里可以填更大的 Qwen3-ASR 模型：Hugging Face 仓库名或本地文件夹，名字里要带 0.6B 或 1.7B。留空用默认。".into()),
-                Input::new(&self.refine_model).small(),
+                "精转方式",
+                Some("本地：Qwen3-ASR 在本机重新转写。Antigravity：Gemini 直接听录音，并接着写纪要；录音会上传到 Google，失败时自动改用本地。".into()),
+                self.segmented(
+                    "refine-backend",
+                    vec![
+                        (RefineBackend::Local, "本地 Qwen3-ASR"),
+                        (RefineBackend::Antigravity, "Antigravity · Gemini"),
+                    ],
+                    cfg.refine_backend,
+                    |a, v, cx| a.update_config(cx, |c| c.refine_backend = v),
+                ),
                 cx,
             ))
+            .when(cfg.refine_backend == RefineBackend::Local, |el| {
+                el.child(Self::row(
+                    "精转模型",
+                    Some("实时字幕固定用快速模型。这里可以填更大的 Qwen3-ASR 模型：Hugging Face 仓库名或本地文件夹，名字里要带 0.6B 或 1.7B。留空用默认。".into()),
+                    Input::new(&self.refine_model).small(),
+                    cx,
+                ))
+            })
+            .when(cfg.refine_backend == RefineBackend::Antigravity, |el| {
+                let agy_line = match antigravity::find_agy() {
+                    Some(p) => format!("已找到 agy（{}）。第一次使用前，在终端运行一次 agy 并用 Google 账号登录。", p.display()),
+                    None => "没有找到 agy。安装 Antigravity CLI 后再选这一项，否则会改用本地精转。".to_string(),
+                };
+                el.child(Self::row(
+                    "Gemini 模型",
+                    Some(agy_line),
+                    self.segmented(
+                        "agy-model",
+                        antigravity::MODELS
+                            .iter()
+                            .map(|(id, label)| (id.to_string(), *label))
+                            .collect(),
+                        cfg.antigravity_model.clone(),
+                        |a, v, cx| a.update_config(cx, |c| c.antigravity_model = v),
+                    ),
+                    cx,
+                ))
+            })
     }
 
     /// Minutes provider section.

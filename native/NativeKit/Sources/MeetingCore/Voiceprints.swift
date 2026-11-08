@@ -136,6 +136,14 @@ public struct SpeakerTurn: Sendable, Equatable {
 
 /// Plans offline transcription windows from diarized turns.
 public enum TurnPlanner {
+    /// Whether `transcribe/file` masks Pyannote turns with Silero VAD.
+    ///
+    /// Off: on far-field meeting audio (AISHELL-4, one array channel) Silero marked only ~67% of
+    /// the reference speech, and Pyannote turns that Silero did not confirm were dropped, so a
+    /// third of what people said never reached the recognizer (CER 32% vs 16.5% with reference
+    /// segments). Pyannote alone covers ~97% and marks only ~2.5% non-speech as speech.
+    public static let sileroPrefilter = false
+
     /// Merges a speaker's consecutive turns across short gaps and splits overly long ones.
     ///
     /// Diarizers emit many short fragments; transcribing each separately loses context and

@@ -251,6 +251,12 @@ private func json<T: Encodable>(_ value: T) throws -> [String: Any] {
     #expect(turns.last?.end == 40)
 }
 
+/// Regression: the Silero pre-filter cut refine coverage of far-field meeting speech to ~67%
+/// (AISHELL-4, docs/asr-model-survey.md §7.6), doubling CER. Pyannote alone covers ~97%.
+@Test func refineSegmentationDoesNotUseSileroPrefilter() {
+    #expect(TurnPlanner.sileroPrefilter == false)
+}
+
 // MARK: Fusion relabels
 
 @Test func anonymousClusterIsRenamedOnceItMatchesAVoiceprint() {

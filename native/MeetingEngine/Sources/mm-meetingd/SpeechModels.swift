@@ -212,7 +212,8 @@ actor SpeechModels {
         }
     }
 
-    /// Pyannote segmentation + WeSpeaker clustering with a Silero pre-filter, for `transcribe/file`.
+    /// Pyannote segmentation + WeSpeaker clustering for `transcribe/file` (Silero pre-filter per
+    /// `TurnPlanner.sileroPrefilter`).
     /// - Returns: A fresh pipeline owned by the caller.
     /// - Throws: ``SpeechModelError``.
     func diarizer() async throws -> Unchecked<PyannoteDiarizationPipeline> {
@@ -220,7 +221,7 @@ actor SpeechModels {
             return try await MLXGate.shared.load {
                 Unchecked(try await loadCacheFirst(SpeechModelIDs.segmentation) { offline in
                     try await PyannoteDiarizationPipeline.fromPretrained(
-                        useVADFilter: true, offlineMode: offline, progressHandler: Self.progress(SpeechModelIDs.segmentation))
+                        useVADFilter: TurnPlanner.sileroPrefilter, offlineMode: offline, progressHandler: Self.progress(SpeechModelIDs.segmentation))
                 })
             }
         } catch {

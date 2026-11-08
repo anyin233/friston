@@ -113,7 +113,7 @@
 
 参数 `{path, language?, voiceprints?, model?, context?}`，返回 `{language?, segments:[{startMs, endMs, text, speaker}], model?}`。
 
-- 先用 Pyannote 分离说话人（附 Silero 预过滤），同一人间隔 ≤ 0.8 s 的片段合并，超过 25 s 的切开，再逐段用 Qwen3-ASR 1.7B 识别。分离模型不可用时退回只用 VAD 分段，`speaker` 为 `unknown`。
+- 先用 Pyannote 分离说话人（不加 Silero 预过滤：远场会议里 Silero 会漏掉约三分之一的语音，见 [asr-model-survey.md](asr-model-survey.md) 7.6 节），同一人间隔 ≤ 0.8 s 的片段合并，超过 25 s 的切开，再逐段用 Qwen3-ASR 1.7B 识别。分离模型不可用时退回只用 VAD 分段，`speaker` 为 `unknown`。
 - 1.7B 优先使用 Hugging Face 缓存里的 `mlx-community/Qwen3-ASR-1.7B-8bit`，没有时由 speech-swift 下载 `aufklarer/Qwen3-ASR-1.7B-MLX-8bit`。模型只在请求期间驻留内存。
 - `model`：可选，换用别的 Qwen3-ASR MLX 模型（会后精转可以比实时字幕用更大的模型）。可以是 Hugging Face 仓库名（`owner/name`，缓存里有就离线加载，否则由 speech-swift 下载）或本地文件夹的绝对路径（Hugging Face 快照文件夹按仓库名识别）。名字里必须有 `Qwen3-ASR` 和 `0.6B`/`1.7B`，因为 speech-swift 按名字选择网络结构和量化位数；不满足时在分离之前就返回 `-32602`。结果里的 `model` 是实际使用的模型。
 - `context`：可选，给解码器的提示文字（会议标题、参会人名、笔记里的术语），放进 Qwen3-ASR 的 system 提示，能明显改善人名和专有名词。超过 600 字截断。

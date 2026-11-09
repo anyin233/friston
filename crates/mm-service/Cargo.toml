@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+mm-i18n.workspace = true
 mm-core.workspace = true
 mm-engine.workspace = true
 mm-store.workspace = true

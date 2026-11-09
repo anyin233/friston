@@ -8,8 +8,9 @@
 //!    that constrains the final message to our minutes JSON.
 //! 3. **On-device MLX** – optional offline fallback through `mm-embedd`.
 //!
-//! Separately, [`antigravity`] can replace the whole post-meeting pass: Gemini hears the
-//! recordings through the Antigravity CLI and the same CLI then writes the minutes.
+//! The user can also pick one backend explicitly, including the Antigravity CLI ([`antigravity`]),
+//! which can also re-transcribe the recordings after a meeting. An explicit pick that fails
+//! falls back to the chain above.
 
 pub mod antigravity;
 pub mod byok;
@@ -22,7 +23,10 @@ pub mod render;
 
 pub use minutes::{ActionItem, Minutes, minutes_json_schema};
 pub use prompt::{MinutesInput, TranscriptLine, instructions};
-pub use provider::{ByokProvider, ProviderChoice, ProviderConfig, ProviderError, select_provider};
+pub use provider::{
+    ByokProvider, MinutesBackend, ModelOption, ProviderChoice, ProviderConfig, ProviderError,
+    ProviderPlan, plan_providers, select_provider,
+};
 pub use render::{RenderedMinutes, render_minutes};
 
 /// Errors raised while generating minutes.
@@ -62,11 +66,20 @@ pub fn generate_minutes(
             })?;
             byok::generate(p, &key, input)
         }
-        ProviderChoice::Codex { codex_path } => codex::generate(
+        ProviderChoice::Codex { codex_path, model } => codex::generate(
             std::path::Path::new(codex_path),
             input,
+            model.as_deref(),
             std::time::Duration::from_secs(15 * 60),
         ),
+        ProviderChoice::Antigravity { agy_path, model } => {
+            antigravity::generate_minutes_in_scratch(
+                std::path::Path::new(agy_path),
+                input,
+                model,
+                std::time::Duration::from_secs(20 * 60),
+            )
+        }
         ProviderChoice::LocalMlx { model } => local(model, input),
     }
 }

@@ -1,14 +1,66 @@
 //! Small shared building blocks for pages: headings, cards, tags, speaker colours.
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mm_core::MeetingStatus;
+use mm_i18n::tr;
 
 use crate::logic;
 use crate::state::LoadError;
+
+/// Produces a placeholder in the current language (a non-capturing `|| tr!(…)`).
+type PlaceholderText = fn() -> &'static str;
+
+/// Input placeholders that follow the interface language.
+///
+/// Input states keep their placeholder text, so a page built before a language switch would
+/// keep showing the old wording. Pages register each input with a function that produces
+/// its text, and call [`Placeholders::sync`] at the end of `new` and at the top of `render`.
+#[derive(Default)]
+pub struct Placeholders {
+    /// Language the placeholders were last written in; `None` until the first sync.
+    lang: Option<mm_i18n::Lang>,
+    inputs: Vec<(Entity<InputState>, PlaceholderText)>,
+    textareas: Vec<(Entity<TextareaState>, PlaceholderText)>,
+}
+
+impl Placeholders {
+    /// Registers a single-line input.
+    ///
+    /// Params: `input`; `text` – returns the placeholder in the current language.
+    pub fn input(&mut self, input: &Entity<InputState>, text: fn() -> &'static str) {
+        self.inputs.push((input.clone(), text));
+    }
+
+    /// Registers a multi-line text area.
+    ///
+    /// Params: `area`; `text` – returns the placeholder in the current language.
+    pub fn textarea(&mut self, area: &Entity<TextareaState>, text: fn() -> &'static str) {
+        self.textareas.push((area.clone(), text));
+    }
+
+    /// Rewrites every registered placeholder when the language changed since the last call;
+    /// a no-op otherwise, so calling it on every render is cheap.
+    ///
+    /// Params: `window`; `cx`.
+    pub fn sync(&mut self, window: &mut Window, cx: &mut App) {
+        let now = mm_i18n::current();
+        if self.lang == Some(now) {
+            return;
+        }
+        self.lang = Some(now);
+        for (input, text) in &self.inputs {
+            input.update(cx, |s, cx| s.set_placeholder(text(), window, cx));
+        }
+        for (area, text) in &self.textareas {
+            area.update(cx, |s, cx| s.set_placeholder(text(), window, cx));
+        }
+    }
+}
 
 /// Colour of a speaker hue (identity colour: one person, one hue on every surface).
 ///
@@ -19,6 +71,28 @@ pub fn hue_color(hue: Option<u16>) -> Hsla {
         Some(h) => hsla(f32::from(h % 360) / 360.0, 0.62, 0.52, 1.0),
         None => hsla(0.65, 0.12, 0.62, 1.0),
     }
+}
+
+/// Caption text whose volatile tail (what the engine may still rewrite) is drawn in `tail`.
+///
+/// New characters appear after the stable part instead of the whole line flickering, the
+/// way Foresight shows its interim results.
+///
+/// Params: `text`; `stable_bytes` – byte offset where the volatile tail starts
+/// (`CaptionLine::stable_byte_len`); `tail` – colour of the volatile part.
+/// Returns: the styled text (inherits the surrounding text colour for the stable part).
+pub fn caption_text(text: &str, stable_bytes: usize, tail: Hsla) -> StyledText {
+    let cut = stable_bytes.min(text.len());
+    let highlights = (cut < text.len()).then(|| {
+        (
+            cut..text.len(),
+            HighlightStyle {
+                color: Some(tail),
+                ..Default::default()
+            },
+        )
+    });
+    StyledText::new(SharedString::from(text.to_string())).with_highlights(highlights)
 }
 
 /// Page title plus a one-line description.
@@ -110,7 +184,7 @@ pub fn load_error(id: impl Into<ElementId>, err: &LoadError, cx: &App) -> Div {
                 Button::new(id)
                     .small()
                     .outline()
-                    .label("打开系统设置")
+                    .label(tr!("打开系统设置", "Open System Settings"))
                     .on_click(move |_, _, cx| cx.open_url(url)),
             )
         })

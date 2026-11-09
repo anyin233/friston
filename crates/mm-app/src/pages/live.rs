@@ -1,26 +1,20 @@
 //! 会议中: capture setup, live captions with speakers, levels and the notes editor.
 
-use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, IconName, IndexPath, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mm_core::{AudioOrigin, CaptureState, LevelSource, SpeakerLabel};
+use mm_i18n::{tr, trf};
 
 use crate::assign;
 use crate::logic;
-use crate::state::{AppEvent, AppState, EngineState, LiveSession, Loadable};
-use crate::ui::{self, Choice};
-
-/// Value of the "no window" choice.
-const NO_WINDOW: &str = "";
-/// Value of the "system default microphone" choice.
-const DEFAULT_MIC: &str = "";
+use crate::pages::Page;
+use crate::state::{AppEvent, AppState, LiveSession};
+use crate::ui;
 
 /// Dark caption stage colours (from the prototype: `--stage`, `--stage-ink`, `--stage-dim`).
 fn stage_bg() -> Hsla {
@@ -33,18 +27,23 @@ fn stage_dim() -> Hsla {
     rgb(0x9DA3D6).into()
 }
 
+/// Channel count of an input, e.g. `2 声道` / `2 channels`.
+///
+/// Params: `n` – number of channels.
+/// Returns: the localized count (English needs a singular for mono inputs).
+fn channel_count(n: u32) -> String {
+    let en = logic::count_en(u64::from(n), "channel", "channels");
+    trf!("{n} 声道", "{en}")
+}
+
 /// The 会议中 page.
 pub struct LivePage {
     app: Entity<AppState>,
-    title: Entity<InputState>,
+    /// Input placeholders, rewritten when the interface language changes.
+    placeholders: ui::Placeholders,
     notes: Entity<TextareaState>,
-    windows: Entity<SelectState<Vec<Choice>>>,
-    mics: Entity<SelectState<Vec<Choice>>>,
     new_person: Entity<InputState>,
     captions_scroll: ScrollHandle,
-    /// Signatures of the select items, so selects are rebuilt only when lists change.
-    window_sig: Vec<String>,
-    mic_sig: Vec<String>,
     caption_count: usize,
 }
 
@@ -54,34 +53,10 @@ impl LivePage {
     /// Params: `app`; `window`; `cx`.
     /// Returns: the page.
     pub fn new(app: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let title = cx.new(|cx| InputState::new(window, cx).placeholder("会议标题（可留空）"));
-        let notes = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder(
-                "在这里记笔记。⌘↩ 插入当前时间戳，笔记会自动保存到 Obsidian 笔记的“笔记”部分。",
-            )
-        });
-        let new_person = cx.new(|cx| InputState::new(window, cx).placeholder("新人物的名字"));
-        let windows = cx.new(|cx| {
-            SelectState::new(
-                vec![Choice::new(NO_WINDOW, "不录屏，只录声音")],
-                Some(IndexPath::new(0)),
-                window,
-                cx,
-            )
-        });
-        let mics = cx.new(|cx| {
-            SelectState::new(
-                vec![Choice::new(DEFAULT_MIC, "系统默认麦克风")],
-                Some(IndexPath::new(0)),
-                window,
-                cx,
-            )
-        });
-
-        cx.observe_in(&app, window, |this, _, window, cx| {
-            this.sync_selects(window, cx)
-        })
-        .detach();
+        let notes = cx.new(|cx| TextareaState::new(window, cx));
+        let new_person = cx.new(|cx| InputState::new(window, cx));
+        cx.observe_in(&app, window, |this, _, _, cx| this.follow_captions(cx))
+            .detach();
         cx.subscribe_in(&app, window, |this, _, ev: &AppEvent, window, cx| {
             if let AppEvent::LiveStarted { notes } = ev {
                 this.notes
@@ -110,96 +85,27 @@ impl LivePage {
             },
         )
         .detach();
-        cx.subscribe_in(
-            &windows,
-            window,
-            |this, _, ev: &SelectEvent<Vec<Choice>>, _, cx| {
-                let SelectEvent::Confirm(v) = ev;
-                let id = v.as_deref().and_then(|s| s.parse::<u32>().ok());
-                this.app.update(cx, |a, cx| {
-                    a.selected_window = id;
-                    cx.notify();
-                });
-            },
-        )
-        .detach();
-        cx.subscribe_in(
-            &mics,
-            window,
-            |this, _, ev: &SelectEvent<Vec<Choice>>, _, cx| {
-                let SelectEvent::Confirm(v) = ev;
-                let uid = v.clone().filter(|s| !s.is_empty());
-                this.app
-                    .update(cx, |a, cx| a.update_config(cx, |c| c.microphone_uid = uid));
-            },
-        )
-        .detach();
-
+        let mut placeholders = ui::Placeholders::default();
+        placeholders.textarea(&notes, || tr!(
+                "在这里记笔记。⌘↩ 插入当前时间戳，笔记会自动保存到 Obsidian 笔记的“笔记”部分。",
+                "Take notes here. ⌘↩ inserts the current timestamp; notes save automatically to the Notes section of the Obsidian note."
+            ));
+        placeholders.input(&new_person, || tr!("新人物的名字", "New person’s name"));
+        placeholders.sync(window, cx);
         Self {
             app,
-            title,
+            placeholders,
             notes,
-            windows,
-            mics,
             new_person,
             captions_scroll: ScrollHandle::new(),
-            window_sig: vec![],
-            mic_sig: vec![],
             caption_count: 0,
         }
     }
 
-    /// Rebuilds select items when the app's window/microphone lists change and keeps the
-    /// caption list scrolled to the newest line.
-    fn sync_selects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let app = self.app.read(cx);
-        if let Loadable::Ready(src) = &app.sources {
-            let mut items = vec![Choice::new(NO_WINDOW, "不录屏，只录声音")];
-            items.extend(src.windows.iter().map(|w| {
-                let title = if w.title.is_empty() {
-                    w.app_name.clone()
-                } else {
-                    format!("{} — {}", w.app_name, w.title)
-                };
-                Choice::new(w.window_id.to_string(), title)
-            }));
-            let sig: Vec<String> = items.iter().map(|c| c.value.clone()).collect();
-            if sig != self.window_sig {
-                self.window_sig = sig;
-                let selected = app
-                    .selected_window
-                    .map(|w| w.to_string())
-                    .unwrap_or_default();
-                self.windows.update(cx, |s, cx| {
-                    s.set_items(items, window, cx);
-                    s.set_selected_value(&selected, window, cx);
-                });
-            }
-        }
-        let app = self.app.read(cx);
-        if let Loadable::Ready(inputs) = &app.inputs {
-            let mut items = vec![Choice::new(DEFAULT_MIC, "系统默认麦克风")];
-            items.extend(inputs.iter().map(|i| {
-                let spatial = if i.supports_spatial_cues() {
-                    "，可判断方位"
-                } else {
-                    ""
-                };
-                Choice::new(
-                    i.uid.clone(),
-                    format!("{}（{} 声道{spatial}）", i.name, i.channels),
-                )
-            }));
-            let sig: Vec<String> = items.iter().map(|c| c.value.clone()).collect();
-            if sig != self.mic_sig {
-                self.mic_sig = sig;
-                let selected = app.cfg.microphone_uid.clone().unwrap_or_default();
-                self.mics.update(cx, |s, cx| {
-                    s.set_items(items, window, cx);
-                    s.set_selected_value(&selected, window, cx);
-                });
-            }
-        }
+    /// Keeps the caption list scrolled to the newest line.
+    ///
+    /// Params: `cx` – the page context.
+    fn follow_captions(&mut self, cx: &mut Context<Self>) {
         let n = self
             .app
             .read(cx)
@@ -214,135 +120,41 @@ impl LivePage {
         cx.notify();
     }
 
-    /// Capture setup shown when nothing is recording.
-    fn setup(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let app = self.app.read(cx);
-        let engine_ready = app.meeting_state == EngineState::Ready;
-        let starting = app.live_starting;
-        let cfg = app.cfg.clone();
-        let spatial_hint = app
-            .inputs
-            .ready()
-            .and_then(|ins| {
-                ins.iter()
-                    .find(|i| Some(&i.uid) == cfg.microphone_uid.as_ref())
-            })
-            .map(|i| {
-                if i.supports_spatial_cues() {
-                    format!(
-                        "{} 有 {} 个声道，可以根据方位区分说话人。",
-                        i.name, i.channels
-                    )
-                } else {
-                    format!("{} 是单声道或虚拟设备，只按音色区分说话人。", i.name)
-                }
-            });
-        let sources_err = match &app.sources {
-            Loadable::Failed(e) => Some(e.clone()),
-            _ => None,
-        };
-        let inputs_err = match &app.inputs {
-            Loadable::Failed(e) => Some(e.clone()),
-            _ => None,
-        };
-        let engine_line = app.meeting_state.describe("字幕引擎 ");
-        let a1 = self.app.clone();
-        let a2 = self.app.clone();
-        let a3 = self.app.clone();
-        let a4 = self.app.clone();
-        let a5 = self.app.clone();
-        let title = self.title.clone();
+    /// Shown when nothing is recording: where to start, where the devices live, and
+    /// whether the caption engine is ready.
+    ///
+    /// Params: `cx` – the page context.
+    /// Returns: the card.
+    fn idle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let engine_line = self
+            .app
+            .read(cx)
+            .meeting_state
+            .describe(tr!("字幕引擎 ", "Caption engine"));
+        let app = self.app.clone();
         ui::card(cx)
             .max_w(px(720.))
-            .gap_4()
-            .child(ui::section_title("开始一场记录"))
-            .child(Input::new(&self.title))
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().w(px(90.)).text_sm().child("录制窗口"))
-                            .child(div().flex_1().child(Select::new(&self.windows).small()))
-                            .child(
-                                Button::new("refresh-windows")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::RefreshCw)
-                                    .label("读取窗口")
-                                    .on_click(move |_, _, cx| {
-                                        a1.update(cx, |a, cx| a.refresh_sources(cx))
-                                    }),
-                            ),
-                    )
-                    .when_some(sources_err, |el, e| {
-                        el.child(ui::load_error("src-err", &e, cx))
-                    }),
-            )
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().w(px(90.)).text_sm().child("麦克风"))
-                            .child(div().flex_1().child(Select::new(&self.mics).small()))
-                            .child(
-                                Button::new("refresh-mics")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::RefreshCw)
-                                    .on_click(move |_, _, cx| {
-                                        a2.update(cx, |a, cx| a.refresh_inputs(cx))
-                                    }),
-                            ),
-                    )
-                    .when_some(spatial_hint, |el, h| el.child(ui::muted(h, cx)))
-                    .when_some(inputs_err, |el, e| {
-                        el.child(ui::load_error("mic-err", &e, cx))
-                    }),
-            )
-            .child(
-                h_flex()
-                    .gap_6()
-                    .child(
-                        Switch::new("sys-audio")
-                            .checked(cfg.system_audio)
-                            .label("录系统声音（远程参会者）")
-                            .on_click(move |v, _, cx| {
-                                let v = *v;
-                                a3.update(cx, |a, cx| a.update_config(cx, |c| c.system_audio = v));
-                            }),
-                    )
-                    .child(
-                        Switch::new("rec-screen")
-                            .checked(cfg.record_screen)
-                            .label("录制所选窗口画面")
-                            .on_click(move |v, _, cx| {
-                                let v = *v;
-                                a4.update(cx, |a, cx| a.update_config(cx, |c| c.record_screen = v));
-                            }),
-                    ),
-            )
+            .gap_3()
+            .child(ui::section_title(tr!("还没有开始记录", "Not recording")))
+            .child(ui::muted(
+                tr!(
+                    "点侧边栏的“开始记录”开始。日历上有正在进行或 10 分钟内开始的会议时，可以直接记录这场会议。",
+                    "Click Start recording in the sidebar. When a calendar meeting is running or starts within 10 minutes, you can record that meeting directly."
+                ),
+                cx,
+            ))
             .child(
                 h_flex()
                     .gap_3()
                     .items_center()
                     .child(
-                        Button::new("live-start")
-                            .primary()
-                            .icon(IconName::Mic)
-                            .label(if starting {
-                                "正在开始…"
-                            } else {
-                                "开始记录"
-                            })
-                            .loading(starting)
-                            .disabled(!engine_ready || starting)
+                        Button::new("live-open-settings")
+                            .small()
+                            .outline()
+                            .icon(IconName::Settings)
+                            .label(tr!("录制设置", "Recording settings"))
                             .on_click(move |_, _, cx| {
-                                let t = title.read(cx).value().to_string();
-                                a5.update(cx, |a, cx| a.quick_record(t, cx));
+                                app.update(cx, |a, cx| a.navigate(Page::Settings, cx))
                             }),
                     )
                     .child(ui::muted(engine_line, cx)),
@@ -360,14 +172,21 @@ impl LivePage {
                 .child(
                     h_flex()
                         .justify_between()
-                        .child(ui::section_title(format!("会后整理：{}", post.title)))
+                        .child(ui::section_title(trf!(
+                            "会后整理：{}",
+                            "After the meeting: {}",
+                            post.title
+                        )))
                         .child(if post.running {
-                            Tag::warning().small().child("进行中").into_any_element()
+                            Tag::warning()
+                                .small()
+                                .child(tr!("进行中", "In progress"))
+                                .into_any_element()
                         } else {
                             Button::new("post-open")
                                 .small()
                                 .outline()
-                                .label("在纪要库中查看")
+                                .label(tr!("在纪要库中查看", "View in library"))
                                 .on_click(move |_, _, cx| {
                                     app.update(cx, |_, cx| cx.emit(AppEvent::OpenMeeting(id, None)))
                                 })
@@ -380,7 +199,13 @@ impl LivePage {
                         .map(|s| div().text_sm().child(format!("· {s}"))),
                 )
                 .when(post.running, |el| {
-                    el.child(ui::loading("请稍候，录音已经安全保存。", cx))
+                    el.child(ui::loading(
+                        tr!(
+                            "请稍候，录音已经安全保存。",
+                            "Please wait. The recording is saved safely."
+                        ),
+                        cx,
+                    ))
                 })
                 .children(post.warnings.iter().map(|w| {
                     div()
@@ -394,13 +219,15 @@ impl LivePage {
     /// Capture bar: state, timer, meters, actions.
     fn capbar(&self, live: &LiveSession, cx: &App) -> impl IntoElement {
         let state_tag = match live.capture_state {
-            CaptureState::Recording => Tag::danger().small().child("录制中"),
-            CaptureState::Failed => Tag::danger().small().child("录制失败"),
-            CaptureState::Starting => Tag::warning().small().child("正在开始"),
+            CaptureState::Recording => Tag::danger().small().child(tr!("录制中", "Recording")),
+            CaptureState::Failed => Tag::danger()
+                .small()
+                .child(tr!("录制失败", "Recording failed")),
+            CaptureState::Starting => Tag::warning().small().child(tr!("正在开始", "Starting")),
             CaptureState::Stopping | CaptureState::Stopped => {
-                Tag::secondary().small().child("已停止")
+                Tag::secondary().small().child(tr!("已停止", "Stopped"))
             }
-            CaptureState::Idle => Tag::secondary().small().child("空闲"),
+            CaptureState::Idle => Tag::secondary().small().child(tr!("空闲", "Idle")),
         };
         let meter_of = |src: LevelSource| -> Vec<f32> {
             live.levels
@@ -444,7 +271,11 @@ impl LivePage {
                     .gap_1()
                     .items_center()
                     .text_xs()
-                    .child(format!("麦克风 {channels} 声道"))
+                    .child(trf!(
+                        "麦克风 {}",
+                        "Microphone, {}",
+                        channel_count(channels)
+                    ))
                     .child(ui::meter(&mic, cx.theme().success, cx)),
             )
             .when(self.app.read(cx).cfg.system_audio, |el| {
@@ -453,7 +284,7 @@ impl LivePage {
                         .gap_1()
                         .items_center()
                         .text_xs()
-                        .child("系统声音")
+                        .child(tr!("系统声音", "System audio"))
                         .child(ui::meter(&sys, cx.theme().primary, cx)),
                 )
             })
@@ -466,8 +297,11 @@ impl LivePage {
                     .small()
                     .outline()
                     .icon(IconName::Frame)
-                    .label("截图")
-                    .tooltip("截取录制窗口（未选窗口时截整个屏幕），插入笔记")
+                    .label(tr!("截图", "Screenshot"))
+                    .tooltip(tr!(
+                        "截取录制窗口（未选窗口时截整个屏幕），插入笔记",
+                        "Capture the recorded window (or the whole screen if none is selected) into the notes"
+                    ))
                     .on_click(move |_, window, cx| {
                         let notes = notes.clone();
                         let handle = window.window_handle();
@@ -487,7 +321,7 @@ impl LivePage {
                     .small()
                     .outline()
                     .toggled(floating)
-                    .label("浮窗字幕")
+                    .label(tr!("浮窗字幕", "Floating captions"))
                     .on_click(move |_, _, cx| {
                         a2.update(cx, |a, cx| {
                             if a.floating_open() {
@@ -504,9 +338,9 @@ impl LivePage {
                     .danger()
                     .icon(IconName::Square)
                     .label(if self.app.read(cx).cfg.auto_minutes {
-                        "结束并生成纪要"
+                        tr!("结束并生成纪要", "End and write minutes")
                     } else {
-                        "结束记录"
+                        tr!("结束记录", "End recording")
                     })
                     .on_click(move |_, _, cx| a3.update(cx, |a, cx| a.stop_recording(cx))),
             )
@@ -568,25 +402,25 @@ impl LivePage {
                                                 })
                                             }),
                                     )
-                                    .when(l.origin == AudioOrigin::System, |el| el.child("远程"))
+                                    .when(l.origin == AudioOrigin::System, |el| {
+                                        el.child(tr!("远程", "Remote"))
+                                    })
                                     .when_some(
                                         match &l.speaker {
-                                            SpeakerLabel::Known { score, .. } => {
-                                                Some(format!("声纹 {score:.2}"))
-                                            }
+                                            SpeakerLabel::Known { score, .. } => Some(trf!(
+                                                "声纹 {score:.2}",
+                                                "Voiceprint {score:.2}"
+                                            )),
                                             _ => None,
                                         },
                                         |el, s| el.child(s),
                                     )
-                                    .when(!l.is_final, |el| el.child("正在说"))
+                                    .when(!l.is_final, |el| el.child(tr!("正在说", "Speaking")))
                                     .child(logic::clock(l.start_ms)),
                             )
-                            .child(
-                                div()
-                                    .text_lg()
-                                    .text_color(if l.is_final { stage_ink() } else { stage_dim() })
-                                    .child(l.text.clone()),
-                            ),
+                            .child(div().text_lg().text_color(stage_ink()).child(
+                                ui::caption_text(&l.text, l.stable_byte_len(), stage_dim()),
+                            )),
                     )
             })
             .collect();
@@ -606,11 +440,13 @@ impl LivePage {
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(stage_ink())
-                            .child("实时字幕"),
+                            .child(tr!("实时字幕", "Live captions")),
                     )
                     .child(match live.started.microphone_channels {
-                        Some(n) if n >= 2 => "说话人：音色 + 方位",
-                        _ => "说话人：音色",
+                        Some(n) if n >= 2 => {
+                            tr!("说话人：音色 + 方位", "Speakers: voice + direction")
+                        }
+                        _ => tr!("说话人：音色", "Speakers: voice"),
                     }),
             )
             .child(
@@ -626,7 +462,7 @@ impl LivePage {
                                 .p_4()
                                 .text_sm()
                                 .text_color(stage_dim())
-                                .child("等待有人发言…"),
+                                .child(tr!("等待有人发言…", "Waiting for someone to speak…")),
                         )
                     })
                     .children(lines),
@@ -637,7 +473,10 @@ impl LivePage {
                     .py_2()
                     .text_xs()
                     .text_color(stage_dim())
-                    .child("点击“说话人 N”可以把它命名为某个人。"),
+                    .child(tr!(
+                        "点击“说话人 N”可以把它命名为某个人。",
+                        "Click “Speaker N” to name it as a person."
+                    )),
             )
     }
 
@@ -648,8 +487,12 @@ impl LivePage {
         let meeting = live.meeting.clone();
         let app = self.app.clone();
         let footer = match &live.note_path {
-            Some(p) => format!("自动保存到 {}", p.display()),
-            None => "未设置 Obsidian 库，笔记不会写入文件".into(),
+            Some(p) => trf!("自动保存到 {}", "Saving automatically to {}", p.display()),
+            None => tr!(
+                "未设置 Obsidian 库，笔记不会写入文件",
+                "No Obsidian vault set, so notes aren’t saved to a file"
+            )
+            .into(),
         };
         v_flex()
             .flex_1()
@@ -666,7 +509,7 @@ impl LivePage {
                         Button::new("ts")
                             .small()
                             .ghost()
-                            .label("插入时间戳 ⌘↩")
+                            .label(tr!("插入时间戳 ⌘↩", "Insert timestamp ⌘↩"))
                             .on_click(move |_, window, cx| {
                                 notes.update(cx, |s, cx| {
                                     s.insert(logic::timestamp_token(elapsed), window, cx)
@@ -679,7 +522,7 @@ impl LivePage {
                             .small()
                             .ghost()
                             .icon(IconName::ExternalLink)
-                            .label("在 Obsidian 中打开")
+                            .label(tr!("在 Obsidian 中打开", "Open in Obsidian"))
                             .on_click(move |_, _, cx| {
                                 app.update(cx, |a, cx| a.open_in_obsidian(&meeting, cx))
                             }),
@@ -714,9 +557,12 @@ impl LivePage {
             .gap_3()
             .border_l_1()
             .border_color(cx.theme().border)
-            .child(ui::section_title("发言时长"))
+            .child(ui::section_title(tr!("发言时长", "Speaking time")))
             .when(talk.is_empty(), |el| {
-                el.child(ui::muted("还没有完成的发言。", cx))
+                el.child(ui::muted(
+                    tr!("还没有完成的发言。", "No finished turns yet."),
+                    cx,
+                ))
             })
             .children(talk.into_iter().map(|(label, ms)| {
                 let hue = live.directory.hue(&label);
@@ -745,7 +591,7 @@ impl LivePage {
                     )
             }))
             .children(self.directions(live, cx))
-            .child(ui::section_title("录音位置"))
+            .child(ui::section_title(tr!("录音位置", "Recording location")))
             .child(ui::muted(live.started.directory.display().to_string(), cx))
     }
 
@@ -808,7 +654,7 @@ impl LivePage {
         Some(
             v_flex()
                 .gap_2()
-                .child(ui::section_title("方位"))
+                .child(ui::section_title(tr!("方位", "Directions")))
                 .child(seats)
                 .children(entries.into_iter().map(|(label, x)| {
                     h_flex()
@@ -819,14 +665,21 @@ impl LivePage {
                         ))
                         .child(ui::muted(logic::direction_label(x), cx))
                 }))
-                .child(ui::muted("相对本场其他人的位置，下方是麦克风。", cx).text_xs()),
+                .child(ui::muted(
+                    tr!(
+                        "相对本场其他人的位置，下方是麦克风。",
+                        "Positions relative to others in this meeting; the microphone is at the bottom."
+                    ),
+                    cx,
+                ).text_xs()),
         )
     }
 }
 
 impl Render for LivePage {
     /// Renders setup or the running session.
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.placeholders.sync(window, cx);
         let app = self.app.clone();
         let cx_ref: &App = cx;
         if let Some(live) = app.read(cx_ref).live.as_ref() {
@@ -853,12 +706,15 @@ impl Render for LivePage {
             .gap_5()
             .overflow_y_scrollbar()
             .child(ui::page_head(
-                "会议中",
-                "选择录制方式后开始记录。字幕、说话人和笔记会实时显示在这里。",
+                tr!("会议中", "Live"),
+                tr!(
+                    "字幕、说话人和笔记会在记录时实时显示在这里。",
+                    "Captions, speakers and notes appear here live while recording."
+                ),
                 cx,
             ))
             .children(self.post_card(cx))
-            .child(self.setup(cx))
+            .child(self.idle(cx))
             .into_any_element()
     }
 }

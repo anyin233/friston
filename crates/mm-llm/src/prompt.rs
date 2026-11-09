@@ -62,11 +62,11 @@ fn clock(ms: u64) -> String {
 }
 
 impl MinutesInput {
-    /// Renders the material as one text block. Timestamps carry raw milliseconds so the
-    /// model can copy them into `evidence_ms`.
+    /// Renders title, time, attendees and notes, without the transcript. Used when the
+    /// model transcribes the audio itself in the same run.
     ///
-    /// Returns: the user message text.
-    pub fn render(&self) -> String {
+    /// Returns: the header and notes text.
+    pub fn render_context(&self) -> String {
         let mut out = format!("# 会议：{}\n时间：{}\n", self.title, self.when);
         if !self.attendees.is_empty() {
             out.push_str(&format!("参会者：{}\n", self.attendees.join("、")));
@@ -78,6 +78,15 @@ impl MinutesInput {
             out.push_str(self.notes.trim());
             out.push('\n');
         }
+        out
+    }
+
+    /// Renders the material as one text block. Timestamps carry raw milliseconds so the
+    /// model can copy them into `evidence_ms`.
+    ///
+    /// Returns: the user message text.
+    pub fn render(&self) -> String {
+        let mut out = self.render_context();
         out.push_str("\n## 转写（[时间 | 毫秒] 说话人：内容）\n");
         if self.transcript.is_empty() {
             out.push_str("（无转写）\n");
@@ -121,6 +130,8 @@ mod tests {
         assert!(text.contains("参会者：赵磊、Alice"));
         assert!(text.contains("[01:01 | 61500] 赵磊：预算上调 5%"));
         assert!(text.contains("- 关注预算"));
+        let context = input.render_context();
+        assert!(context.contains("参会者：赵磊、Alice") && !context.contains("61500"));
         assert!(instructions(None).contains("简体中文"));
     }
 }

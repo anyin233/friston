@@ -9,6 +9,7 @@ use mm_core::{
     AudioOrigin, CaptionFinal, CaptionPartial, MeetingId, PersonId, SpeakerLabel, SpeakerRelabel,
     TranscriptSegment,
 };
+use mm_i18n::{tr, trf};
 
 /// One line on the caption board.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +22,24 @@ pub struct CaptionLine {
     pub speaker: SpeakerLabel,
     /// `false` while the engine may still revise the text.
     pub is_final: bool,
+    /// Leading `char`s of `text` that later partials keep; the rest is still volatile.
+    /// Equals the whole text once final.
+    pub stable_chars: usize,
+}
+
+impl CaptionLine {
+    /// Byte offset where the volatile tail of `text` starts.
+    ///
+    /// Returns: `text.len()` for final lines or when every char is stable.
+    pub fn stable_byte_len(&self) -> usize {
+        if self.is_final {
+            return self.text.len();
+        }
+        self.text
+            .char_indices()
+            .nth(self.stable_chars)
+            .map_or(self.text.len(), |(i, _)| i)
+    }
 }
 
 /// Caption lines of the running session, in utterance order.
@@ -64,6 +83,7 @@ impl CaptionBoard {
                 let l = &mut self.lines[i];
                 l.text = p.text.clone();
                 l.speaker = p.speaker.clone();
+                l.stable_chars = p.stable_chars;
                 true
             }
             None => {
@@ -75,6 +95,7 @@ impl CaptionBoard {
                     text: p.text.clone(),
                     speaker: p.speaker.clone(),
                     is_final: false,
+                    stable_chars: p.stable_chars,
                 });
                 true
             }
@@ -101,6 +122,7 @@ impl CaptionBoard {
             text: f.text.clone(),
             speaker: f.speaker.clone(),
             is_final: true,
+            stable_chars: f.text.chars().count(),
         };
         match self.find(f.utterance_id) {
             Some(i) if f.text.trim().is_empty() => {
@@ -207,7 +229,7 @@ impl SpeakerDirectory {
         }
     }
 
-    /// Display name: the person's name, else "说话人 N", else "未识别".
+    /// Display name: the person's name, else "说话人 N", else "未识别" (in the UI language).
     ///
     /// Params: `label` – speaker label.
     /// Returns: the name.
@@ -216,8 +238,8 @@ impl SpeakerDirectory {
             return name.clone();
         }
         match label {
-            SpeakerLabel::Cluster { index } => format!("说话人 {index}"),
-            _ => "未识别".into(),
+            SpeakerLabel::Cluster { index } => trf!("说话人 {index}", "Speaker {index}"),
+            _ => tr!("未识别", "Unidentified").into(),
         }
     }
 
@@ -255,7 +277,29 @@ mod tests {
             start_ms: id * 1000,
             text: text.into(),
             speaker: SpeakerLabel::Cluster { index: 1 },
+            stable_chars: 0,
         }
+    }
+
+    #[test]
+    fn stable_prefix_follows_partials_and_covers_finals() {
+        let mut b = CaptionBoard::default();
+        b.begin("s");
+        let mut p = partial(1, "今天我们讨论");
+        p.stable_chars = 4;
+        assert!(b.apply_partial(&p));
+        let line = &b.tail(1)[0];
+        // Four CJK chars of three bytes each are stable; "讨论" is still volatile.
+        assert_eq!(line.stable_byte_len(), 12);
+        assert_eq!(&line.text[line.stable_byte_len()..], "讨论");
+        // A count past the end clamps to the whole text.
+        p.stable_chars = 99;
+        b.apply_partial(&p);
+        assert_eq!(b.tail(1)[0].stable_byte_len(), p.text.len());
+        b.apply_final(&fin(1, "今天我们讨论路线图"), MeetingId::new());
+        let line = &b.tail(1)[0];
+        assert!(line.is_final);
+        assert_eq!(line.stable_byte_len(), line.text.len());
     }
 
     fn fin(id: u64, text: &str) -> CaptionFinal {
@@ -333,6 +377,11 @@ mod tests {
             ("赵磊".to_string(), Some(42))
         );
         assert_eq!(d.name(&SpeakerLabel::Unknown), "未识别");
+        mm_i18n::with_lang(mm_i18n::Lang::En, || {
+            assert_eq!(d.name(&SpeakerLabel::Cluster { index: 7 }), "Speaker 7");
+            assert_eq!(d.name(&SpeakerLabel::Unknown), "Unidentified");
+            assert_eq!(d.name(&known), "赵磊");
+        });
         let stranger = PersonId::new();
         assert_eq!(
             person_hue(stranger),

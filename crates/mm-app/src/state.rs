@@ -20,10 +20,12 @@ use mm_core::{
     VoiceprintSource,
 };
 use mm_engine::EngineEvent;
+use mm_i18n::{tr, trf};
+use mm_llm::ModelOption;
 use mm_service::config::{data_dir_overridden, default_recordings_dir};
 use mm_service::engines::{
     EMBEDD, EmbedEngine, EmbedStatus, LlmStatus, MEETINGD, MeetingEngine, MeetingNotice,
-    decode_notice, locate_engine,
+    SpeechModelsStatus, decode_notice, locate_engine,
 };
 use mm_service::hub::{self, HubRepo};
 use mm_service::indexer::{Indexer, IndexerEvent, IndexerMsg, current_stamp};
@@ -133,15 +135,22 @@ pub enum EngineState {
 impl EngineState {
     /// User-facing description for status lines.
     ///
-    /// Params: `name` – engine description, e.g. "字幕引擎".
+    /// Params: `name` – engine description in the current language, e.g. "字幕引擎 " or
+    /// "Caption engine".
     /// Returns: the text.
     pub fn describe(&self, name: &str) -> String {
+        // Chinese callers pass a trailing space as the separator; English needs a word gap
+        // of its own, so trim there to avoid doubled spaces.
+        let en = name.trim();
         match self {
-            EngineState::NotStarted => format!("{name}未启动"),
-            EngineState::Starting => format!("{name}正在启动"),
-            EngineState::Ready => format!("{name}就绪"),
-            EngineState::Missing => format!("找不到{name}，请先运行 make engines"),
-            EngineState::Failed(e) => format!("{name}不可用：{e}"),
+            EngineState::NotStarted => trf!("{name}未启动", "{en} isn’t running"),
+            EngineState::Starting => trf!("{name}正在启动", "{en} is starting"),
+            EngineState::Ready => trf!("{name}就绪", "{en} is ready"),
+            EngineState::Missing => trf!(
+                "找不到{name}，请先运行 make engines",
+                "{en} not found. Run make engines first.",
+            ),
+            EngineState::Failed(e) => trf!("{name}不可用：{e}", "{en} unavailable: {e}"),
         }
     }
 }
@@ -241,9 +250,16 @@ pub struct AppState {
     meeting_engine: Option<MeetingEngine>,
     pub meeting_state: EngineState,
     meeting_restarts: u32,
+    /// `initialize`'s `capabilities.models` (role → model id), known before they load.
+    pub meeting_models: std::collections::BTreeMap<String, String>,
+    /// Live caption models preloaded in `mm-meetingd` (`models/preload`).
+    pub speech_models: Loadable<SpeechModelsStatus>,
     embed_engine: Option<EmbedEngine>,
     pub embed_state: EngineState,
     embed_restarts: u32,
+    /// Load the configured local minutes model once the embedding load settles. They share
+    /// `mm-embedd`, and starting both loads at once would spawn two engine processes.
+    autoload_llm: bool,
 
     pub live: Option<LiveSession>,
     pub live_starting: bool,
@@ -260,6 +276,10 @@ pub struct AppState {
     /// macOS privacy grants (screen & system audio, microphone, calendar).
     pub permissions: Loadable<mm_core::PermissionStatus>,
     pub codex: Loadable<CodexStatus>,
+    /// Models the signed-in Codex offers (`model/list`); loaded when settings open.
+    pub codex_models: Loadable<Vec<ModelOption>>,
+    /// Models the signed-in Antigravity CLI offers (`agy models`); loaded when settings open.
+    pub agy_models: Loadable<Vec<ModelOption>>,
     pub embed_status: Loadable<EmbedStatus>,
     pub llm_status: Loadable<LlmStatus>,
     pub index_stats: Option<IndexStats>,
@@ -296,24 +316,35 @@ impl AppState {
                 Ok(FolderMove::BothExist) => {
                     notices.push((
                         NoticeKind::Warning,
-                        format!(
+                        trf!(
                             "旧数据文件夹 {} 还在，没有合并到 {}。确认不需要后可以删掉它。",
+                            "The old data folder {} is still there and wasn’t merged into {}. You can delete it once you’re sure you don’t need it.",
                             legacy_data.display(),
-                            dir.display()
+                            dir.display(),
                         ),
                     ));
                     false
                 }
                 Ok(FolderMove::NothingToMove) => false,
                 Err(e) => {
-                    notices.push((NoticeKind::Error, format!("迁移数据文件夹失败：{e}")));
+                    notices.push((
+                        NoticeKind::Error,
+                        trf!(
+                            "迁移数据文件夹失败：{e}",
+                            "Couldn’t move the data folder: {e}"
+                        ),
+                    ));
                     false
                 }
             };
         if let Err(e) = std::fs::create_dir_all(&dir) {
             notices.push((
                 NoticeKind::Error,
-                format!("无法创建数据文件夹 {}：{e}", dir.display()),
+                trf!(
+                    "无法创建数据文件夹 {}：{e}",
+                    "Couldn’t create the data folder {}: {e}",
+                    dir.display(),
+                ),
             ));
         }
         let db = dir.join("meeting-master.db");
@@ -322,7 +353,11 @@ impl AppState {
             Err(e) => {
                 notices.push((
                     NoticeKind::Error,
-                    format!("打开数据库 {} 失败，本次使用临时数据库：{e}", db.display()),
+                    trf!(
+                        "打开数据库 {} 失败，本次使用临时数据库：{e}",
+                        "Couldn’t open the database {}; using a temporary database for this session: {e}",
+                        db.display(),
+                    ),
                 ));
                 Store::open_in_memory().expect("in-memory store always opens")
             }
@@ -331,17 +366,25 @@ impl AppState {
         let mut cfg = AppConfig::load(&dir).unwrap_or_else(|e| {
             notices.push((
                 NoticeKind::Error,
-                format!("读取设置失败，已使用默认设置：{e}"),
+                trf!(
+                    "读取设置失败，已使用默认设置：{e}",
+                    "Couldn’t read settings; using defaults: {e}",
+                ),
             ));
             AppConfig::default()
         });
+        apply_ui_language(cfg.effective_ui_language());
         if first_run {
             if cfg.adopt_obsidian_vault()
                 && let Some(v) = &cfg.vault_path
             {
                 notices.push((
                     NoticeKind::Info,
-                    format!("已自动使用 Obsidian 库：{}", v.display()),
+                    trf!(
+                        "已自动使用 Obsidian 库：{}",
+                        "Using Obsidian vault: {}",
+                        v.display()
+                    ),
                 ));
             }
             if let Err(e) = cfg.save(&dir) {
@@ -360,26 +403,34 @@ impl AppState {
             match legacy::migrate_recordings(&store, &cfg, &old_rec, &new_rec) {
                 Ok(FolderMove::Moved) => notices.push((
                     NoticeKind::Info,
-                    format!("录音已移到 {}。", new_rec.display()),
+                    trf!("录音已移到 {}。", "Recordings moved to {}.", new_rec.display()),
                 )),
                 Ok(FolderMove::BothExist) => notices.push((
                     NoticeKind::Warning,
-                    format!(
+                    trf!(
                         "旧录音文件夹 {} 还在，没有合并到 {}，旧会议仍从原位置读取。",
+                        "The old recordings folder {} is still there and wasn’t merged into {}. Older meetings still read from it.",
                         old_rec.display(),
-                        new_rec.display()
+                        new_rec.display(),
                     ),
                 )),
                 Ok(FolderMove::NothingToMove) => {}
-                Err(e) => notices.push((NoticeKind::Error, format!("迁移录音文件夹失败：{e}"))),
+                Err(e) => notices.push((
+                    NoticeKind::Error,
+                    trf!(
+                        "迁移录音文件夹失败：{e}",
+                        "Couldn’t move the recordings folder: {e}"
+                    ),
+                )),
             }
         }
         if data_moved {
             notices.push((
                 NoticeKind::Info,
-                format!(
+                trf!(
                     "Meeting Master 已更名为 Friston，数据已移到 {}。",
-                    dir.display()
+                    "Meeting Master is now Friston. Your data moved to {}.",
+                    dir.display(),
                 ),
             ));
         }
@@ -411,6 +462,7 @@ impl AppState {
         })
         .detach();
 
+        let cfg_has_llm = cfg.local_llm_dir.is_some();
         let mut state = Self {
             data_dir: dir,
             store,
@@ -420,9 +472,12 @@ impl AppState {
             meeting_engine: None,
             meeting_state: EngineState::NotStarted,
             meeting_restarts: 0,
+            meeting_models: Default::default(),
+            speech_models: Loadable::Idle,
             embed_engine: None,
             embed_state: EngineState::NotStarted,
             embed_restarts: 0,
+            autoload_llm: cfg_has_llm,
             live: None,
             live_starting: false,
             post: None,
@@ -435,6 +490,8 @@ impl AppState {
             sources: Loadable::Idle,
             permissions: Loadable::Idle,
             codex: Loadable::Loading,
+            codex_models: Loadable::Idle,
+            agy_models: Loadable::Idle,
             embed_status: Loadable::Idle,
             llm_status: Loadable::Idle,
             index_stats: None,
@@ -454,8 +511,15 @@ impl AppState {
         state.refresh_codex(cx);
         state.refresh_key_presence(cx);
         state.refresh_hf_token(cx);
+        // Load every configured model at launch, so the first search, meeting or local
+        // minutes run does not wait. The minutes model follows the embedding load
+        // (`autoload_llm`) because both live in the same `mm-embedd` process.
         if let Some(dir) = state.cfg.embedding_model_dir.clone() {
             state.load_embedding(dir, cx);
+        } else if state.cfg.auto_download_embedding {
+            state.load_default_embedding(cx);
+        } else {
+            state.autoload_local_llm(cx);
         }
         state
     }
@@ -491,9 +555,10 @@ impl AppState {
     ///
     /// Returns: a clone of the engine handle.
     pub fn meeting_engine(&self) -> Result<MeetingEngine, String> {
-        self.meeting_engine
-            .clone()
-            .ok_or_else(|| self.meeting_state.describe("字幕引擎 mm-meetingd "))
+        self.meeting_engine.clone().ok_or_else(|| {
+            self.meeting_state
+                .describe(tr!("字幕引擎 mm-meetingd ", "Caption engine mm-meetingd"))
+        })
     }
 
     /// The embed engine when a model is loaded (search queries, local minutes).
@@ -529,23 +594,28 @@ impl AppState {
                 let path = locate_engine(MEETINGD).ok_or(EngineState::Missing)?;
                 let (engine, rx) =
                     MeetingEngine::spawn(&path).map_err(|e| EngineState::Failed(e.to_string()))?;
-                engine
+                let caps = engine
                     .initialize()
-                    .map_err(|e| EngineState::Failed(format!("initialize：{e}")))?;
-                Ok((engine, rx))
+                    .map_err(|e| EngineState::Failed(trf!("initialize：{e}", "initialize: {e}")))?;
+                Ok((engine, rx, caps))
             },
             |this, res, cx| {
                 match res {
-                    Ok((engine, rx)) => {
+                    Ok((engine, rx, caps)) => {
+                        this.meeting_models =
+                            serde_json::from_value(caps["capabilities"]["models"].clone())
+                                .unwrap_or_default();
                         this.meeting_engine = Some(engine);
                         this.meeting_state = EngineState::Ready;
+                        this.preload_speech_models(cx);
                         this.drain_meeting_events(rx, cx);
                         this.refresh_calendar(cx);
                         this.refresh_inputs(cx);
                         this.refresh_permissions(cx);
                     }
                     Err(state) => {
-                        let msg = state.describe("字幕引擎 mm-meetingd ");
+                        let msg = state
+                            .describe(tr!("字幕引擎 mm-meetingd ", "Caption engine mm-meetingd"));
                         this.meeting_state = state;
                         this.events = Loadable::Failed(msg.clone().into());
                         this.inputs = Loadable::Failed(msg.clone().into());
@@ -592,19 +662,44 @@ impl AppState {
             EngineEvent::ProtocolError(e) => tracing::warn!("mm-meetingd protocol error: {e}"),
             EngineEvent::Closed => {
                 self.meeting_engine = None;
+                // The models died with the process; a restart preloads them again.
+                self.speech_models = Loadable::Idle;
                 if self.live.is_some() {
-                    self.notify(NoticeKind::Error, "字幕引擎在会议中退出。已保存的字幕和录音不会丢失，请点击“结束记录”完成整理。", cx);
+                    self.notify(
+                        NoticeKind::Error,
+                        tr!(
+                            "字幕引擎在会议中退出。已保存的字幕和录音不会丢失，请点击“结束记录”完成整理。",
+                            "The caption engine quit during the meeting. Saved captions and audio are safe; click “Stop recording” to finish up.",
+                        ),
+                        cx,
+                    );
                 }
                 if self.meeting_restarts == 0 {
                     self.meeting_restarts += 1;
-                    self.meeting_state = EngineState::Failed("已退出".into());
-                    self.notify(NoticeKind::Warning, "字幕引擎意外退出，正在重新启动。", cx);
+                    self.meeting_state = EngineState::Failed(tr!("已退出", "quit").into());
+                    self.notify(
+                        NoticeKind::Warning,
+                        tr!(
+                            "字幕引擎意外退出，正在重新启动。",
+                            "The caption engine quit unexpectedly. Restarting it.",
+                        ),
+                        cx,
+                    );
                     self.ensure_meeting_engine(cx);
                 } else {
-                    self.meeting_state = EngineState::Failed("再次退出，请在设置中手动重启".into());
+                    self.meeting_state = EngineState::Failed(
+                        tr!(
+                            "再次退出，请在设置中手动重启",
+                            "quit again; restart it in Settings"
+                        )
+                        .into(),
+                    );
                     self.notify(
                         NoticeKind::Error,
-                        "字幕引擎再次退出，请在设置中手动重启。",
+                        tr!(
+                            "字幕引擎再次退出，请在设置中手动重启。",
+                            "The caption engine quit again. Restart it in Settings.",
+                        ),
                         cx,
                     );
                 }
@@ -655,8 +750,12 @@ impl AppState {
                     live.capture_state = s.state;
                     live.capture_error = s.error.clone();
                     if s.state == CaptureState::Failed {
-                        let msg =
-                            format!("录制失败：{}", s.error.unwrap_or_else(|| "未知原因".into()));
+                        let msg = trf!(
+                            "录制失败：{}",
+                            "Recording failed: {}",
+                            s.error
+                                .unwrap_or_else(|| tr!("未知原因", "unknown reason").into()),
+                        );
                         self.notify(NoticeKind::Error, msg, cx);
                     }
                 }
@@ -681,7 +780,58 @@ impl AppState {
         }
         self.meeting_restarts = 0;
         self.meeting_state = EngineState::NotStarted;
+        self.speech_models = Loadable::Idle;
         self.ensure_meeting_engine(cx);
+    }
+
+    /// Loads the live caption models in `mm-meetingd` now rather than on the first recording.
+    ///
+    /// A failure is a warning, not fatal: `capture/start` loads the models again (the engine
+    /// retries a failed load), and recording works without captions.
+    ///
+    /// Params: `cx`.
+    fn preload_speech_models(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.meeting_engine.clone() else {
+            return;
+        };
+        self.speech_models = Loadable::Loading;
+        cx.notify();
+        let language = self.cfg.caption_language.clone();
+        bg(
+            cx,
+            move || engine.preload_models(language.as_deref()),
+            |this, res, cx| {
+                // The engine exited meanwhile (state reset to Idle): its models are gone, so
+                // this result must not mark them ready.
+                if !matches!(this.speech_models, Loadable::Loading) {
+                    return;
+                }
+                match res {
+                    Ok(status) => this.speech_models = Loadable::Ready(status),
+                    Err(e) => {
+                        let msg = trf!(
+                            "字幕模型加载失败：{e}",
+                            "Couldn’t load the caption model: {e}",
+                        );
+                        this.speech_models = Loadable::Failed(LoadError::from(e));
+                        this.notify(NoticeKind::Warning, msg, cx);
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Starts the one-time launch load of the configured local minutes model, if pending.
+    ///
+    /// Params: `cx`.
+    fn autoload_local_llm(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.autoload_llm) {
+            return;
+        }
+        if let Some(dir) = self.cfg.local_llm_dir.clone() {
+            self.load_local_llm(dir, cx);
+        }
     }
 
     /// Starts `mm-embedd` if needed and loads an embedding checkpoint.
@@ -699,7 +849,11 @@ impl AppState {
                     None => {
                         let path = locate_engine(EMBEDD).ok_or_else(|| {
                             LoadError::from(
-                                "找不到嵌入引擎 mm-embedd，请先运行 make engines".to_string(),
+                                tr!(
+                                    "找不到嵌入引擎 mm-embedd，请先运行 make engines",
+                                    "Embedding engine mm-embedd not found. Run make engines first.",
+                                )
+                                .to_string(),
                             )
                         })?;
                         let (e, rx) = EmbedEngine::spawn(&path)?;
@@ -725,11 +879,16 @@ impl AppState {
                         }
                     }
                     Err(e) => {
-                        let msg = format!("加载嵌入模型失败：{}", e.message);
+                        let msg = trf!(
+                            "加载嵌入模型失败：{}",
+                            "Couldn’t load the embedding model: {}",
+                            e.message,
+                        );
                         this.embed_status = Loadable::Failed(e);
                         this.notify(NoticeKind::Error, msg, cx);
                     }
                 }
+                this.autoload_local_llm(cx);
                 cx.notify();
             },
         );
@@ -749,7 +908,14 @@ impl AppState {
             |this, res, cx| {
                 match res {
                     Ok(()) => this.embed_status = Loadable::Ready(EmbedStatus::default()),
-                    Err(e) => this.notify(NoticeKind::Error, format!("卸载嵌入模型失败：{e}"), cx),
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!(
+                            "卸载嵌入模型失败：{e}",
+                            "Couldn’t unload the embedding model: {e}"
+                        ),
+                        cx,
+                    ),
                 }
                 cx.notify();
             },
@@ -770,7 +936,13 @@ impl AppState {
                     Some(e) => (e, None),
                     None => {
                         let path = locate_engine(EMBEDD).ok_or_else(|| {
-                            LoadError::from("找不到 mm-embedd，请先运行 make engines".to_string())
+                            LoadError::from(
+                                tr!(
+                                    "找不到 mm-embedd，请先运行 make engines",
+                                    "mm-embedd not found. Run make engines first.",
+                                )
+                                .to_string(),
+                            )
                         })?;
                         let (e, rx) = EmbedEngine::spawn(&path)?;
                         (e, Some(rx))
@@ -793,7 +965,11 @@ impl AppState {
                         }
                     }
                     Err(e) => {
-                        let msg = format!("加载本地纪要模型失败：{}", e.message);
+                        let msg = trf!(
+                            "加载本地纪要模型失败：{}",
+                            "Couldn’t load the local minutes model: {}",
+                            e.message,
+                        );
                         this.llm_status = Loadable::Failed(e);
                         this.notify(NoticeKind::Error, msg, cx);
                     }
@@ -816,9 +992,14 @@ impl AppState {
             |this, res, cx| {
                 match res {
                     Ok(()) => this.llm_status = Loadable::Ready(LlmStatus::default()),
-                    Err(e) => {
-                        this.notify(NoticeKind::Error, format!("卸载本地纪要模型失败：{e}"), cx)
-                    }
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!(
+                            "卸载本地纪要模型失败：{e}",
+                            "Couldn’t unload the local minutes model: {e}",
+                        ),
+                        cx,
+                    ),
                 }
                 cx.notify();
             },
@@ -848,13 +1029,23 @@ impl AppState {
                     {
                         s.embed_restarts += 1;
                         s.embed_state = EngineState::Starting;
-                        s.notify(NoticeKind::Warning, "嵌入引擎意外退出，正在重新启动。", cx);
+                        s.notify(
+                            NoticeKind::Warning,
+                            tr!(
+                                "嵌入引擎意外退出，正在重新启动。",
+                                "The embedding engine quit unexpectedly. Restarting it.",
+                            ),
+                            cx,
+                        );
                         s.load_embedding(dir, cx);
                     } else {
-                        s.embed_state = EngineState::Failed("已退出".into());
+                        s.embed_state = EngineState::Failed(tr!("已退出", "quit").into());
                         s.notify(
                             NoticeKind::Error,
-                            "嵌入引擎已退出，搜索暂时只用关键词。",
+                            tr!(
+                                "嵌入引擎已退出，搜索暂时只用关键词。",
+                                "The embedding engine quit. Search uses keywords only for now.",
+                            ),
                             cx,
                         );
                     }
@@ -877,9 +1068,12 @@ impl AppState {
             cx,
             move || -> Result<_, String> {
                 let s = lock(&store)?;
-                let meetings = s
-                    .recent_meetings(100)
-                    .map_err(|e| format!("读取会议列表失败：{e}"))?;
+                let meetings = s.recent_meetings(100).map_err(|e| {
+                    trf!(
+                        "读取会议列表失败：{e}",
+                        "Couldn’t read the meeting list: {e}"
+                    )
+                })?;
                 let mut with_minutes = Vec::new();
                 for m in meetings.iter().take(15) {
                     if let Ok(Some(v)) = s.minutes(m.id)
@@ -912,10 +1106,12 @@ impl AppState {
             cx,
             move || -> Result<Vec<PersonRow>, String> {
                 let s = lock(&store)?;
-                let people = s.people().map_err(|e| format!("读取人物失败：{e}"))?;
+                let people = s
+                    .people()
+                    .map_err(|e| trf!("读取人物失败：{e}", "Couldn’t read people: {e}"))?;
                 let prints = s
                     .voiceprints(None)
-                    .map_err(|e| format!("读取声纹失败：{e}"))?;
+                    .map_err(|e| trf!("读取声纹失败：{e}", "Couldn’t read voiceprints: {e}"))?;
                 Ok(people
                     .into_iter()
                     .map(|(p, hue)| PersonRow {
@@ -1106,6 +1302,66 @@ impl AppState {
         });
     }
 
+    /// Lists the models Codex offers, finding Codex again when it was not probed yet.
+    ///
+    /// Params: `cx`.
+    pub fn refresh_codex_models(&mut self, cx: &mut Context<Self>) {
+        let known = self.codex.ready().and_then(|c| c.path.clone());
+        self.codex_models = Loadable::Loading;
+        cx.notify();
+        bg(
+            cx,
+            move || -> Result<Vec<ModelOption>, String> {
+                let path = known
+                    .or_else(mm_llm::codex::find_codex)
+                    .ok_or_else(|| tr!("没有找到 Codex CLI", "Codex CLI not found").to_string())?;
+                mm_llm::codex::list_models(&path).map_err(|e| e.to_string())
+            },
+            |this, res, cx| {
+                this.codex_models = match res {
+                    Ok(m) => Loadable::Ready(m),
+                    Err(e) => Loadable::Failed(e.into()),
+                };
+                cx.notify();
+            },
+        );
+    }
+
+    /// Lists the models the Antigravity CLI offers.
+    ///
+    /// Params: `cx`.
+    pub fn refresh_agy_models(&mut self, cx: &mut Context<Self>) {
+        self.agy_models = Loadable::Loading;
+        cx.notify();
+        bg(
+            cx,
+            || -> Result<Vec<ModelOption>, String> {
+                let agy = mm_llm::antigravity::find_agy()
+                    .ok_or_else(|| tr!("没有找到 agy", "agy not found").to_string())?;
+                mm_llm::antigravity::list_models(&agy).map_err(|e| e.to_string())
+            },
+            |this, res, cx| {
+                this.agy_models = match res {
+                    Ok(m) => Loadable::Ready(m),
+                    Err(e) => Loadable::Failed(e.into()),
+                };
+                cx.notify();
+            },
+        );
+    }
+
+    /// Loads both model lists once; later loads only happen through the refresh buttons.
+    ///
+    /// Params: `cx`.
+    pub fn ensure_model_lists(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.codex_models, Loadable::Idle) {
+            self.refresh_codex_models(cx);
+        }
+        if matches!(self.agy_models, Loadable::Idle) {
+            self.refresh_agy_models(cx);
+        }
+    }
+
     /// Checks whether the configured BYOK provider has a key (never reads it into the UI).
     ///
     /// Params: `cx`.
@@ -1120,7 +1376,11 @@ impl AppState {
             |this, res, cx| {
                 match res {
                     Ok(present) => this.byok_key_present = present,
-                    Err(e) => this.notify(NoticeKind::Error, format!("读取钥匙串失败：{e}"), cx),
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!("读取钥匙串失败：{e}", "Couldn’t read the Keychain: {e}"),
+                        cx,
+                    ),
                 }
                 cx.notify();
             },
@@ -1137,7 +1397,11 @@ impl AppState {
             |this, res, cx| {
                 match res {
                     Ok(present) => this.hf_token_present = present,
-                    Err(e) => this.notify(NoticeKind::Error, format!("读取钥匙串失败：{e}"), cx),
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!("读取钥匙串失败：{e}", "Couldn’t read the Keychain: {e}"),
+                        cx,
+                    ),
                 }
                 cx.notify();
             },
@@ -1156,13 +1420,20 @@ impl AppState {
                     Ok(saved) => {
                         this.hf_token_present = saved;
                         let msg = if saved {
-                            "Hugging Face 令牌已保存到钥匙串。"
+                            tr!(
+                                "Hugging Face 令牌已保存到钥匙串。",
+                                "Hugging Face token saved to Keychain.",
+                            )
                         } else {
-                            "Hugging Face 令牌已删除。"
+                            tr!("Hugging Face 令牌已删除。", "Hugging Face token removed.")
                         };
                         this.notify(NoticeKind::Success, msg, cx);
                     }
-                    Err(e) => this.notify(NoticeKind::Error, format!("写入钥匙串失败：{e}"), cx),
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!("写入钥匙串失败：{e}", "Couldn’t write to the Keychain: {e}"),
+                        cx,
+                    ),
                 }
                 cx.notify();
             },
@@ -1174,7 +1445,11 @@ impl AppState {
     /// Params: `url` – model page URL or `owner/name`; `cx`.
     pub fn download_embedding(&mut self, url: String, cx: &mut Context<Self>) {
         if self.model_download.is_some() {
-            self.notify(NoticeKind::Warning, "已有模型正在下载。", cx);
+            self.notify(
+                NoticeKind::Warning,
+                tr!("已有模型正在下载。", "A model is already downloading."),
+                cx,
+            );
             return;
         }
         let repo = match HubRepo::parse(&url) {
@@ -1221,6 +1496,49 @@ impl AppState {
         .detach();
     }
 
+    /// Loads the configured default embedding model when no folder is set: a copy already
+    /// on disk (app models folder or Hugging Face cache) loads at once, otherwise it is
+    /// downloaded and then loaded.
+    ///
+    /// Params: `cx`.
+    fn load_default_embedding(&mut self, cx: &mut Context<Self>) {
+        let url = self.cfg.embedding_model_url.clone();
+        let repo = match HubRepo::parse(&url) {
+            Ok(r) => r,
+            Err(e) => {
+                self.notify(
+                    NoticeKind::Warning,
+                    trf!("默认嵌入模型：{e}", "Default embedding model: {e}"),
+                    cx,
+                );
+                self.autoload_local_llm(cx);
+                return;
+            }
+        };
+        let root = models_dir(&self.data_dir);
+        if let Some(dir) = hub::find_local_snapshot(&repo, &root, hub::hf_cache_dir().as_deref()) {
+            tracing::info!(
+                "default embedding model {} found at {}",
+                repo.id,
+                dir.display()
+            );
+            self.load_embedding(dir, cx);
+            return;
+        }
+        // A 1.5 GB download should not hold back the minutes model.
+        self.autoload_local_llm(cx);
+        self.notify(
+            NoticeKind::Info,
+            trf!(
+                "正在从 Hugging Face 下载嵌入模型 {}（约 1.5 GB），完成后自动加载。可以在设置里取消。",
+                "Downloading embedding model {} from Hugging Face (about 1.5 GB). It loads automatically when done; you can cancel in Settings.",
+                repo.id,
+            ),
+            cx,
+        );
+        self.download_embedding(url, cx);
+    }
+
     /// Applies one message from the download thread.
     ///
     /// Params: `msg`; `cx`.
@@ -1235,12 +1553,24 @@ impl AppState {
                 self.model_download = None;
                 match res {
                     Ok(dir) => {
-                        self.notify(NoticeKind::Success, "嵌入模型已下载，正在加载。", cx);
+                        self.notify(
+                            NoticeKind::Success,
+                            tr!(
+                                "嵌入模型已下载，正在加载。",
+                                "Embedding model downloaded. Loading it now.",
+                            ),
+                            cx,
+                        );
                         self.load_embedding(dir, cx);
                     }
-                    Err(hub::HubError::Cancelled) => {
-                        self.notify(NoticeKind::Info, "已取消下载，下次会从断点继续。", cx)
-                    }
+                    Err(hub::HubError::Cancelled) => self.notify(
+                        NoticeKind::Info,
+                        tr!(
+                            "已取消下载，下次会从断点继续。",
+                            "Download canceled. It resumes where it left off next time.",
+                        ),
+                        cx,
+                    ),
                     Err(e) => self.notify(NoticeKind::Error, e.to_string(), cx),
                 }
             }
@@ -1275,6 +1605,11 @@ impl AppState {
         if self.cfg.byok != before.byok {
             self.refresh_key_presence(cx);
         }
+        if self.cfg.ui_language != before.ui_language {
+            apply_ui_language(self.cfg.effective_ui_language());
+            // Every window (including the floating captions) re-renders in the new language.
+            cx.refresh_windows();
+        }
         let cfg = self.cfg.clone();
         let dir = self.data_dir.clone();
         bg(
@@ -1294,7 +1629,14 @@ impl AppState {
     /// Params: `key` – `None` deletes; `cx`.
     pub fn write_byok_key(&mut self, key: Option<String>, cx: &mut Context<Self>) {
         let Some(p) = self.cfg.byok.clone() else {
-            self.notify(NoticeKind::Warning, "请先选择提供方并填写模型。", cx);
+            self.notify(
+                NoticeKind::Warning,
+                tr!(
+                    "请先选择提供方并填写模型。",
+                    "Choose a provider and enter a model first."
+                ),
+                cx,
+            );
             return;
         };
         bg(
@@ -1305,13 +1647,17 @@ impl AppState {
                     Ok(saved) => {
                         this.byok_key_present = saved;
                         let msg = if saved {
-                            "API 密钥已保存到钥匙串。"
+                            tr!("API 密钥已保存到钥匙串。", "API key saved to Keychain.")
                         } else {
-                            "API 密钥已删除。"
+                            tr!("API 密钥已删除。", "API key removed.")
                         };
                         this.notify(NoticeKind::Success, msg, cx);
                     }
-                    Err(e) => this.notify(NoticeKind::Error, format!("写入钥匙串失败：{e}"), cx),
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!("写入钥匙串失败：{e}", "Couldn’t write to the Keychain: {e}"),
+                        cx,
+                    ),
                 }
                 cx.notify();
             },
@@ -1332,7 +1678,8 @@ impl AppState {
             cx,
             move || {
                 lock(&store).and_then(|s| {
-                    flow::quick_meeting(&s, &title).map_err(|e| format!("创建会议失败：{e}"))
+                    flow::quick_meeting(&s, &title)
+                        .map_err(|e| trf!("创建会议失败：{e}", "Couldn’t create the meeting: {e}"))
                 })
             },
             |this, res, cx| match res {
@@ -1355,8 +1702,13 @@ impl AppState {
             cx,
             move || {
                 lock(&store).and_then(|s| {
-                    flow::meeting_for_event(&s, &ev)
-                        .map_err(|e| format!("创建会议失败（{}）：{e}", ev.title))
+                    flow::meeting_for_event(&s, &ev).map_err(|e| {
+                        trf!(
+                            "创建会议失败（{}）：{e}",
+                            "Couldn’t create the meeting ({}): {e}",
+                            ev.title,
+                        )
+                    })
                 })
             },
             move |this, res, cx| match res {
@@ -1369,14 +1721,21 @@ impl AppState {
     /// Returns `true` (and tells the user) when a session is running or starting.
     fn guard_not_recording(&mut self, cx: &mut Context<Self>) -> bool {
         if self.live.is_some() || self.live_starting {
-            self.notify(NoticeKind::Info, "已经在记录中。", cx);
+            self.notify(
+                NoticeKind::Info,
+                tr!("已经在记录中。", "Already recording."),
+                cx,
+            );
             self.navigate(Page::Live, cx);
             return true;
         }
         if self.post.as_ref().is_some_and(|p| p.running) {
             self.notify(
                 NoticeKind::Info,
-                "上一场会议还在整理，完成后再开始新的记录。",
+                tr!(
+                    "上一场会议还在整理，完成后再开始新的记录。",
+                    "The previous meeting is still being processed. Start a new recording once it’s done.",
+                ),
                 cx,
             );
             return true;
@@ -1396,7 +1755,11 @@ impl AppState {
         let engine = match self.meeting_engine() {
             Ok(e) => e,
             Err(msg) => {
-                self.notify(NoticeKind::Error, format!("无法开始记录：{msg}"), cx);
+                self.notify(
+                    NoticeKind::Error,
+                    trf!("无法开始记录：{msg}", "Couldn’t start recording: {msg}"),
+                    cx,
+                );
                 return;
             }
         };
@@ -1409,7 +1772,10 @@ impl AppState {
                 if s.live_starting {
                     s.notify(
                         NoticeKind::Warning,
-                        "开始录制还没有完成。如果系统弹出了麦克风或屏幕录制权限请求，请先允许；也可以在“系统设置 › 隐私与安全性”里检查。",
+                        tr!(
+                            "开始录制还没有完成。如果系统弹出了麦克风或屏幕录制权限请求，请先允许；也可以在“系统设置 › 隐私与安全性”里检查。",
+                            "Recording hasn’t started yet. If macOS asks for microphone or screen recording permission, allow it; you can also check System Settings › Privacy & Security.",
+                        ),
                         cx,
                     );
                 }
@@ -1433,10 +1799,20 @@ impl AppState {
                 let mut meeting = meeting;
                 let (note, preset, directory) = {
                     let s = lock(&store)?;
-                    let note = flow::ensure_note(&cfg, &s, &mut meeting, &attendees)
-                        .map_err(|e| format!("创建会议笔记失败：{e}"))?;
-                    let mut preset = flow::build_preset(&cfg, &s, &meeting, window_id)
-                        .map_err(|e| format!("准备录制参数失败：{e}"))?;
+                    let note =
+                        flow::ensure_note(&cfg, &s, &mut meeting, &attendees).map_err(|e| {
+                            trf!(
+                                "创建会议笔记失败：{e}",
+                                "Couldn’t create the meeting note: {e}"
+                            )
+                        })?;
+                    let mut preset =
+                        flow::build_preset(&cfg, &s, &meeting, window_id).map_err(|e| {
+                            trf!(
+                                "准备录制参数失败：{e}",
+                                "Couldn’t prepare recording settings: {e}",
+                            )
+                        })?;
                     if preset.microphone_uid.is_none() {
                         preset.microphone_uid = fallback_mic;
                     }
@@ -1450,20 +1826,32 @@ impl AppState {
                     Err(mm_service::ServiceError::Permission(why)) => {
                         match flow::without_screen_capture(&preset) {
                             Some(reduced) => (
-                                engine
-                                    .capture_start(&reduced)
-                                    .map_err(|e| format!("开始录制失败：{e}"))?,
-                                Some(format!(
-                                    "没有屏幕录制权限，只录麦克风（不录窗口和系统声音）。在系统设置 › 隐私与安全性 › 屏幕与系统录音中允许后即可恢复。（{why}）"
+                                engine.capture_start(&reduced).map_err(|e| {
+                                    trf!("开始录制失败：{e}", "Couldn’t start recording: {e}")
+                                })?,
+                                Some(trf!(
+                                    "没有屏幕录制权限，只录麦克风（不录窗口和系统声音）。在系统设置 › 隐私与安全性 › 屏幕与系统录音中允许后即可恢复。（{why}）",
+                                    "No screen recording permission, so only the microphone is recorded (no window or system audio). Allow it in System Settings › Privacy & Security › Screen & System Audio Recording to restore it. ({why})",
                                 )),
                             ),
-                            None => return Err(format!("开始录制失败：{why}")),
+                            None => {
+                                return Err(trf!(
+                                    "开始录制失败：{why}",
+                                    "Couldn’t start recording: {why}",
+                                ));
+                            }
                         }
                     }
-                    Err(e) => return Err(format!("开始录制失败：{e}")),
+                    Err(e) => {
+                        return Err(trf!("开始录制失败：{e}", "Couldn’t start recording: {e}"));
+                    }
                 };
-                flow::mark_live(&*lock(&store)?, &mut meeting, &started)
-                    .map_err(|e| format!("更新会议状态失败：{e}"))?;
+                flow::mark_live(&*lock(&store)?, &mut meeting, &started).map_err(|e| {
+                    trf!(
+                        "更新会议状态失败：{e}",
+                        "Couldn’t update the meeting status: {e}"
+                    )
+                })?;
                 let notes = note
                     .as_ref()
                     .and_then(|p| std::fs::read_to_string(p).ok())
@@ -1483,13 +1871,16 @@ impl AppState {
                         if note_path.is_none() {
                             this.notify(
                                 NoticeKind::Warning,
-                                "还没有设置 Obsidian 库，笔记不会写入文件。可以在设置中选择。",
+                                tr!(
+                                    "还没有设置 Obsidian 库，笔记不会写入文件。可以在设置中选择。",
+                                    "No Obsidian vault is set, so notes won’t be written to files. You can choose one in Settings.",
+                                ),
                                 cx,
                             );
                         }
                         this.notify(
                             NoticeKind::Success,
-                            format!("开始记录：{}", meeting.title),
+                            trf!("开始记录：{}", "Recording started: {}", meeting.title),
                             cx,
                         );
                         this.live = Some(LiveSession {
@@ -1585,7 +1976,10 @@ impl AppState {
         let Some(vault) = self.cfg.vault_path.clone() else {
             self.notify(
                 NoticeKind::Warning,
-                "请先在设置中选择 Obsidian 库，截图会保存到库的附件文件夹。",
+                tr!(
+                    "请先在设置中选择 Obsidian 库，截图会保存到库的附件文件夹。",
+                    "Choose an Obsidian vault in Settings first. Screenshots are saved to its attachments folder.",
+                ),
                 cx,
             );
             return;
@@ -1595,17 +1989,28 @@ impl AppState {
         bg(
             cx,
             move || -> Result<String, String> {
-                std::fs::create_dir_all(&dir)
-                    .map_err(|e| format!("创建 {} 失败：{e}", dir.display()))?;
+                std::fs::create_dir_all(&dir).map_err(|e| {
+                    trf!(
+                        "创建 {} 失败：{e}",
+                        "Couldn’t create {}: {e}",
+                        dir.display()
+                    )
+                })?;
                 let name = logic::screenshot_name(Local::now());
                 let out = dir.join(&name);
                 let status = std::process::Command::new("/usr/sbin/screencapture")
                     .args(logic::screencapture_args(window_id, &out))
                     .status()
-                    .map_err(|e| format!("运行 screencapture 失败：{e}"))?;
+                    .map_err(|e| {
+                        trf!(
+                            "运行 screencapture 失败：{e}",
+                            "Couldn’t run screencapture: {e}"
+                        )
+                    })?;
                 if !status.success() || !out.exists() {
-                    return Err(format!(
-                        "截图失败（screencapture 退出码 {status}）。请检查屏幕录制权限。"
+                    return Err(trf!(
+                        "截图失败（screencapture 退出码 {status}）。请检查屏幕录制权限。",
+                        "Screenshot failed (screencapture exit code {status}). Check screen recording permission.",
                     ));
                 }
                 Ok(format!("![[{name}]]"))
@@ -1676,9 +2081,13 @@ impl AppState {
                             p.warnings = report.warnings.clone();
                         }
                         let msg = if report.minutes_done {
-                            format!("{}：纪要已生成", report.meeting.title)
+                            trf!("{}：纪要已生成", "{}: minutes ready", report.meeting.title)
                         } else {
-                            format!("{}：录制已结束，转写已保存", report.meeting.title)
+                            trf!(
+                                "{}：录制已结束，转写已保存",
+                                "{}: recording stopped, transcript saved",
+                                report.meeting.title,
+                            )
                         };
                         this.notify(NoticeKind::Success, msg, cx);
                         for w in report.warnings {
@@ -1693,7 +2102,10 @@ impl AppState {
                         }
                         this.notify(
                             NoticeKind::Error,
-                            format!("会后整理失败，录音已保留：{e}"),
+                            trf!(
+                                "会后整理失败，录音已保留：{e}",
+                                "Post-meeting processing failed; the recording was kept: {e}",
+                            ),
                             cx,
                         );
                     }
@@ -1722,23 +2134,37 @@ impl AppState {
     /// Params: `id`; `cx`.
     pub fn regenerate_minutes(&mut self, id: MeetingId, cx: &mut Context<Self>) {
         let ctx = self.minutes_ctx();
-        self.notify(NoticeKind::Info, "正在生成纪要，可能需要几分钟…", cx);
+        self.notify(
+            NoticeKind::Info,
+            tr!(
+                "正在生成纪要，可能需要几分钟…",
+                "Writing minutes. This may take a few minutes…"
+            ),
+            cx,
+        );
         bg(
             cx,
-            move || -> Result<(Meeting, String), String> {
+            move || -> Result<(Meeting, pipeline::MinutesWritten), String> {
                 let mut m = lock(&ctx.store)?
                     .meeting(id)
                     .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("找不到会议 {id}"))?;
-                let label = pipeline::generate_minutes(&ctx, &mut m)?;
-                Ok((m, label))
+                    .ok_or_else(|| trf!("找不到会议 {id}", "Meeting {id} not found"))?;
+                let written = pipeline::generate_minutes(&ctx, &mut m)?;
+                Ok((m, written))
             },
             move |this, res, cx| {
                 match res {
-                    Ok((m, label)) => {
+                    Ok((m, pipeline::MinutesWritten { label, warnings })) => {
+                        for w in warnings {
+                            this.notify(NoticeKind::Warning, w, cx);
+                        }
                         this.notify(
                             NoticeKind::Success,
-                            format!("{}：纪要已由{label}生成", m.title),
+                            trf!(
+                                "{}：纪要已由{label}生成",
+                                "{}: minutes written by {label}",
+                                m.title,
+                            ),
                             cx,
                         );
                         cx.emit(AppEvent::MeetingChanged(id));
@@ -1778,13 +2204,17 @@ impl AppState {
                     }
                     PersonChoice::New(name) => {
                         let p = new_person(&name);
-                        s.upsert_person(&p, Some(person_hue(p.id)))
-                            .map_err(|e| format!("创建人物 {name} 失败：{e}"))?;
+                        s.upsert_person(&p, Some(person_hue(p.id))).map_err(|e| {
+                            trf!(
+                                "创建人物 {name} 失败：{e}",
+                                "Couldn’t create person {name}: {e}"
+                            )
+                        })?;
                         (p.id, name)
                     }
                 };
                 s.name_cluster(meeting, cluster, Some(pid))
-                    .map_err(|e| format!("命名说话人失败：{e}"))?;
+                    .map_err(|e| trf!("命名说话人失败：{e}", "Couldn’t name the speaker: {e}"))?;
                 Ok((
                     flow::directory_for(&s, meeting).map_err(|e| e.to_string())?,
                     name,
@@ -1798,7 +2228,10 @@ impl AppState {
                         }
                         this.notify(
                             NoticeKind::Success,
-                            format!("说话人 {cluster} 已命名为 {name}，之前的发言也一起改名。"),
+                            trf!(
+                                "说话人 {cluster} 已命名为 {name}，之前的发言也一起改名。",
+                                "Speaker {cluster} is now {name}. Earlier lines were renamed too.",
+                            ),
                             cx,
                         );
                         cx.emit(AppEvent::MeetingChanged(meeting));
@@ -1819,7 +2252,11 @@ impl AppState {
     pub fn add_person(&mut self, name: String, cx: &mut Context<Self>) {
         let name = name.trim().to_string();
         if name.is_empty() {
-            self.notify(NoticeKind::Warning, "请输入名字。", cx);
+            self.notify(
+                NoticeKind::Warning,
+                tr!("请输入名字。", "Enter a name."),
+                cx,
+            );
             return;
         }
         let store = self.store.clone();
@@ -1829,7 +2266,7 @@ impl AppState {
                 let p = new_person(&name);
                 lock(&store)?
                     .upsert_person(&p, Some(person_hue(p.id)))
-                    .map_err(|e| format!("添加 {name} 失败：{e}"))
+                    .map_err(|e| trf!("添加 {name} 失败：{e}", "Couldn’t add {name}: {e}"))
             },
             |this, res, cx| {
                 if let Err(e) = res {
@@ -1850,7 +2287,7 @@ impl AppState {
             move || {
                 lock(&store)?
                     .delete_person(id)
-                    .map_err(|e| format!("删除人物失败：{e}"))
+                    .map_err(|e| trf!("删除人物失败：{e}", "Couldn’t delete the person: {e}"))
             },
             |this, res, cx| {
                 if let Err(e) = res {
@@ -1871,7 +2308,7 @@ impl AppState {
             move || {
                 lock(&store)?
                     .delete_voiceprint(id)
-                    .map_err(|e| format!("删除声纹失败：{e}"))
+                    .map_err(|e| trf!("删除声纹失败：{e}", "Couldn’t delete the voiceprint: {e}"))
             },
             |this, res, cx| {
                 if let Err(e) = res {
@@ -1889,7 +2326,10 @@ impl AppState {
         if self.live.is_some() {
             self.notify(
                 NoticeKind::Warning,
-                "会议进行中不能录入声纹，请结束记录后再试。",
+                tr!(
+                    "会议进行中不能录入声纹，请结束记录后再试。",
+                    "Can’t enroll a voiceprint during a meeting. Stop recording and try again.",
+                ),
                 cx,
             );
             return;
@@ -1897,7 +2337,11 @@ impl AppState {
         let engine = match self.meeting_engine() {
             Ok(e) => e,
             Err(msg) => {
-                self.notify(NoticeKind::Error, format!("无法录入声纹：{msg}"), cx);
+                self.notify(
+                    NoticeKind::Error,
+                    trf!("无法录入声纹：{msg}", "Couldn’t enroll voiceprint: {msg}"),
+                    cx,
+                );
                 return;
             }
         };
@@ -1910,13 +2354,17 @@ impl AppState {
             move || -> Result<(), String> {
                 let sample = engine
                     .voiceprint_enroll(mic.as_deref(), ENROLL_SECONDS)
-                    .map_err(|e| format!("录入声纹失败：{e}"))?;
+                    .map_err(|e| trf!("录入声纹失败：{e}", "Couldn’t enroll voiceprint: {e}"))?;
                 store_sample(&store, person, sample, VoiceprintSource::Enrollment)
             },
             |this, res, cx| {
                 this.enrolling = None;
                 match res {
-                    Ok(()) => this.notify(NoticeKind::Success, "声纹已录入。", cx),
+                    Ok(()) => this.notify(
+                        NoticeKind::Success,
+                        tr!("声纹已录入。", "Voiceprint enrolled."),
+                        cx,
+                    ),
                     Err(e) => this.notify(NoticeKind::Error, e, cx),
                 }
                 this.refresh_people(cx);
@@ -1938,7 +2386,11 @@ impl AppState {
         let engine = match self.meeting_engine() {
             Ok(e) => e,
             Err(msg) => {
-                self.notify(NoticeKind::Error, format!("无法提取声纹：{msg}"), cx);
+                self.notify(
+                    NoticeKind::Error,
+                    trf!("无法提取声纹：{msg}", "Couldn’t extract voiceprint: {msg}"),
+                    cx,
+                );
                 return;
             }
         };
@@ -1947,16 +2399,24 @@ impl AppState {
             cx,
             move || -> Result<(), String> {
                 if !path.is_file() {
-                    return Err(format!("找不到录音文件 {}", path.display()));
+                    return Err(trf!(
+                        "找不到录音文件 {}",
+                        "Recording file {} not found",
+                        path.display(),
+                    ));
                 }
                 let req = ClipRequest {
                     path: path.clone(),
                     start_ms,
                     end_ms,
                 };
-                let sample = engine
-                    .voiceprint_from_clip(&req)
-                    .map_err(|e| format!("从 {} 提取声纹失败：{e}", path.display()))?;
+                let sample = engine.voiceprint_from_clip(&req).map_err(|e| {
+                    trf!(
+                        "从 {} 提取声纹失败：{e}",
+                        "Couldn’t extract a voiceprint from {}: {e}",
+                        path.display(),
+                    )
+                })?;
                 let source = VoiceprintSource::Clip {
                     asset_path: path.display().to_string(),
                     start_ms: start_ms.unwrap_or(0),
@@ -1966,7 +2426,14 @@ impl AppState {
             },
             |this, res, cx| {
                 match res {
-                    Ok(()) => this.notify(NoticeKind::Success, "已从录音片段提取声纹。", cx),
+                    Ok(()) => this.notify(
+                        NoticeKind::Success,
+                        tr!(
+                            "已从录音片段提取声纹。",
+                            "Voiceprint extracted from the recording clip.",
+                        ),
+                        cx,
+                    ),
                     Err(e) => this.notify(NoticeKind::Error, e, cx),
                 }
                 this.refresh_people(cx);
@@ -1995,7 +2462,14 @@ impl AppState {
                 }
                 Err(e) => {
                     let _ = this.update(cx, |s, cx| {
-                        s.notify(NoticeKind::Error, format!("打开浮窗字幕失败：{e}"), cx)
+                        s.notify(
+                            NoticeKind::Error,
+                            trf!(
+                                "打开浮窗字幕失败：{e}",
+                                "Couldn’t open floating captions: {e}"
+                            ),
+                            cx,
+                        )
                     });
                 }
             }
@@ -2037,7 +2511,11 @@ impl AppState {
     pub fn open_url(&mut self, url: &str, cx: &mut Context<Self>) {
         match flow::parse_seek_url(url) {
             Some((id, t)) => cx.emit(AppEvent::OpenMeeting(id, Some(t))),
-            None => self.notify(NoticeKind::Warning, format!("无法识别的链接：{url}"), cx),
+            None => self.notify(
+                NoticeKind::Warning,
+                trf!("无法识别的链接：{url}", "Unrecognized link: {url}"),
+                cx,
+            ),
         }
     }
 
@@ -2046,7 +2524,14 @@ impl AppState {
     /// Params: `meeting`; `cx`.
     pub fn open_in_obsidian(&mut self, meeting: &Meeting, cx: &mut Context<Self>) {
         let (Some(vault), Some(note)) = (&self.cfg.vault_path, &meeting.note_path) else {
-            self.notify(NoticeKind::Warning, "这场会议还没有 Obsidian 笔记。", cx);
+            self.notify(
+                NoticeKind::Warning,
+                tr!(
+                    "这场会议还没有 Obsidian 笔记。",
+                    "This meeting has no Obsidian note yet."
+                ),
+                cx,
+            );
             return;
         };
         let name = vault
@@ -2064,10 +2549,18 @@ impl AppState {
             Some(dir) if dir.exists() => cx.open_with_system(dir),
             Some(dir) => self.notify(
                 NoticeKind::Warning,
-                format!("录音文件夹不存在：{}", dir.display()),
+                trf!(
+                    "录音文件夹不存在：{}",
+                    "Recordings folder doesn’t exist: {}",
+                    dir.display()
+                ),
                 cx,
             ),
-            None => self.notify(NoticeKind::Warning, "这场会议没有录音。", cx),
+            None => self.notify(
+                NoticeKind::Warning,
+                tr!("这场会议没有录音。", "This meeting has no recording."),
+                cx,
+            ),
         }
     }
 }
@@ -2105,7 +2598,7 @@ fn store_sample(
     };
     lock(store)?
         .add_voiceprint(&v)
-        .map_err(|e| format!("保存声纹失败：{e}"))
+        .map_err(|e| trf!("保存声纹失败：{e}", "Couldn’t save the voiceprint: {e}"))
 }
 
 /// Writes the notes text into the note's 笔记 section and asks the indexer to refresh it.
@@ -2113,23 +2606,43 @@ fn store_sample(
 /// Params: `path` – note; `text` – notes; `indexer`.
 /// Returns: an error message with the path on failure.
 pub fn write_notes(path: &Path, text: &str, indexer: &Indexer) -> Result<(), String> {
-    let md = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取笔记 {} 失败：{e}", path.display()))?;
-    let updated = logic::replace_notes_section(&md, text).ok_or_else(|| {
-        format!(
-            "笔记 {} 里没有“## 笔记 Notes”标题，未写入。",
+    let md = std::fs::read_to_string(path).map_err(|e| {
+        trf!(
+            "读取笔记 {} 失败：{e}",
+            "Couldn’t read note {}: {e}",
             path.display()
         )
     })?;
+    let updated = logic::replace_notes_section(&md, text).ok_or_else(|| {
+        trf!(
+            "笔记 {} 里没有“## 笔记”标题，未写入。",
+            "Note {} has no “## Notes” heading, so nothing was written.",
+            path.display(),
+        )
+    })?;
     if updated != md {
-        mm_vault::write_atomic(path, &updated)
-            .map_err(|e| format!("写入笔记 {} 失败：{e}", path.display()))?;
+        mm_vault::write_atomic(path, &updated).map_err(|e| {
+            trf!(
+                "写入笔记 {} 失败：{e}",
+                "Couldn’t write note {}: {e}",
+                path.display()
+            )
+        })?;
         indexer.send(IndexerMsg::Touch(
             path.to_path_buf(),
             mm_index::Priority::Interactive,
         ));
     }
     Ok(())
+}
+
+/// Makes `lang` the language of our own strings and of gpui-component's built-in ones
+/// (dialog buttons, pickers), which use their own `rust-i18n` locale.
+///
+/// Params: `lang` – interface language.
+pub fn apply_ui_language(lang: mm_i18n::Lang) {
+    mm_i18n::set_current(lang);
+    gpui_kit::component::set_locale(lang.component_locale());
 }
 
 /// Current UTC time (kept here so pages do not import chrono just for this).
@@ -2153,6 +2666,21 @@ mod tests {
                 .contains("make engines")
         );
         assert_eq!(EngineState::Ready.describe("字幕引擎"), "字幕引擎就绪");
+    }
+
+    #[test]
+    fn engine_state_descriptions_in_english() {
+        mm_i18n::with_lang(mm_i18n::Lang::En, || {
+            // The trailing separator space Chinese callers use must not double up.
+            assert_eq!(
+                EngineState::Ready.describe("Caption engine "),
+                "Caption engine is ready"
+            );
+            assert_eq!(
+                EngineState::Failed("quit".into()).describe("Caption engine"),
+                "Caption engine unavailable: quit"
+            );
+        });
     }
 
     #[test]

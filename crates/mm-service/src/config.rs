@@ -2,7 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use mm_llm::ByokProvider;
+use mm_i18n::Lang;
+use mm_llm::{ByokProvider, MinutesBackend};
 use serde::{Deserialize, Serialize};
 
 use crate::ServiceError;
@@ -32,12 +33,23 @@ pub struct AppConfig {
     pub embedding_model_dir: Option<PathBuf>,
     /// Hugging Face repo the 下载 button fetches the embedding model from.
     pub embedding_model_url: String,
+    /// With no `embedding_model_dir`, load `embedding_model_url` at launch: from the app's
+    /// models folder or the Hugging Face cache when present, otherwise by downloading it.
+    /// On by default so semantic search works without any setup.
+    pub auto_download_embedding: bool,
     /// Local MLX instruct model folder for offline minutes (last resort provider).
     pub local_llm_dir: Option<PathBuf>,
     /// Configured BYOK provider (its key lives in the Keychain).
     pub byok: Option<ByokProvider>,
-    /// Allow minutes through the local Codex (ChatGPT sign-in).
+    /// Allow the automatic minutes chain to use the local Codex (ChatGPT sign-in).
     pub use_codex: bool,
+    /// Who writes minutes; an explicit pick that fails falls back to the automatic chain.
+    pub minutes_backend: MinutesBackend,
+    /// Codex model for minutes (`model/list` id); `None` keeps Codex's default.
+    pub codex_model: Option<String>,
+    /// `agy --model` id for minutes through Antigravity. When it equals `antigravity_model`
+    /// and the Antigravity refine runs, one agy run does both jobs.
+    pub antigravity_minutes_model: String,
     /// Re-transcribe recordings after the meeting with the larger model.
     pub refine_after_meeting: bool,
     /// Qwen3-ASR checkpoint for the post-meeting pass (Hugging Face repo id or absolute
@@ -45,9 +57,9 @@ pub struct AppConfig {
     /// own fast model, so a stronger refine model costs nothing during the meeting.
     pub refine_asr_model: Option<String>,
     /// Who does the post-meeting pass: the local Qwen3-ASR engine, or Gemini through the
-    /// Antigravity CLI (which then also writes the minutes).
+    /// Antigravity CLI.
     pub refine_backend: RefineBackend,
-    /// `agy --model` id for [`RefineBackend::Antigravity`].
+    /// `agy --model` id for [`RefineBackend::Antigravity`] (must hear audio).
     pub antigravity_model: String,
     /// Generate minutes automatically when a meeting ends.
     pub auto_minutes: bool,
@@ -55,10 +67,22 @@ pub struct AppConfig {
     pub floating_captions: bool,
     /// Minutes language (`zh`, `en`, `ja`).
     pub minutes_language: String,
+    /// Interface language; `None` follows the macOS preferred language
+    /// ([`mm_i18n::system_lang`]). Also used for the text the app writes into notes.
+    pub ui_language: Option<Lang>,
     /// Mirror the microphone's direction cues (its first channel is on the right).
     pub spatial_flip: bool,
     /// Distance between the two spatial mics in centimetres; `None` = unknown geometry.
     pub spatial_spacing_cm: Option<f64>,
+}
+
+impl AppConfig {
+    /// The interface language this config asks for.
+    ///
+    /// Returns: `ui_language`, or the system language when it is unset.
+    pub fn effective_ui_language(&self) -> Lang {
+        self.ui_language.unwrap_or_else(mm_i18n::system_lang)
+    }
 }
 
 impl Default for AppConfig {
@@ -74,9 +98,13 @@ impl Default for AppConfig {
             recordings_dir: None,
             embedding_model_dir: None,
             embedding_model_url: crate::hub::DEFAULT_EMBEDDING_REPO_URL.into(),
+            auto_download_embedding: true,
             local_llm_dir: None,
             byok: None,
             use_codex: true,
+            minutes_backend: MinutesBackend::Auto,
+            codex_model: None,
+            antigravity_minutes_model: mm_llm::antigravity::DEFAULT_MODEL.into(),
             refine_after_meeting: true,
             refine_asr_model: None,
             refine_backend: RefineBackend::Local,
@@ -84,6 +112,7 @@ impl Default for AppConfig {
             auto_minutes: true,
             floating_captions: true,
             minutes_language: "zh".into(),
+            ui_language: None,
             spatial_flip: false,
             spatial_spacing_cm: None,
         }
@@ -94,11 +123,10 @@ impl Default for AppConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefineBackend {
-    /// Qwen3-ASR in `mm-meetingd`; minutes come from the regular provider chain.
+    /// Qwen3-ASR in `mm-meetingd`.
     #[default]
     Local,
-    /// Gemini hears the recordings via `agy`, then writes the minutes in a second run.
-    /// Falls back to [`RefineBackend::Local`] when it fails.
+    /// Gemini hears the recordings via `agy`. Falls back to [`RefineBackend::Local`] when it fails.
     Antigravity,
 }
 
@@ -151,7 +179,7 @@ impl AppConfig {
     pub fn load(dir: &Path) -> Result<Self, ServiceError> {
         let path = dir.join("config.json");
         match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text)
+            Ok(text) => Self::parse(&text)
                 .map_err(|e| ServiceError::Config(format!("parsing {}: {e}", path.display()))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(ServiceError::Config(format!(
@@ -159,6 +187,25 @@ impl AppConfig {
                 path.display()
             ))),
         }
+    }
+
+    /// Parses `config.json` text, carrying older settings forward.
+    ///
+    /// Before `minutes_backend` existed, the Antigravity refine also wrote the minutes; a
+    /// config from then keeps that behaviour by picking Antigravity for minutes too.
+    ///
+    /// Params: `text` – file contents.
+    /// Returns: the config.
+    pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
+        let raw: serde_json::Value = serde_json::from_str(text)?;
+        let legacy_antigravity =
+            raw.get("minutes_backend").is_none() && raw["refine_backend"] == "antigravity";
+        let mut cfg: Self = serde_json::from_value(raw)?;
+        if legacy_antigravity {
+            cfg.minutes_backend = MinutesBackend::Antigravity;
+            cfg.antigravity_minutes_model = cfg.antigravity_model.clone();
+        }
+        Ok(cfg)
     }
 
     /// Writes `config.json` atomically.
@@ -257,8 +304,44 @@ mod tests {
         cfg.byok = Some(ByokProvider::Anthropic {
             model: "claude-opus-5-5".into(),
         });
+        cfg.minutes_backend = MinutesBackend::Codex;
+        cfg.codex_model = Some("gpt-6.1-terra".into());
         cfg.save(dir.path()).unwrap();
         assert_eq!(AppConfig::load(dir.path()).unwrap(), cfg);
+    }
+
+    #[test]
+    fn legacy_antigravity_refine_keeps_writing_minutes() {
+        let old = r#"{"refine_backend":"antigravity","antigravity_model":"gemini-3.8-flash-high"}"#;
+        let cfg = AppConfig::parse(old).unwrap();
+        assert_eq!(cfg.minutes_backend, MinutesBackend::Antigravity);
+        assert_eq!(cfg.antigravity_minutes_model, "gemini-3.8-flash-high");
+
+        // Once the key exists, the user's own pick wins.
+        let new = r#"{"refine_backend":"antigravity","minutes_backend":"auto"}"#;
+        assert_eq!(
+            AppConfig::parse(new).unwrap().minutes_backend,
+            MinutesBackend::Auto
+        );
+        assert_eq!(AppConfig::parse("{}").unwrap(), AppConfig::default());
+    }
+
+    #[test]
+    fn ui_language_round_trips_and_defaults_to_system() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), r#"{"fps": 30}"#).unwrap();
+        let mut cfg = AppConfig::load(dir.path()).unwrap();
+        assert_eq!(
+            cfg.ui_language, None,
+            "older files follow the system language"
+        );
+        assert_eq!(cfg.effective_ui_language(), mm_i18n::system_lang());
+        cfg.ui_language = Some(Lang::En);
+        cfg.save(dir.path()).unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("config.json")).unwrap();
+        assert!(raw.contains(r#""ui_language": "en""#), "{raw}");
+        let back = AppConfig::load(dir.path()).unwrap();
+        assert_eq!(back.effective_ui_language(), Lang::En);
     }
 
     #[test]
@@ -277,6 +360,10 @@ mod tests {
             cfg.embedding_model_url,
             crate::hub::DEFAULT_EMBEDDING_REPO_URL,
             "files from before the download setting get the default repo"
+        );
+        assert!(
+            cfg.auto_download_embedding,
+            "files from before the setting fetch the default model"
         );
         std::fs::write(dir.path().join("config.json"), "{").unwrap();
         assert!(

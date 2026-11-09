@@ -11,6 +11,7 @@ use mm_core::{
     Meeting, MeetingId, MeetingStatus, MeetingVenue, PersonId, PresetVoiceprint, SpeakerLabel,
     TranscriptSegment,
 };
+use mm_i18n::{tr, trf};
 use mm_llm::{Minutes, MinutesInput, TranscriptLine, render_minutes};
 use mm_store::{SegmentPass, Store};
 use mm_vault::{MeetingNote, replace_managed_block, write_atomic};
@@ -144,13 +145,25 @@ pub fn meeting_for_event(store: &Store, ev: &CalendarEvent) -> Result<Meeting, S
     Ok(m)
 }
 
+/// Default title of an ad-hoc meeting, in the UI language at creation time (the title is
+/// then stored, so switching languages later does not rename it).
+///
+/// Params: `now` – local start time.
+/// Returns: e.g. "11月08日 14:30 会议" or "Nov 8 14:30 meeting".
+pub fn ad_hoc_title(now: chrono::DateTime<Local>) -> String {
+    match mm_i18n::current() {
+        mm_i18n::Lang::Zh => format!("{} 会议", now.format("%m月%d日 %H:%M")),
+        mm_i18n::Lang::En => format!("{} meeting", now.format("%b %-d %H:%M")),
+    }
+}
+
 /// Creates an ad-hoc meeting starting now ("开始记录" without a calendar event).
 ///
 /// Params: `store`; `title` – empty uses a timestamped default.
 /// Returns: the persisted meeting.
 pub fn quick_meeting(store: &Store, title: &str) -> Result<Meeting, ServiceError> {
     let title = if title.trim().is_empty() {
-        format!("{} 会议", Local::now().format("%m月%d日 %H:%M"))
+        ad_hoc_title(Local::now())
     } else {
         title.trim().to_string()
     };
@@ -271,7 +284,7 @@ pub fn directory_for(store: &Store, meeting: MeetingId) -> Result<SpeakerDirecto
 fn speaker_display(dir: &SpeakerDirectory, label: &SpeakerLabel, origin: AudioOrigin) -> String {
     let name = dir.name(label);
     match (origin, dir.person(label)) {
-        (AudioOrigin::System, None) => format!("远程 · {name}"),
+        (AudioOrigin::System, None) => trf!("远程 · {name}", "Remote · {name}"),
         _ => name,
     }
 }
@@ -286,13 +299,14 @@ pub fn render_transcript(
     dir: &SpeakerDirectory,
 ) -> String {
     if segments.is_empty() {
-        return "_暂无转写_".into();
+        return tr!("_暂无转写_", "_No transcript yet_").into();
     }
     segments
         .iter()
         .map(|s| {
-            format!(
+            trf!(
                 "[{}]({}) **{}**：{}",
+                "[{}]({}) **{}**: {}",
                 mm_index::pipeline::fmt_ms(s.start_ms),
                 seek_url(meeting, s.start_ms),
                 speaker_display(dir, &s.speaker, s.origin),
@@ -342,7 +356,9 @@ pub fn sync_transcript(
         "transcript",
         &render_transcript(meeting.id, &segments, &dir),
     )?;
-    let names = |l: &SpeakerLabel| dir.name(l);
+    // Index text stays in Chinese whatever the UI language: changing it would change the
+    // embedded chunks without bumping the vector stamp.
+    let names = |l: &SpeakerLabel| mm_i18n::with_lang(mm_i18n::Lang::Zh, || dir.name(l));
     mm_index::pipeline::index_transcript(store, meeting.id, &meeting.title, &segments, &names)?;
     Ok(())
 }
@@ -407,6 +423,10 @@ pub fn store_final_transcript(
 }
 
 /// The user's own notes: the `## 笔记` section of the note, without managed blocks.
+///
+/// The heading is matched in every form the app has written: "## 笔记" (Chinese UI),
+/// "## Notes" (English UI) and the older bilingual "## 笔记 Notes", because notes are
+/// never rewritten outside managed blocks and so keep whichever heading they were born with.
 ///
 /// Params: `markdown` – note text.
 /// Returns: the section body (trimmed), or the whole body if the heading is missing.
@@ -773,7 +793,7 @@ mod tests {
         assert!(note.starts_with(cfg.vault_path.as_ref().unwrap().join("Meetings")));
         let user = std::fs::read_to_string(&note)
             .unwrap()
-            .replace("## 笔记 Notes\n\n", "## 笔记 Notes\n\n我关心预算\n");
+            .replace("## 笔记\n\n", "## 笔记\n\n我关心预算\n");
         std::fs::write(&note, user).unwrap();
 
         let preset = build_preset(&cfg, &store, &m, Some(7)).unwrap();
@@ -931,10 +951,41 @@ mod tests {
     }
 
     #[test]
+    fn ad_hoc_titles_and_remote_speakers_follow_the_ui_language() {
+        use chrono::TimeZone;
+        use mm_i18n::{Lang, with_lang};
+        let now = Local.with_ymd_and_hms(2026, 11, 8, 14, 30, 0).unwrap();
+        assert_eq!(
+            with_lang(Lang::Zh, || ad_hoc_title(now)),
+            "11月08日 14:30 会议"
+        );
+        assert_eq!(
+            with_lang(Lang::En, || ad_hoc_title(now)),
+            "Nov 8 14:30 meeting"
+        );
+
+        let dir = SpeakerDirectory::new([], []);
+        let c2 = SpeakerLabel::Cluster { index: 2 };
+        let remote = |lang| with_lang(lang, || speaker_display(&dir, &c2, AudioOrigin::System));
+        assert_eq!(remote(Lang::Zh), "远程 · 说话人 2");
+        assert_eq!(remote(Lang::En), "Remote · Speaker 2");
+        let id = MeetingId::new();
+        assert_eq!(
+            with_lang(Lang::En, || render_transcript(id, &[], &dir)),
+            "_No transcript yet_"
+        );
+    }
+
+    #[test]
     fn notes_section_skips_frontmatter_blocks_and_other_sections() {
         let md = "---\ntitle: x\n---\n# T\n\n## 笔记 Notes\n\n要点 ![[s.png]]\n<!-- mm:x:start -->\n生成\n<!-- mm:x:end -->\n\n## 纪要 Minutes\nm\n";
         assert_eq!(notes_section(md), "要点 ![[s.png]]");
         assert_eq!(notes_section("plain"), "plain");
+        // Headings written in either UI language, or the old bilingual form, all count.
+        for heading in ["## 笔记", "## Notes", "## 笔记 Notes"] {
+            let md = format!("# T\n\n{heading}\n\n要点\n\n## Minutes\nm\n## 纪要\nx\n");
+            assert_eq!(notes_section(&md), "要点", "{heading}");
+        }
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("附件")).unwrap();
         std::fs::write(dir.path().join("附件/s.png"), b"png").unwrap();

@@ -23,10 +23,11 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use mm_core::AudioOrigin;
+use mm_i18n::tr;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{LlmError, Minutes, MinutesInput, instructions, minutes_json_schema};
+use crate::{LlmError, Minutes, MinutesInput, ModelOption, instructions, minutes_json_schema};
 
 /// Model used when the user has not picked one.
 ///
@@ -34,22 +35,84 @@ use crate::{LlmError, Minutes, MinutesInput, instructions, minutes_json_schema};
 /// silence it invented a whole meeting with names, while `-medium` reported the silence.
 pub const DEFAULT_MODEL: &str = "gemini-3.8-flash-medium";
 
-/// Models offered in settings: `(agy model id, label)`.
-pub const MODELS: [(&str, &str); 2] = [
-    ("gemini-3.8-flash-medium", "Gemini 3.8 Flash"),
-    ("gemini-3.8-flash-high", "Gemini 3.8 Flash（深度思考）"),
-];
+/// `agy` model ids offered in settings; labels come from [`models`].
+const MODEL_IDS: [&str; 2] = ["gemini-3.8-flash-medium", "gemini-3.8-flash-high"];
+
+/// Models offered in settings, labelled in the current UI language.
+///
+/// Returns: `(agy model id, label)`, default model first.
+pub fn models() -> [(&'static str, &'static str); 2] {
+    [
+        (MODEL_IDS[0], "Gemini 3.8 Flash"),
+        (
+            MODEL_IDS[1],
+            tr!(
+                "Gemini 3.8 Flash（深度思考）",
+                "Gemini 3.8 Flash (deep thinking)"
+            ),
+        ),
+    ]
+}
 
 /// Human label of a model id, for progress messages.
 ///
 /// Params: `model` – agy model id.
-/// Returns: the settings label, or the id itself for custom models.
+/// Returns: the settings label in the current UI language, or the id itself for custom models.
 pub fn model_label(model: &str) -> &str {
-    MODELS
-        .iter()
+    models()
+        .into_iter()
         .find(|(id, _)| *id == model)
-        .map(|(_, label)| *label)
+        .map(|(_, label)| label)
         .unwrap_or(model)
+}
+
+/// Whether a model can do the post-meeting refine: it must hear audio (Gemini) and not be a
+/// `-low` variant (see [`DEFAULT_MODEL`]).
+///
+/// Params: `id` – agy model id.
+/// Returns: `true` when settings may offer it for refine.
+pub fn refine_capable(id: &str) -> bool {
+    id.starts_with("gemini-") && !id.ends_with("-low")
+}
+
+/// Parses `agy models`: one `id<TAB>label` line per model, after a "Fetching…" line.
+///
+/// Params: `stdout` – everything the command printed.
+/// Returns: the models in agy's order; [`DEFAULT_MODEL`] is marked as the default.
+pub fn parse_models(stdout: &str) -> Vec<ModelOption> {
+    stdout
+        .lines()
+        .filter_map(|l| {
+            let (id, label) = l.split_once('\t')?;
+            let id = id.trim();
+            (!id.is_empty() && !id.contains(' ')).then(|| ModelOption {
+                id: id.to_string(),
+                label: label.trim().to_string(),
+                is_default: id == DEFAULT_MODEL,
+            })
+        })
+        .collect()
+}
+
+/// Lists the models the signed-in Antigravity account offers (`agy models`).
+///
+/// Params: `agy` – executable path.
+/// Returns: the models, or an error when agy printed none.
+pub fn list_models(agy: &Path) -> Result<Vec<ModelOption>, LlmError> {
+    let out = run_once(
+        agy,
+        &["models".to_string()],
+        &std::env::temp_dir(),
+        Duration::from_secs(60),
+    )?;
+    let models = parse_models(&out);
+    if models.is_empty() {
+        let head: String = out.trim().chars().take(300).collect();
+        return Err(LlmError::Antigravity(format!(
+            "agy models listed nothing: {head}"
+        )));
+    }
+    Ok(models)
 }
 
 /// Finds the `agy` executable (installed by Antigravity into `~/.local/bin`).
@@ -167,6 +230,42 @@ pub fn minutes_prompt(input: &MinutesInput) -> String {
         "{}\n不要打开任何文件，也不要运行命令；只根据下面的材料输出纪要。\n\n{}",
         instructions(input.language.as_deref()),
         input.render()
+    )
+}
+
+/// Schema for a run that transcribes and writes minutes at once:
+/// `{"transcript": [HeardLine…], "minutes": Minutes}`.
+///
+/// Returns: a JSON Schema whose root is an object.
+pub fn transcript_and_minutes_schema() -> Value {
+    let transcript = transcript_schema()["properties"]["transcript"].clone();
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["transcript", "minutes"],
+        "properties": {
+            "transcript": transcript,
+            "minutes": minutes_json_schema()
+        }
+    })
+}
+
+/// Builds the prompt for a run that transcribes the audio and then writes the minutes.
+///
+/// Params: `tracks`, `context`, `language` – as for [`transcribe_prompt`]; `input` – the
+/// meeting's title, attendees, notes and minutes language (its transcript is ignored).
+/// Returns: the prompt text.
+pub fn transcribe_and_minutes_prompt(
+    tracks: &[AudioTrack],
+    context: Option<&str>,
+    language: Option<&str>,
+    input: &MinutesInput,
+) -> String {
+    format!(
+        "{}\n转写完成后，根据你转写的内容和下面的材料写会议纪要，放在 minutes 字段。\n{}\n         纪要里提到的人：能从对话判断出是参会者名单里的谁，就用名单里的名字，否则用说话人标签。\n         evidence_ms 填 transcript 里对应句子的 start_ms。\n\n{}",
+        transcribe_prompt(tracks, context, language),
+        instructions(input.language.as_deref()),
+        input.render_context()
     )
 }
 
@@ -375,15 +474,54 @@ pub fn transcribe(
 ) -> Result<Heard, LlmError> {
     let prompt = transcribe_prompt(tracks, context, language);
     let out = run_structured(agy, &prompt, model, &transcript_schema(), workdir, timeout)?;
-    let lines: Vec<HeardLine> = serde_json::from_value(out.value["transcript"].clone())
+    heard_from(&out.value, out.interrupted)
+}
+
+/// Reads the `transcript` array of a run's structured output.
+///
+/// Params: `value` – structured output; `interrupted` – the run's error, if it was cut short.
+/// Returns: the non-empty, well-ordered lines.
+fn heard_from(value: &Value, interrupted: Option<String>) -> Result<Heard, LlmError> {
+    let lines: Vec<HeardLine> = serde_json::from_value(value["transcript"].clone())
         .map_err(|e| LlmError::Antigravity(format!("transcript did not match the schema ({e})")))?;
     Ok(Heard {
         lines: lines
             .into_iter()
             .filter(|l| !l.text.trim().is_empty() && l.end_ms >= l.start_ms)
             .collect(),
-        interrupted: out.interrupted,
+        interrupted,
     })
+}
+
+/// Transcribes the tracks in `workdir` and writes the minutes in the same run, so the model
+/// hears the meeting only once.
+///
+/// Params: as for [`transcribe`]; `input` – title, attendees, notes and minutes language.
+/// Returns: what was heard, plus the minutes or why they could not be read (the transcript
+/// is still usable then).
+#[allow(clippy::too_many_arguments)]
+pub fn transcribe_with_minutes(
+    agy: &Path,
+    workdir: &Path,
+    tracks: &[AudioTrack],
+    context: Option<&str>,
+    language: Option<&str>,
+    input: &MinutesInput,
+    model: &str,
+    timeout: Duration,
+) -> Result<(Heard, Result<Minutes, LlmError>), LlmError> {
+    let prompt = transcribe_and_minutes_prompt(tracks, context, language, input);
+    let out = run_structured(
+        agy,
+        &prompt,
+        model,
+        &transcript_and_minutes_schema(),
+        workdir,
+        timeout,
+    )?;
+    let minutes = serde_json::from_value(out.value["minutes"].clone())
+        .map_err(|e| LlmError::Antigravity(format!("minutes did not match the schema ({e})")));
+    Ok((heard_from(&out.value, out.interrupted)?, minutes))
 }
 
 /// Writes minutes from a transcript (no files involved).
@@ -410,6 +548,29 @@ pub fn generate_minutes(
     }
     serde_json::from_value(out.value)
         .map_err(|e| LlmError::Antigravity(format!("minutes did not match the schema ({e})")))
+}
+
+/// Writes minutes from a transcript in a fresh empty directory, removed afterwards.
+///
+/// Params: `agy`; `input`; `model`; `timeout` – per attempt.
+/// Returns: parsed minutes.
+pub fn generate_minutes_in_scratch(
+    agy: &Path,
+    input: &MinutesInput,
+    model: &str,
+    timeout: Duration,
+) -> Result<Minutes, LlmError> {
+    // Unique per process and call, so two meetings writing minutes at once never share it.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("friston-agy-minutes-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| LlmError::Antigravity(format!("creating {}: {e}", dir.display())))?;
+    let result = generate_minutes(agy, &dir, input, model, timeout);
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        tracing::warn!("removing {}: {e}", dir.display());
+    }
+    result
 }
 
 #[cfg(test)]
@@ -479,6 +640,47 @@ mod tests {
     }
 
     #[test]
+    fn models_parse_from_agy_listing() {
+        let out = "Fetching available models...\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n\n";
+        let models = parse_models(out);
+        assert_eq!(models.len(), 2);
+        assert!(models[0].is_default);
+        assert_eq!(models[1].id, "claude-opus-5-5-high");
+        assert_eq!(models[1].label, "Claude Opus 5.5 (High)");
+        assert!(refine_capable("gemini-4-argon-high"));
+        assert!(!refine_capable("gemini-3.8-flash-low"));
+        assert!(!refine_capable("claude-opus-5-5-high"));
+    }
+
+    #[test]
+    fn combined_run_asks_for_transcript_then_minutes() {
+        let schema = transcript_and_minutes_schema();
+        assert_eq!(schema["required"], json!(["transcript", "minutes"]));
+        assert_eq!(schema["properties"]["minutes"], minutes_json_schema());
+        let tracks = [AudioTrack {
+            origin: AudioOrigin::Microphone,
+            file_name: "microphone.m4a".into(),
+        }];
+        let input = MinutesInput {
+            title: "订单迁移".into(),
+            attendees: vec!["赵磊".into()],
+            transcript: vec![crate::TranscriptLine {
+                start_ms: 1,
+                speaker: "x".into(),
+                text: "不应出现的实时转写".into(),
+            }],
+            language: Some("en".into()),
+            ..Default::default()
+        };
+        let p = transcribe_and_minutes_prompt(&tracks, None, Some("zh"), &input);
+        assert!(p.contains("./microphone.m4a"));
+        assert!(p.contains("minutes 字段"));
+        assert!(p.contains("参会者：赵磊"));
+        assert!(p.contains("English"), "minutes language follows the input");
+        assert!(!p.contains("不应出现"), "the live transcript is not sent");
+    }
+
+    #[test]
     fn heard_lines_parse_from_schema_output() {
         let v = json!({"transcript": [
             {"source": "system", "start_ms": 8000, "end_ms": 9000, "speaker": "说话人2", "text": "可以"}
@@ -487,5 +689,13 @@ mod tests {
         assert_eq!(lines[0].source, AudioOrigin::System);
         assert_eq!(model_label(DEFAULT_MODEL), "Gemini 3.8 Flash");
         assert_eq!(model_label("x"), "x");
+        assert_eq!(
+            mm_i18n::with_lang(mm_i18n::Lang::En, || model_label("gemini-3.8-flash-high")),
+            "Gemini 3.8 Flash (deep thinking)"
+        );
+        assert_eq!(
+            model_label("gemini-3.8-flash-high"),
+            "Gemini 3.8 Flash（深度思考）"
+        );
     }
 }

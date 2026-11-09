@@ -4,6 +4,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Local, Utc};
 
+use mm_i18n::{tr, trf};
+
 use crate::VaultError;
 
 /// Data needed to create the initial note for a meeting.
@@ -46,6 +48,10 @@ impl MeetingNote {
 
     /// Renders the initial Markdown with frontmatter, a user-owned notes area and empty managed blocks.
     ///
+    /// Headings and placeholders follow the current UI language. Notes made earlier keep
+    /// their headings (Chinese, English or the old bilingual "## 笔记 Notes") because only
+    /// managed blocks are ever rewritten, so readers of notes must accept all of them.
+    ///
     /// Returns: the full note text.
     pub fn render(&self) -> String {
         // JSON string literals are valid YAML scalars, which gives us correct quoting for free.
@@ -59,19 +65,33 @@ impl MeetingNote {
         let recording = self
             .recording_path
             .as_deref()
-            .map(|p| format!("\n录音 / Recording: [打开]({})\n", p.replace(' ', "%20")))
+            .map(|p| {
+                trf!(
+                    "\n录音：[打开]({})\n",
+                    "\nRecording: [Open]({})\n",
+                    p.replace(' ', "%20")
+                )
+            })
             .unwrap_or_default();
+        let (notes, minutes, actions) = (
+            tr!("笔记", "Notes"),
+            tr!("纪要", "Minutes"),
+            tr!("待办", "Action items"),
+        );
         format!(
             "---\ntype: meeting\nmeeting_id: {id}\ntitle: {title}\ndate: {date}\nattendees: [{att}]\ntags: [{tags}]\nstatus: scheduled\n---\n\
-# {heading}\n{recording}\n## 笔记 Notes\n\n\n## 纪要 Minutes\n{minutes}\n## 待办 Action items\n{actions}",
+# {heading}\n{recording}\n## {notes}\n\n\n## {minutes}\n{minutes_block}\n## {actions}\n{actions_block}",
             id = q(&self.meeting_id),
             title = q(&self.title),
             date = self.starts_at.to_rfc3339(),
             att = attendees.join(", "),
             tags = tags.join(", "),
             heading = self.title,
-            minutes = managed_block("minutes", "_会后自动生成 · generated after the meeting_"),
-            actions = managed_block("actions", ""),
+            minutes_block = managed_block(
+                "minutes",
+                tr!("_会后自动生成_", "_Generated after the meeting_")
+            ),
+            actions_block = managed_block("actions", ""),
         )
     }
 }
@@ -147,7 +167,7 @@ mod tests {
     #[test]
     fn regenerating_minutes_preserves_user_edits() {
         let mut md = note().render();
-        md = md.replace("## 笔记 Notes\n\n", "## 笔记 Notes\n\n我的私人笔记\n");
+        md = md.replace("## 笔记\n\n", "## 笔记\n\n我的私人笔记\n");
         let updated = replace_managed_block(&md, "minutes", "- 决定：预算上调 5%").unwrap();
         assert!(updated.contains("我的私人笔记"));
         assert!(
@@ -155,7 +175,7 @@ mod tests {
                 "<!-- mm:minutes:start -->\n- 决定：预算上调 5%\n<!-- mm:minutes:end -->"
             )
         );
-        assert!(!updated.contains("generated after the meeting"));
+        assert!(!updated.contains("会后自动生成"));
         assert_eq!(
             replace_managed_block(&updated, "minutes", "x")
                 .unwrap()
@@ -163,6 +183,24 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn headings_follow_the_ui_language() {
+        use mm_i18n::{Lang, with_lang};
+        let mut n = note();
+        n.recording_path = Some("/r/a b.m4a".into());
+        let zh = with_lang(Lang::Zh, || n.render());
+        assert!(zh.contains("\n录音：[打开](/r/a%20b.m4a)\n"));
+        assert!(zh.contains("\n## 笔记\n\n\n## 纪要\n<!-- mm:minutes:start -->\n_会后自动生成_\n"));
+        assert!(zh.contains("\n## 待办\n<!-- mm:actions:start -->"));
+        let en = with_lang(Lang::En, || n.render());
+        assert!(en.contains("\nRecording: [Open](/r/a%20b.m4a)\n"));
+        assert!(en.contains(
+            "\n## Notes\n\n\n## Minutes\n<!-- mm:minutes:start -->\n_Generated after the meeting_\n"
+        ));
+        assert!(en.contains("\n## Action items\n<!-- mm:actions:start -->"));
+        assert!(!en.contains("笔记"));
     }
 
     #[test]

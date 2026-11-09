@@ -11,11 +11,12 @@
 | 原生引擎 | Swift 6 可执行文件 × 2，通过 stdio JSON-RPC 与 Rust 通信 | Xcode 27.1 / Swift 6.4，macOS 15+ | 已编译、已冒烟测试 |
 | 推理框架 | **MLX**（GPU，M5 神经加速器）+ **Core ML**（神经引擎） | mlx-swift 0.33.0 | 已编译 |
 | 实时字幕 / 转写 | Qwen3-ASR（1.7B 4bit 实时 / 1.7B 8bit 会后）+ Qwen3-ForcedAligner，来自 speech-swift | speech-swift 0.0.29 | 依赖已编译，模型未下载 |
+| 实时字幕草稿层 | 流式 Zipformer 中文 int8（sherpa-onnx C API，ONNX Runtime，CPU） | sherpa-onnx 2.0.1 静态库，`scripts/fetch-sherpa-onnx.sh` 按 SHA-256 下载，打包为 `CSherpaOnnx.xcframework`（不入库） | 已集成；GPU 跟不上时自动启用 |
 | 说话人 | Sortformer 流式分离 + WeSpeaker/CAM++ 声纹 + GCC-PHAT 方位（自研） | 同上 | 融合逻辑已实现并测试 |
 | 多模态嵌入 | **EmbeddingGemma 2**（文字/图片/音频/视频，768 维，MRL） | mlx-swift-lm `main@c8dabc6` | 已实测：文字检索排序正确，录音按时间窗嵌入可用 |
 | 存储 / 检索 | SQLite（rusqlite bundled）+ **sqlite-vec** + FTS5 trigram | rusqlite 0.41，sqlite-vec =0.1.9 | 已测试（KNN、中文全文） |
 | 笔记系统 | Obsidian 库（直接写 Markdown）+ `obsidian://` URI；Obsidian CLI 可选 | Obsidian 1.12+ | 已实现并测试 |
-| 纪要生成 | BYOK（Anthropic / OpenAI / Gemini / 兼容端点）→ **Codex app-server**（ChatGPT 登录）→ 本地 MLX（Qwen3-4B-Instruct 4bit，JSON Schema 约束） | codex-cli 0.166.0 | Codex 与本地模型已端到端实测 |
+| 纪要生成 | 自动：BYOK（Anthropic / OpenAI / Gemini / 兼容端点）→ **Codex app-server**（ChatGPT 登录）→ 本地 MLX（Qwen3-4B-Instruct 4bit，JSON Schema 约束）；也可指定 BYOK / Codex / **Antigravity CLI**，Codex 与 Antigravity 可选模型 | codex-cli 0.166.0 | Codex 与本地模型已端到端实测 |
 | 录制 | ScreenCaptureKit（窗口级）、AVFoundation、Core Audio process tap | 系统框架 | 窗口枚举、窗口/显示器录制、麦克风多声道与系统声音录制已实现 |
 | 日程 | EventKit | 系统框架 | 已实现读取 |
 
@@ -49,6 +50,7 @@
 - Qwen3-ASR 支持中、英、日、韩以及 22 种中文方言，有流式模式。实时字幕用 1.7B 4bit（2026-11-06 从 0.6B 换来，字错误率 4.78% → 3.63%，见 [asr-model-survey.md](asr-model-survey.md) 第 5 节），会后精转写用 1.7B 8bit，再用 ForcedAligner 得到逐字时间戳。
 - 说话人识别的设计见 [speaker-identification.md](speaker-identification.md)。
 - 备选：Apple SpeechAnalyzer（系统自带，零下载），可以作为实时字幕的降级方案。
+- **草稿层（2026-11-08）**：sherpa-onnx 的流式 Zipformer 中文 int8（167 MB，320 ms 一块，CPU）。它不走 MLX，GPU 被占满时仍能边说边出字；定稿始终由 Qwen3-ASR 给出。M5 Pro 上 Qwen3 前缀回退的临时字幕更快，所以默认只在 Qwen3 刷新间隔 ≥ 0.6 s 时切换（`DraftPolicy`），`MM_DRAFT=1/0` 可强制开/关。sherpa-onnx 没有 SwiftPM 包，官方只发布静态库，所以由脚本合并成一个静态库加 module map，用 `binaryTarget(path:)` 链接；只有中文字幕启用。选型过程见 [asr-model-survey.md](asr-model-survey.md) 第 9 节。
 
 ### 5. 纪要生成：BYOK → 本机 ChatGPT（Codex）→ 本地 MLX
 - **ChatGPT 桌面 App 没有公开的本地 API**（Meetings 插件把音频传到云端处理，也没有本地接口）。官方支持的本地集成方式是 `codex app-server`：stdio 上的 JSON-RPC，账号是用户已经登录的 ChatGPT 账号。
@@ -56,6 +58,8 @@
   - `UserInput` 支持 `text`、`localImage`、`localAudio`，所以会中截图和存疑的录音片段都可以直接交给模型。
   - `turn/start.outputSchema` 约束最终输出为我们的纪要 JSON。
   - 线程设为 `ephemeral` + `read-only` sandbox + `approvalPolicy: never`，不碰文件系统。
+- 模型选择（2026-11-09）：设置里的列表来自 `model/list`（`includeHidden: false`，按 `nextCursor` 翻页），选中的 id 放进 `thread/start.model`；选“Codex 默认模型”时不传该字段。codex-cli 0.167.0 实测列出 `gpt-6.1-sol`（默认）、`gpt-6.1-terra`、`gpt-6-luna` 等 8 个模型，都只支持 `text`、`image` 输入。
+- 也可以指定 **Antigravity**（`agy -p`）写纪要：只给文字，工作目录为空，用 `--json-schema` 约束输出。模型列表来自 `agy models`（Gemini、Claude、GPT-OSS 等），实测 `claude-opus-5-5-low` 约 8 秒写出符合 schema 的纪要。复跑：`cargo test -p mm-llm --test antigravity_minutes_live -- --ignored --nocapture`。
 - 注意：OpenAI 文档写明 app-server 认证**不得**用于商业或托管服务。本项目是个人本地应用，可以使用；如果将来要分发，需要改用 “Sign in with ChatGPT”。
 
 ### 5b. 会后精转写的外部工具：Antigravity（Gemini 3.8 Flash）（2026-11-08）
@@ -71,6 +75,7 @@
 | 真实录音 2 分钟，麦克风大部分是键盘声，系统声音为数字静音 | 只转出 98–110 秒的几句话，正确报告系统声音没有人声；部分运行被服务端中断（见上） |
 | 同上，改用 `gemini-3.8-flash-low` | **编造了一整场“模型服务优化”会议**，还带人名。所以不提供 low，并且静音音轨不发送 |
 
+- 精转模型只列能听音频的 Gemini 模型，并去掉 `-low`。纪要也选 Antigravity 且模型相同、录音只有一段时，一次调用同时返回转写和纪要（合成的两人短会议实测：两句全对，纪要的决定、金额和待办人都正确）；否则精转后再单独写纪要。
 - 复跑：`cargo test -p mm-service --test antigravity_live -- --ignored --nocapture`（`MM_AGY_RECORDING=<录音>` 换成真实录音）。
 
 ### 6. 存储：SQLite + sqlite-vec + FTS5
@@ -83,6 +88,10 @@
 - 生成的内容只写在 `<!-- mm:minutes:start/end -->` 这样的受管区块里，用户在 Obsidian 里写的其他内容永远不会被覆盖（有测试）。
 - 写入时先写临时文件再 rename，避免 Obsidian 读到写了一半的文件。
 
+### 8. 界面语言：自写 `mm-i18n`，系统语言用 `sys-locale`
+- 只做简体中文和英文，所以用调用处成对的 `tr!` / `trf!` 宏，而不是 `rust-i18n` 的 YAML 键（gpui-component 内部用它，键缺失只能在运行时发现）。gpui-component 自带文案仍通过它的 `set_locale` 切换。
+- `sys-locale` 0.3 读取 macOS 首选语言（CFLocale），已经是 GPUI 的间接依赖，没有新增下载。
+
 ## 本次安装 / 变更的组件
 
 | 组件 | 操作 |
@@ -92,7 +101,7 @@
 | Cargo 依赖 | gpui-kit 0.9、rusqlite（bundled SQLite）、sqlite-vec 0.1.9 等，见 `Cargo.lock` |
 | SwiftPM 依赖 | mlx-swift 0.33.0、mlx-swift-lm main、swift-transformers 1.4.0、swift-huggingface 0.13.0、speech-swift 0.0.29 及其传递依赖，见各包的 `Package.resolved` |
 
-已下载到 Hugging Face 缓存（`~/.cache/huggingface/hub`）：`mlx-community/embeddinggemma-2-bf16`（1.5 GB）、`mlx-community/Qwen3-4B-Instruct-2507-4bit`（离线纪要，约 2.3 GB）。在“设置”里选择对应的 snapshot 文件夹即可加载；嵌入模型也可以在设置页直接从 Hugging Face 下载（`mm-service::hub`，用 `ureq`，默认地址即上面的 bf16 仓库）。
+已下载到 Hugging Face 缓存（`~/.cache/huggingface/hub`）：`mlx-community/embeddinggemma-2-bf16`（1.5 GB）、`mlx-community/Qwen3-4B-Instruct-2507-4bit`（离线纪要，约 2.3 GB）。在“设置”里选择对应的 snapshot 文件夹即可加载；嵌入模型也可以在设置页直接从 Hugging Face 下载（`mm-service::hub`，用 `ureq`，默认地址即上面的 bf16 仓库）；没配嵌入模型时，App 启动会自动使用缓存里的这份，没有就自动下载。
 
 ## 实测（2026-11-05，M5 Pro）
 

@@ -10,6 +10,7 @@ use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_fl
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mm_core::{AudioOrigin, Meeting, MeetingId, SpeakerLabel, TranscriptSegment};
+use mm_i18n::{tr, trf};
 use mm_llm::Minutes;
 use mm_service::flow;
 use mm_service::live::SpeakerDirectory;
@@ -36,6 +37,8 @@ pub struct Detail {
 /// The 纪要库 page.
 pub struct LibraryPage {
     app: Entity<AppState>,
+    /// Input placeholders, rewritten when the interface language changes.
+    placeholders: ui::Placeholders,
     search: Entity<InputState>,
     new_person: Entity<InputState>,
     query: String,
@@ -52,10 +55,8 @@ impl LibraryPage {
     /// Params: `app`; `window`; `cx`.
     /// Returns: the page.
     pub fn new(app: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("搜索纪要、转写、笔记和截图，例如“预算”")
-        });
-        let new_person = cx.new(|cx| InputState::new(window, cx).placeholder("新人物的名字"));
+        let search = cx.new(|cx| InputState::new(window, cx));
+        let new_person = cx.new(|cx| InputState::new(window, cx));
         cx.observe(&app, |_, _, cx| cx.notify()).detach();
         cx.subscribe(&search, |this, state, ev: &InputEvent, cx| {
             if matches!(ev, InputEvent::Change | InputEvent::PressEnter { .. }) {
@@ -72,8 +73,18 @@ impl LibraryPage {
             }
         })
         .detach();
+        let mut placeholders = ui::Placeholders::default();
+        placeholders.input(&search, || {
+            tr!(
+                "搜索纪要、转写、笔记和截图，例如“预算”",
+                "Search minutes, transcripts, notes and screenshots, e.g. “budget”"
+            )
+        });
+        placeholders.input(&new_person, || tr!("新人物的名字", "New person’s name"));
+        placeholders.sync(window, cx);
         Self {
             app,
+            placeholders,
             search,
             new_person,
             query: String::new(),
@@ -131,7 +142,12 @@ impl LibraryPage {
                 };
                 lock(&store)?
                     .search(&query, vector.as_deref(), 30)
-                    .map_err(|e| format!("搜索“{query}”失败：{e}"))
+                    .map_err(|e| {
+                        trf!(
+                            "搜索“{query}”失败：{e}",
+                            "Couldn’t search for “{query}”: {e}"
+                        )
+                    })
             },
             move |this, res, cx| {
                 // A newer query may have started meanwhile; drop stale results.
@@ -171,13 +187,17 @@ impl LibraryPage {
                 let s = lock(&store)?;
                 let meeting = s
                     .meeting(id)
-                    .map_err(|e| format!("读取会议 {id} 失败：{e}"))?
-                    .ok_or_else(|| format!("找不到会议 {id}"))?;
+                    .map_err(|e| {
+                        trf!("读取会议 {id} 失败：{e}", "Couldn’t read meeting {id}: {e}")
+                    })?
+                    .ok_or_else(|| trf!("找不到会议 {id}", "Meeting {id} not found"))?;
                 let minutes = s
                     .minutes(id)
                     .map_err(|e| e.to_string())?
                     .and_then(|v| logic::parse_minutes(&v));
-                let transcript = s.transcript(id).map_err(|e| format!("读取转写失败：{e}"))?;
+                let transcript = s
+                    .transcript(id)
+                    .map_err(|e| trf!("读取转写失败：{e}", "Couldn’t read the transcript: {e}"))?;
                 let directory = flow::directory_for(&s, id).map_err(|e| e.to_string())?;
                 Ok(Detail {
                     meeting,
@@ -229,20 +249,30 @@ impl LibraryPage {
     fn results(&self, cx: &mut Context<Self>) -> AnyElement {
         match &self.hits {
             Loadable::Idle => self.meeting_list(cx),
-            Loadable::Loading => ui::loading("正在搜索…", cx).into_any_element(),
+            Loadable::Loading => ui::loading(tr!("正在搜索…", "Searching…"), cx).into_any_element(),
             Loadable::Failed(e) => ui::load_error("search-err", e, cx).into_any_element(),
-            Loadable::Ready(h) if h.is_empty() => {
-                ui::muted(format!("没有找到“{}”。", self.query), cx).into_any_element()
-            }
+            Loadable::Ready(h) if h.is_empty() => ui::muted(
+                trf!("没有找到“{}”。", "No results for “{}”.", self.query),
+                cx,
+            )
+            .into_any_element(),
             Loadable::Ready(hits) => {
                 let mode = if self.app.read(cx).embedding_ready() {
-                    "关键词 + 语义"
+                    tr!("关键词 + 语义", "Keyword + semantic")
                 } else {
-                    "关键词（加载嵌入模型后可语义搜索）"
+                    tr!(
+                        "关键词（加载嵌入模型后可语义搜索）",
+                        "Keyword (load the embedding model for semantic search)"
+                    )
                 };
+                let found = hits.len();
+                let found_en = logic::count_en(found as u64, "result", "results");
                 v_flex()
                     .gap_1()
-                    .child(ui::muted(format!("找到 {} 条 · {mode}", hits.len()), cx))
+                    .child(ui::muted(
+                        trf!("找到 {found} 条 · {mode}", "{found_en} · {mode}"),
+                        cx,
+                    ))
                     .children(hits.iter().enumerate().map(|(i, h)| {
                         let hit = h.clone();
                         let title = h
@@ -282,7 +312,9 @@ impl LibraryPage {
                                     )
                                     .when_some(time, |el, t| el.child(ui::muted(t, cx)))
                                     .when(h.keyword_match, |el| {
-                                        el.child(Tag::info().small().child("关键词"))
+                                        el.child(
+                                            Tag::info().small().child(tr!("关键词", "Keyword")),
+                                        )
                                     }),
                             )
                             .when_some(h.text.clone(), |el, t| {
@@ -297,9 +329,14 @@ impl LibraryPage {
     /// Meetings list (shown when not searching).
     fn meeting_list(&self, cx: &mut Context<Self>) -> AnyElement {
         match &self.app.read(cx).meetings {
-            Loadable::Ready(m) if m.is_empty() => {
-                ui::muted("还没有会议。开始一场记录后会出现在这里。", cx).into_any_element()
-            }
+            Loadable::Ready(m) if m.is_empty() => ui::muted(
+                tr!(
+                    "还没有会议。开始一场记录后会出现在这里。",
+                    "No meetings yet. They appear here once you start recording one."
+                ),
+                cx,
+            )
+            .into_any_element(),
             Loadable::Ready(meetings) => v_flex()
                 .gap_1()
                 .children(meetings.iter().enumerate().map(|(i, m)| {
@@ -325,7 +362,7 @@ impl LibraryPage {
                 }))
                 .into_any_element(),
             Loadable::Failed(e) => ui::load_error("ml-err", e, cx).into_any_element(),
-            _ => ui::loading("正在读取会议…", cx).into_any_element(),
+            _ => ui::loading(tr!("正在读取会议…", "Loading meetings…"), cx).into_any_element(),
         }
     }
 
@@ -345,41 +382,57 @@ impl LibraryPage {
             .gap_3()
             .child(div().text_sm().child(m.summary.clone()))
             .when(!m.decisions.is_empty(), |el| {
-                el.child(list("决定", &m.decisions))
+                el.child(list(tr!("决定", "Decisions"), &m.decisions))
             })
             .when(!m.action_items.is_empty(), |el| {
-                el.child(v_flex().gap_1().child(ui::section_title("待办")).children(
-                    m.action_items.iter().map(|a| {
-                        let meta = [
-                            a.owner.clone(),
-                            a.due.clone(),
-                            a.evidence_ms.map(logic::clock),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                        h_flex()
-                            .gap_2()
-                            .child(div().text_sm().child(format!("· {}", a.task)))
-                            .child(ui::muted(meta, cx))
-                    }),
-                ))
+                el.child(
+                    v_flex()
+                        .gap_1()
+                        .child(ui::section_title(tr!("待办", "Action items")))
+                        .children(m.action_items.iter().map(|a| {
+                            let meta = [
+                                a.owner.clone(),
+                                a.due.clone(),
+                                a.evidence_ms.map(logic::clock),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                            h_flex()
+                                .gap_2()
+                                .child(div().text_sm().child(format!("· {}", a.task)))
+                                .child(ui::muted(meta, cx))
+                        })),
+                )
             })
             .when(!m.open_questions.is_empty(), |el| {
-                el.child(list("待解决的问题", &m.open_questions))
+                el.child(list(
+                    tr!("待解决的问题", "Open questions"),
+                    &m.open_questions,
+                ))
             })
-            .when(!m.topics.is_empty(), |el| el.child(list("话题", &m.topics)))
+            .when(!m.topics.is_empty(), |el| {
+                el.child(list(tr!("话题", "Topics"), &m.topics))
+            })
     }
 
     /// Detail pane for the selected meeting.
     fn detail(&self, cx: &mut Context<Self>) -> AnyElement {
         let d = match &self.detail {
             Loadable::Idle => {
-                return ui::muted("选择左侧的会议或搜索结果查看纪要和转写。", cx)
+                return ui::muted(
+                    tr!(
+                        "选择左侧的会议或搜索结果查看纪要和转写。",
+                        "Select a meeting or search result on the left to see its minutes and transcript."
+                    ),
+                    cx,
+                )
                     .into_any_element();
             }
-            Loadable::Loading => return ui::loading("正在读取…", cx).into_any_element(),
+            Loadable::Loading => {
+                return ui::loading(tr!("正在读取…", "Loading…"), cx).into_any_element();
+            }
             Loadable::Failed(e) => return ui::load_error("detail-err", e, cx).into_any_element(),
             Loadable::Ready(d) => d.clone(),
         };
@@ -396,9 +449,9 @@ impl LibraryPage {
                     .small()
                     .primary()
                     .label(if d.minutes.is_some() {
-                        "重新生成纪要"
+                        tr!("重新生成纪要", "Regenerate minutes")
                     } else {
-                        "生成纪要"
+                        tr!("生成纪要", "Generate minutes")
                     })
                     .on_click(move |_, _, cx| a1.update(cx, |a, cx| a.regenerate_minutes(id, cx))),
             )
@@ -407,7 +460,7 @@ impl LibraryPage {
                     .small()
                     .outline()
                     .icon(IconName::ExternalLink)
-                    .label("在 Obsidian 中打开")
+                    .label(tr!("在 Obsidian 中打开", "Open in Obsidian"))
                     .on_click(move |_, _, cx| a2.update(cx, |a, cx| a.open_in_obsidian(&m1, cx))),
             )
             .child(
@@ -415,15 +468,15 @@ impl LibraryPage {
                     .small()
                     .outline()
                     .icon(IconName::FolderOpen)
-                    .label("打开录音文件夹")
+                    .label(tr!("打开录音文件夹", "Open recording folder"))
                     .on_click(move |_, _, cx| a3.update(cx, |a, cx| a.open_recording(&m2, cx))),
             );
         let minutes = match &d.minutes {
             Some(min) => Self::minutes_view(min, cx).into_any_element(),
-            None => ui::muted("还没有纪要。", cx).into_any_element(),
+            None => ui::muted(tr!("还没有纪要。", "No minutes yet."), cx).into_any_element(),
         };
         let transcript = if d.transcript.is_empty() {
-            ui::muted("没有转写。", cx).into_any_element()
+            ui::muted(tr!("没有转写。", "No transcript."), cx).into_any_element()
         } else {
             let mut rows = Vec::with_capacity(d.transcript.len());
             for (i, s) in d.transcript.iter().enumerate() {
@@ -453,19 +506,21 @@ impl LibraryPage {
             .child(actions)
             .when_some(seek, |el, t| {
                 el.child(ui::muted(
-                    format!(
+                    trf!(
                         "从链接定位到 {}，下方高亮对应的发言。录音在“打开录音文件夹”里。",
+                        "Opened from a link at {}; the matching line is highlighted below. The recording is in “Open recording folder”.",
                         logic::clock(t)
                     ),
                     cx,
                 ))
             })
-            .child(ui::section_title("纪要"))
+            .child(ui::section_title(tr!("纪要", "Minutes")))
             .child(minutes)
-            .child(ui::section_title(format!(
-                "转写（{} 段）",
-                d.transcript.len()
-            )))
+            .child(ui::section_title({
+                let n = d.transcript.len();
+                let n_en = logic::count_en(n as u64, "segment", "segments");
+                trf!("转写（{n} 段）", "Transcript ({n_en})")
+            }))
             .child(transcript)
             .into_any_element()
     }
@@ -482,7 +537,7 @@ impl LibraryPage {
         let hue = d.directory.hue(&s.speaker);
         let mut name = d.directory.name(&s.speaker);
         if s.origin == AudioOrigin::System && d.directory.person(&s.speaker).is_none() {
-            name = format!("远程 · {name}");
+            name = trf!("远程 · {name}", "Remote · {name}");
         }
         let cluster = match (&s.speaker, d.directory.person(&s.speaker)) {
             (SpeakerLabel::Cluster { index }, None) => Some(*index),
@@ -525,15 +580,19 @@ impl LibraryPage {
 
 impl Render for LibraryPage {
     /// Renders search + list | detail.
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.placeholders.sync(window, cx);
         let stats = self
             .app
             .read(cx)
             .index_stats
             .map(|s| {
-                format!(
-                    "索引：{} 个来源，{} 个片段，{} 个已嵌入",
-                    s.sources, s.chunks, s.embedded
+                let (sources, chunks, embedded) = (s.sources, s.chunks, s.embedded);
+                let sources_en = logic::count_en(sources, "source", "sources");
+                let chunks_en = logic::count_en(chunks, "chunk", "chunks");
+                trf!(
+                    "索引：{sources} 个来源，{chunks} 个片段，{embedded} 个已嵌入",
+                    "Index: {sources_en}, {chunks_en}, {embedded} embedded"
                 )
             })
             .unwrap_or_default();
@@ -550,7 +609,7 @@ impl Render for LibraryPage {
                         v_flex()
                             .p_4()
                             .gap_2()
-                            .child(ui::section_title("纪要库"))
+                            .child(ui::section_title(tr!("纪要库", "Library")))
                             .child(Input::new(&self.search).cleanable(true))
                             .child(ui::muted(stats, cx)),
                     )

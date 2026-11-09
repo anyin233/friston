@@ -5,6 +5,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
 use mm_core::MeetingId;
+use mm_i18n::{tr, trf};
 
 use crate::state::{AppState, PersonChoice};
 use crate::ui;
@@ -52,12 +53,18 @@ pub fn open(
         let app_new = app.clone();
         let input_new = input.clone();
         dialog
-            .title(format!("说话人 {cluster} 是谁？"))
+            .title(trf!("说话人 {cluster} 是谁？", "Who is speaker {cluster}?"))
             .w(px(460.))
             .child(
                 v_flex()
                     .gap_3()
-                    .child(ui::muted("命名后，本场之前的发言也会一起改名。", cx))
+                    .child(ui::muted(
+                        tr!(
+                            "命名后，本场之前的发言也会一起改名。",
+                            "Earlier lines in this meeting are renamed too.",
+                        ),
+                        cx,
+                    ))
                     .child(existing)
                     .child(
                         h_flex()
@@ -66,7 +73,7 @@ pub fn open(
                             .child(
                                 Button::new("assign-new")
                                     .primary()
-                                    .label("新建人物")
+                                    .label(tr!("新建人物", "New person"))
                                     .on_click(move |_, window, cx| {
                                         let name = input_new.read(cx).value().trim().to_string();
                                         if name.is_empty() {

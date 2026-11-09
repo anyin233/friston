@@ -3,6 +3,7 @@
 use gpui_kit::component::{IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use mm_i18n::tr;
 
 use crate::state::AppState;
 use crate::ui;
@@ -86,12 +87,15 @@ impl Render for FloatingCaptions {
                             live.directory.name(&l.speaker),
                             live.directory.hue(&l.speaker),
                             l.text.clone(),
-                            l.is_final,
+                            l.stable_byte_len(),
                         )
                     })
                     .collect::<Vec<_>>(),
             ),
-            None => ("没有正在进行的记录".to_string(), vec![]),
+            None => (
+                tr!("没有正在进行的记录", "No recording in progress").to_string(),
+                vec![],
+            ),
         };
         let count = lines.len();
         let app_close = self.app.clone();
@@ -129,13 +133,17 @@ impl Render for FloatingCaptions {
                     ),
             )
             .when(lines.is_empty(), |el| {
-                el.child(div().text_color(dim).child("等待有人发言…"))
+                el.child(
+                    div()
+                        .text_color(dim)
+                        .child(tr!("等待有人发言…", "Waiting for someone to speak…")),
+                )
             })
             .children(
                 lines
                     .into_iter()
                     .enumerate()
-                    .map(|(i, (name, hue, text, fin))| {
+                    .map(|(i, (name, hue, text, stable))| {
                         let last = i + 1 == count;
                         h_flex()
                             .gap_3()
@@ -152,9 +160,11 @@ impl Render for FloatingCaptions {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_color(if fin && last { ink } else { dim })
+                                    // Older lines recede; on the newest one only the
+                                    // volatile tail is dimmed, so new words grow in place.
+                                    .text_color(if last { ink } else { dim })
                                     .when(last, |el| el.text_xl())
-                                    .child(text),
+                                    .child(crate::ui::caption_text(&text, stable, dim)),
                             )
                     }),
             )

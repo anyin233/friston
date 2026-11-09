@@ -9,9 +9,10 @@
 │  ├─ mm-index    自动索引：分块 → 差异比对 → 防抖 → 媒体切窗                 │
 │  ├─ mm-store    SQLite + sqlite-vec（向量）+ FTS5（关键词）               │
 │  ├─ mm-vault    Obsidian：发现库、渲染笔记、受管区块、obsidian:// URI       │
-│  ├─ mm-llm      纪要：BYOK / Codex app-server / 本地 MLX                 │
+│  ├─ mm-llm      纪要：BYOK / Codex app-server / Antigravity / 本地 MLX   │
 │  ├─ mm-service  无界面服务层：设置、引擎调用、字幕状态、会议流程、后台索引     │
-│  └─ mm-core     领域模型                                               │
+│  ├─ mm-core     领域模型                                               │
+│  └─ mm-i18n     界面语言（简体中文 / English）与 tr!/trf! 宏              │
 │         │ stdio JSON-RPC                 │ stdio JSON-RPC              │
 │         ▼                                ▼                            │
 │  mm-meetingd (Swift)               mm-embedd (Swift)                  │
@@ -42,7 +43,7 @@
    - 优先级：会中笔记 > 会后编辑和转写 > 媒体回填。会议进行时嵌入任务主动让出 GPU。
    - 每个向量都带模型戳 `embeddinggemma-2@768/p1`；换模型或改了提示词时，后台自动重建索引。
 6. **结束**：会后精转写和全局说话人聚类 → `mm-llm` 选择提供方生成结构化纪要（JSON Schema 约束）→ 写入笔记的 `minutes` / `actions` 受管区块 → 纪要本身也进入索引。
-   - 设置里“精转方式”选 **Antigravity · Gemini** 时，会后精转写改走外部工具：录音转成 16 kHz 单声道 AAC，按 15 分钟切段，静音的音轨不发送；Antigravity CLI（`agy -p`）让 Gemini 3.8 Flash 直接听录音并输出带时间戳的逐句 JSON，说话人身份按时间重叠沿用实时分离的结果（同一个人色相不变）；然后同一个模型根据新转写写纪要。任何一步失败都会提示，并回退到本地 Qwen3-ASR 和常规纪要提供方。
+   - 设置里“精转方式”选 **Antigravity · Gemini** 时，会后精转写改走外部工具：录音转成 16 kHz 单声道 AAC，按 15 分钟切段，静音的音轨不发送；Antigravity CLI（`agy -p`）让 Gemini 3.8 Flash 直接听录音并输出带时间戳的逐句 JSON，说话人身份按时间重叠沿用实时分离的结果（同一个人色相不变）。如果纪要也选了 Antigravity、模型和精转相同、且录音只有一段（15 分钟内），同一次 `agy` 调用同时输出转写和纪要（schema 为 `{transcript, minutes}`）；否则精转写完成后再按纪要设置单独写纪要（长录音逐段识别，纪要需要整场内容，只能放在最后）。精转失败回退到本地 Qwen3-ASR；一并生成的纪要不可用时改为单独生成。
 7. **检索**：用户的问题先转成 `search_query` 向量，再与 FTS5 的 trigram 结果融合（RRF）。结果可能是转写、笔记、截图、录音窗口或录屏窗口，点击后跳到对应的时间点。
 
 ## 服务层（`mm-service`）
@@ -55,13 +56,22 @@
 | `engines` | 定位引擎（`MM_ENGINES_DIR` → App 包内 `Contents/Resources/engines/<引擎>/` → `target/engines/{Debug,Release}`），类型化调用，权限错误单独区分 |
 | `live` | 字幕板（易变/定稿/撤回/改标）与说话人目录（名字和色相：同一个人在所有界面同一色相） |
 | `flow` | 一场会议的各步：建笔记 → 录制预设（含已登记声纹）→ 定稿入库并写入笔记 `transcript` 区块 → 会后精转写合并 → 纪要写入 `minutes` / `actions` 区块 |
-| `hub` | 从 Hugging Face（或镜像）下载模型：按提交固定版本、逐文件写 `.part` 后改名、断点续传、可取消，写到 `<数据文件夹>/models/<作者>--<模型>/`；令牌存钥匙串（服务 `Friston`，账户 `huggingface`），没有时用 `HF_TOKEN` |
+| `hub` | 从 Hugging Face（或镜像）下载模型：按提交固定版本、逐文件写 `.part` 后改名、断点续传、可取消，写到 `<数据文件夹>/models/<作者>--<模型>/`；下载完成后写 `.mm-download-complete` 标记；`find_local_snapshot` 按标记或 Hugging Face 缓存（`HF_HUB_CACHE`/`HF_HOME`/`~/.cache/huggingface/hub`）找已有副本，启动时没配嵌入模型就先找、找不到再下载（`auto_download_embedding`，默认开）；令牌存钥匙串（服务 `Friston`，账户 `huggingface`），没有时用 `HF_TOKEN` |
 | `external` | 外部语音模型精转写的纯逻辑：`.caf` → 分段 AAC（`afconvert`，静音检测 −70 dBFS）、读写 16 位 WAV、把模型听到的句子映射回本场会议的说话人；调用 `agy` 的部分在 `mm_llm::antigravity` |
 | `indexer` | 后台线程：Obsidian 库 FSEvents → 防抖 → 增量分块 → 按模型戳补嵌入；会议进行时减小批量，把 GPU 让给字幕 |
 
-纪要提供方按 BYOK → Codex → 本地 MLX 的顺序选择。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。
+纪要提供方由设置“纪要生成方式”决定（`mm_llm::plan_providers`）：“自动”按 BYOK → Codex → 本地 MLX 的顺序选择；指定 API 密钥 / Codex / Antigravity 时先用指定的一项，它用不了或失败时改用自动顺序（不会重试刚失败的那一项），会后报告和通知里会说明。Codex 的模型通过 `thread/start.model` 传入（不选则用 Codex 默认），Antigravity 用 `agy --model`；两者的模型列表分别来自 `model/list` 和 `agy models`。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。
 
 纪要里的时间戳链接形如 `friston://open?meeting=<id>&t=<毫秒>`。App 同时注册 `friston` 和旧的 `meeting-master`，因为更名前写进笔记的链接仍用旧 scheme。
+
+## 界面语言（i18n）
+
+- 支持简体中文和 English。设置 › 通用 › 界面语言：跟随系统（默认，读取 macOS 首选语言，既不是中文也不是英文时用英文）、简体中文、English。保存在 `config.json` 的 `ui_language`（`"zh"` / `"en"` / 缺省）。
+- 文案写在调用处，成对出现：`tr!("开始记录", "Start recording")` 返回 `&'static str`；`trf!("今天有 {n} 场会议", "{n} meetings today")` 返回 `String`，两种语言的占位符都由 `format!` 在编译期检查。只有两种语言，成对写法让两种措辞都在眼前，也不会出现运行时缺键。
+- 切换时 `apply_ui_language` 同时设置 `mm_i18n` 和 gpui-component 自带文案（`rust-i18n`，`zh-CN` / `en`），然后刷新所有窗口；已经生成的提示保留原语言。
+- 写进 Obsidian 笔记的标题和提示（`## 笔记` / `## Notes`、纪要小标题等）跟随界面语言；纪要正文语言仍由“纪要语言”决定。解析笔记的代码同时认中文、英文和旧的双语标题。
+- 不翻译：发给模型的提示词、ASR 上下文、索引文本（改动会触发重新索引）、日志、协议字段。
+- 测试默认中文；要检查英文用 `mm_i18n::with_lang(Lang::En, || …)`，它只影响当前线程，不要在测试里调用 `set_current`。
 
 ## 打包
 

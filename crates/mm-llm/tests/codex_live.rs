@@ -32,8 +32,12 @@ fn codex_generates_schema_valid_minutes() {
         ],
         ..Default::default()
     };
-    let minutes = codex::generate(&path, &input, Duration::from_secs(600)).expect("codex minutes");
+    let minutes =
+        codex::generate(&path, &input, None, Duration::from_secs(600)).expect("codex minutes");
     println!("{minutes:#?}");
+    let models = codex::list_models(&path).expect("model/list");
+    println!("{models:#?}");
+    assert!(!models.is_empty());
     assert!(!minutes.summary.is_empty());
     assert!(minutes.action_items.iter().any(|a| a.task.contains("预算")));
 }

@@ -6,7 +6,7 @@
 
 macOS 上的图形化会议工作台：录屏、录音、日程、实时字幕与说话人识别、自动转写、会议纪要生成与管理，以及全模态搜索（文字、图片、音频、视频）。笔记和纪要写进你的 Obsidian 库；没有自带 API 密钥时，通过本机 Codex 使用你的 ChatGPT 账号生成纪要。
 
-> 当前状态：**v0.2 macOS 版功能完整**。录制、实时字幕与说话人、会后精转写、纪要生成（BYOK / Codex / 本地模型）、Obsidian 写回、自动索引和多模态搜索均已接通，六个页面和浮窗字幕可用。尚待真人验证的部分见文末“已知限制”。
+> 当前状态：**v0.2 macOS 版功能完整**。录制、实时字幕与说话人、会后精转写、纪要生成（BYOK / Codex / Antigravity / 本地模型，可选模型）、Obsidian 写回、自动索引和多模态搜索均已接通，六个页面和浮窗字幕可用。尚待真人验证的部分见文末“已知限制”。
 
 ## 快速开始
 
@@ -57,8 +57,8 @@ scripts/package-app.sh
 1. 打开 App 后在“设置”里确认 Obsidian 库（会自动发现）。
 2. 第一次开始记录时，macOS 会请求麦克风、屏幕录制（录窗口和系统声音）和日历权限，需要逐一允许。
 3. 实时字幕模型（Qwen3-ASR 1.7B 4bit、Silero VAD、WeSpeaker、Sortformer，约 1.8 GB）第一次录制时自动下载到 `~/Library/Caches/qwen3-speech`；Hugging Face 缓存里已有 `mlx-community/Qwen3-ASR-1.7B-4bit` 时直接使用，不再下载。会后精转默认用 1.7B 8bit，可以在“设置 › 精转模型”里换成别的 Qwen3-ASR 模型。实时字幕的延迟可以用 `scripts/eval-captions.py` 复测。
-4. 搜索的语义部分需要 EmbeddingGemma 2。在“设置 → 本地模型与搜索索引”点“下载并加载”，默认从 `https://huggingface.co/mlx-community/embeddinggemma-2-bf16` 下载（约 1.5 GB，可换成镜像地址，例如 `https://hf-mirror.com/…`），完成后自动加载；也可以直接填已有的模型文件夹。下载需要授权的模型时，在同一页保存 Hugging Face 令牌（存进钥匙串，没有时使用环境变量 `HF_TOKEN`）。没有嵌入模型时只用关键词检索。
-5. 纪要提供方：配置了 API 密钥就用 BYOK；否则用已登录的 `codex`（ChatGPT 账号）；都没有时可以加载本地模型（如 Qwen3-4B-Instruct 4bit）。
+4. 搜索的语义部分需要 EmbeddingGemma 2。默认不用任何设置：启动时如果没填模型文件夹，App 先找本机已有的副本（自己的模型文件夹，或 Hugging Face 缓存 `~/.cache/huggingface/hub`），找到就直接加载，否则自动下载；可以在“设置 → 本地模型与搜索索引”关掉“启动时自动准备嵌入模型”。也可以在同一页手动点“下载并加载”，默认从 `https://huggingface.co/mlx-community/embeddinggemma-2-bf16` 下载（约 1.5 GB，可换成镜像地址，例如 `https://hf-mirror.com/…`），完成后自动加载；也可以直接填已有的模型文件夹。下载需要授权的模型时，在同一页保存 Hugging Face 令牌（存进钥匙串，没有时使用环境变量 `HF_TOKEN`）。没有嵌入模型时只用关键词检索。
+5. 纪要提供方在“设置 › 纪要 › 纪要生成方式”里选：**自动**（配置了 API 密钥就用 BYOK；否则用已登录的 `codex`（ChatGPT 账号）；都没有时用本地模型，如 Qwen3-4B-Instruct 4bit），或指定 **API 密钥 / Codex / Antigravity**（`agy`）。指定的那一项用不了或失败时自动改用“自动”的顺序。Codex 和 Antigravity 的模型可以在同一页选，列表实时取自 `codex app-server` 的 `model/list` 和 `agy models`。
 
 ## 已知限制
 

@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use mm_core::{Meeting, MeetingId, SpeakerLabel, TranscriptSegment};
+use mm_i18n::trf;
 use mm_service::AppConfig;
 use mm_service::indexer::{Indexer, IndexerMsg};
 use mm_store::{SegmentPass, Store};
@@ -80,14 +81,24 @@ fn handle(store: &Arc<Mutex<Store>>, indexer: &Indexer, msg: WriteMsg) -> Result
         WriteMsg::Segment(seg, utterance) => lock(store)?
             .add_segment(&seg, SegmentPass::Live, Some(utterance))
             .map(|_| ())
-            .map_err(|e| format!("保存字幕（第 {utterance} 句）失败：{e}")),
+            .map_err(|e| {
+                trf!(
+                    "保存字幕（第 {utterance} 句）失败：{e}",
+                    "Couldn’t save caption (utterance {utterance}): {e}",
+                )
+            }),
         WriteMsg::Relabel(meeting, from, to) => lock(store)?
             .relabel_segments(meeting, &from, &to)
             .map(|_| ())
-            .map_err(|e| format!("更新说话人失败：{e}")),
+            .map_err(|e| trf!("更新说话人失败：{e}", "Couldn’t update speaker: {e}")),
         WriteMsg::Sync(cfg, meeting) => {
-            mm_service::flow::sync_transcript(&cfg, &mut *lock(store)?, &meeting)
-                .map_err(|e| format!("同步转写到笔记失败（{}）：{e}", meeting.title))?;
+            mm_service::flow::sync_transcript(&cfg, &mut *lock(store)?, &meeting).map_err(|e| {
+                trf!(
+                    "同步转写到笔记失败（{}）：{e}",
+                    "Couldn’t sync transcript to note ({}): {e}",
+                    meeting.title,
+                )
+            })?;
             indexer.send(IndexerMsg::Kick);
             Ok(())
         }
@@ -103,7 +114,9 @@ fn handle(store: &Arc<Mutex<Store>>, indexer: &Indexer, msg: WriteMsg) -> Result
 /// Params: `store`.
 /// Returns: the guard.
 pub fn lock(store: &Arc<Mutex<Store>>) -> Result<std::sync::MutexGuard<'_, Store>, String> {
-    store.lock().map_err(|e| format!("数据库锁异常：{e}"))
+    store
+        .lock()
+        .map_err(|e| trf!("数据库锁异常：{e}", "Database lock poisoned: {e}"))
 }
 
 #[cfg(test)]

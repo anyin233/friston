@@ -13,7 +13,8 @@ use mm_engine::{EngineClient, EngineEvent};
 use serde_json::{Value, json};
 
 use crate::{
-    LlmError, Minutes, MinutesInput, byok::parse_minutes, instructions, minutes_json_schema,
+    LlmError, Minutes, MinutesInput, ModelOption, byok::parse_minutes, instructions,
+    minutes_json_schema,
 };
 
 /// A piece of user input for a Codex turn (subset of the protocol's `UserInput`).
@@ -47,17 +48,80 @@ pub fn initialize_params(version: &str) -> Value {
 
 /// `thread/start` params for a side-effect-free minutes thread.
 ///
-/// Params: `developer_instructions` – system-style guidance for minutes writing.
+/// Params: `developer_instructions` – system-style guidance for minutes writing; `model` –
+/// a `model/list` id, or `None` for Codex's configured default.
 /// Returns: params that keep the thread ephemeral, read-only and approval-free.
-pub fn thread_start_params(developer_instructions: &str) -> Value {
-    json!({
+pub fn thread_start_params(developer_instructions: &str, model: Option<&str>) -> Value {
+    let mut params = json!({
         "ephemeral": true,
         // Minutes generation never needs to touch the filesystem or run commands.
         "sandbox": "read-only",
         "approvalPolicy": "never",
         "developerInstructions": developer_instructions,
         "serviceName": "meeting-master"
-    })
+    });
+    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        params["model"] = json!(m);
+    }
+    params
+}
+
+/// `model/list` params for one page.
+///
+/// Params: `cursor` – `nextCursor` of the previous page.
+/// Returns: params that leave hidden models out, as Codex's own picker does.
+pub fn model_list_params(cursor: Option<&str>) -> Value {
+    let mut params = json!({"includeHidden": false});
+    if let Some(c) = cursor {
+        params["cursor"] = json!(c);
+    }
+    params
+}
+
+/// Reads one `model/list` page.
+///
+/// Params: `resp` – the response.
+/// Returns: the visible models and the next cursor.
+pub fn parse_model_page(resp: &Value) -> (Vec<ModelOption>, Option<String>) {
+    let models = resp["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["hidden"] != true)
+        .filter_map(|m| {
+            let id = m["model"]
+                .as_str()
+                .or_else(|| m["id"].as_str())?
+                .to_string();
+            Some(ModelOption {
+                label: m["displayName"].as_str().unwrap_or(&id).to_string(),
+                is_default: m["isDefault"] == true,
+                id,
+            })
+        })
+        .collect();
+    (models, resp["nextCursor"].as_str().map(String::from))
+}
+
+/// Lists the models the signed-in account may use.
+///
+/// Params: `codex` – executable path.
+/// Returns: the models in Codex's order.
+pub fn list_models(codex: &Path) -> Result<Vec<ModelOption>, LlmError> {
+    let server = AppServer::start(codex)?;
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    // A bounded loop: a server that keeps returning cursors must not hang settings.
+    for _ in 0..20 {
+        let resp = server.call("model/list", model_list_params(cursor.as_deref()))?;
+        let (page, next) = parse_model_page(&resp);
+        out.extend(page);
+        match next {
+            Some(n) if Some(&n) != cursor.as_ref() => cursor = Some(n),
+            _ => break,
+        }
+    }
+    Ok(out)
 }
 
 /// `turn/start` params.
@@ -222,18 +286,20 @@ fn collect_turn(
 
 /// Generates minutes through the user's signed-in Codex (ChatGPT account).
 ///
-/// Params: `codex` – executable; `input` – meeting material; `timeout` – overall limit.
+/// Params: `codex` – executable; `input` – meeting material; `model` – `model/list` id, or
+/// `None` for Codex's default; `timeout` – overall limit.
 /// Returns: parsed minutes.
 pub fn generate(
     codex: &Path,
     input: &MinutesInput,
+    model: Option<&str>,
     timeout: Duration,
 ) -> Result<Minutes, LlmError> {
     let deadline = Instant::now() + timeout;
     let server = AppServer::start(codex)?;
     let thread = server.call(
         "thread/start",
-        thread_start_params(&instructions(input.language.as_deref())),
+        thread_start_params(&instructions(input.language.as_deref()), model),
     )?;
     let thread_id = thread["thread"]["id"]
         .as_str()
@@ -321,6 +387,27 @@ mod tests {
         assert!(err.to_string().contains("quota"));
     }
 
+    #[test]
+    fn model_pages_skip_hidden_models() {
+        let resp = json!({
+            "data": [
+                {"id": "gpt-6.1-sol", "model": "gpt-6.1-sol", "displayName": "GPT-6.1-Sol", "isDefault": true, "hidden": false},
+                {"id": "x", "model": "x-internal", "displayName": "X", "isDefault": false, "hidden": true},
+                {"id": "gpt-6-luna", "model": "gpt-6-luna", "displayName": "GPT-6-Luna", "isDefault": false, "hidden": false}
+            ],
+            "nextCursor": "c2"
+        });
+        let (models, next) = parse_model_page(&resp);
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["gpt-6.1-sol", "gpt-6-luna"]
+        );
+        assert!(models[0].is_default);
+        assert_eq!(models[1].label, "GPT-6-Luna");
+        assert_eq!(next.as_deref(), Some("c2"));
+        assert_eq!(parse_model_page(&json!({"data": []})).1, None);
+    }
+
     /// Guards against silent protocol drift: every field we send must exist in the vendored schema.
     #[test]
     fn requests_match_vendored_protocol_schema() {
@@ -344,7 +431,21 @@ mod tests {
             }
         };
         check("InitializeParams", &initialize_params("0.1.0"));
-        check("ThreadStartParams", &thread_start_params("Write minutes."));
+        check(
+            "ThreadStartParams",
+            &thread_start_params("Write minutes.", None),
+        );
+        let with_model = thread_start_params("Write minutes.", Some("gpt-6.1-terra"));
+        assert_eq!(with_model["model"], "gpt-6.1-terra");
+        check("ThreadStartParams", &with_model);
+        assert!(thread_start_params("w", Some(" ")).get("model").is_none());
+        check("ModelListParams", &model_list_params(Some("c1")));
+        for key in ["model", "displayName", "isDefault", "hidden", "id"] {
+            assert!(
+                defs["Model"]["properties"].get(key).is_some(),
+                "Model has no field `{key}`"
+            );
+        }
         let turn = turn_start_params(
             "thr_1",
             &[

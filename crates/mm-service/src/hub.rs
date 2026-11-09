@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use mm_i18n::{tr, trf};
 use mm_llm::keychain::{SystemKeychain, read_secret, write_secret};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
@@ -31,6 +32,10 @@ const KEYCHAIN_ACCOUNT: &str = "huggingface";
 /// Repo files that are Git plumbing, not part of the checkpoint.
 const SKIPPED_FILES: &[&str] = &[".gitattributes"];
 
+/// Written into a snapshot folder after its last file landed, so a later launch can tell a
+/// finished download from an interrupted one without asking the Hub.
+const COMPLETE_MARKER: &str = ".mm-download-complete";
+
 /// Bytes between progress callbacks, so the UI is not flooded on fast links.
 const PROGRESS_STEP: u64 = 1 << 20;
 
@@ -41,33 +46,81 @@ const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'_')
     .remove(b'~');
 
-/// Why a download stopped.
+/// Why a download stopped. `Display` follows the UI language (see the impl below).
 #[derive(Debug, thiserror::Error)]
 pub enum HubError {
-    #[error("无法识别的模型地址“{0}”，应形如 https://huggingface.co/作者/模型 或 作者/模型")]
     BadUrl(String),
-    #[error(
-        "没有权限下载 {repo}（HTTP {status}）：请在设置里填写 Hugging Face 令牌，并确认已在网页上同意该模型的使用条款"
-    )]
-    Unauthorized { repo: String, status: u16 },
-    #[error("找不到模型 {0}：请检查地址和版本")]
+    Unauthorized {
+        repo: String,
+        status: u16,
+    },
     NotFound(String),
-    #[error("下载 {url} 失败：{message}")]
-    Http { url: String, message: String },
-    #[error("写入 {path} 失败：{message}")]
-    Io { path: PathBuf, message: String },
-    #[error("{path} 大小不对：应为 {expected} 字节，实际 {actual} 字节")]
+    Http {
+        url: String,
+        message: String,
+    },
+    Io {
+        path: PathBuf,
+        message: String,
+    },
     SizeMismatch {
         path: PathBuf,
         expected: u64,
         actual: u64,
     },
-    #[error("模型文件名不安全：{0}")]
     UnsafePath(String),
-    #[error("钥匙串：{0}")]
     Keychain(String),
-    #[error("下载已取消")]
     Cancelled,
+}
+
+impl std::fmt::Display for HubError {
+    /// Writes the message in the current UI language; written by hand because
+    /// `#[error("…")]` cannot pick a language at runtime.
+    ///
+    /// Params: `f` – formatter.
+    /// Returns: the formatter's result.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            HubError::BadUrl(u) => trf!(
+                "无法识别的模型地址“{u}”，应形如 https://huggingface.co/作者/模型 或 作者/模型",
+                "Unrecognized model address “{u}”. Use https://huggingface.co/owner/model or owner/model"
+            ),
+            HubError::Unauthorized { repo, status } => trf!(
+                "没有权限下载 {repo}（HTTP {status}）：请在设置里填写 Hugging Face 令牌，并确认已在网页上同意该模型的使用条款",
+                "No permission to download {repo} (HTTP {status}). Add a Hugging Face token in Settings and accept the model's terms on its web page"
+            ),
+            HubError::NotFound(r) => trf!(
+                "找不到模型 {r}：请检查地址和版本",
+                "Model {r} not found. Check the address and revision"
+            ),
+            HubError::Http { url, message } => {
+                trf!(
+                    "下载 {url} 失败：{message}",
+                    "Couldn't download {url}: {message}"
+                )
+            }
+            HubError::Io { path, message } => trf!(
+                "写入 {} 失败：{message}",
+                "Couldn't write {}: {message}",
+                path.display()
+            ),
+            HubError::SizeMismatch {
+                path,
+                expected,
+                actual,
+            } => trf!(
+                "{} 大小不对：应为 {expected} 字节，实际 {actual} 字节",
+                "{} has the wrong size: expected {expected} bytes, got {actual} bytes",
+                path.display()
+            ),
+            HubError::UnsafePath(p) => {
+                trf!("模型文件名不安全：{p}", "Unsafe model file name: {p}")
+            }
+            HubError::Keychain(m) => trf!("钥匙串：{m}", "Keychain: {m}"),
+            HubError::Cancelled => tr!("下载已取消", "Download cancelled").to_string(),
+        };
+        f.write_str(&text)
+    }
 }
 
 /// One repo at one revision on one Hub endpoint.
@@ -271,7 +324,7 @@ fn list_files_with(
     let mut resp = get(agent, repo, &url, token, 0)?;
     let model: ApiModel = resp.body_mut().read_json().map_err(|e| HubError::Http {
         url: url.clone(),
-        message: format!("解析文件列表：{e}"),
+        message: trf!("解析文件列表：{e}", "parsing the file list: {e}"),
     })?;
     let files = model
         .siblings
@@ -485,6 +538,13 @@ pub fn download(
         rep.progress.files_done += 1;
         rep.add(0, true);
     }
+    let marker = dest.join(COMPLETE_MARKER);
+    std::fs::write(&marker, format!("{}@{}\n", repo.id, listing.sha)).map_err(|e| {
+        HubError::Io {
+            path: marker.clone(),
+            message: e.to_string(),
+        }
+    })?;
     tracing::info!(
         "downloaded {}@{} ({}) to {}",
         repo.id,
@@ -493,6 +553,65 @@ pub fn download(
         dest.display()
     );
     Ok(dest)
+}
+
+/// The `huggingface_hub` cache folder, following its environment variables.
+///
+/// Returns: `HF_HUB_CACHE`, else `HF_HOME/hub`, else `~/.cache/huggingface/hub`; `None`
+/// only when no home folder is known.
+pub fn hf_cache_dir() -> Option<PathBuf> {
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    env("HF_HUB_CACHE")
+        .or_else(|| env("HF_HOME").map(|h| h.join("hub")))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cache/huggingface/hub")))
+}
+
+/// Whether `dir` looks like a loadable checkpoint: a `config.json` and at least one
+/// `.safetensors` file, following symlinks (the Hub cache links snapshots to blobs).
+///
+/// Params: `dir` – candidate folder.
+/// Returns: `true` when both are present.
+fn has_checkpoint(dir: &Path) -> bool {
+    dir.join("config.json").is_file()
+        && std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                let p = e.path();
+                p.extension().is_some_and(|x| x == "safetensors") && p.is_file()
+            })
+        })
+}
+
+/// Finds an already-downloaded copy of `repo`, so the default model loads without network.
+///
+/// Looks first in the app's own models folder (only finished downloads count), then in the
+/// `huggingface_hub` cache, where `revision` resolves through `refs/<revision>` or names a
+/// snapshot commit directly.
+/// Params: `repo`; `models_root` – the app's models folder; `hf_cache` – the Hub cache
+/// folder, usually [`hf_cache_dir`].
+/// Returns: the snapshot folder, or `None` when the model still has to be downloaded.
+pub fn find_local_snapshot(
+    repo: &HubRepo,
+    models_root: &Path,
+    hf_cache: Option<&Path>,
+) -> Option<PathBuf> {
+    let own = models_root.join(repo.folder_name());
+    if own.join(COMPLETE_MARKER).is_file() && has_checkpoint(&own) {
+        return Some(own);
+    }
+    let entry = hf_cache?.join(format!("models--{}", repo.folder_name()));
+    let commit = std::fs::read_to_string(entry.join("refs").join(&repo.revision))
+        .map(|c| c.trim().to_string())
+        .unwrap_or_else(|_| repo.revision.clone());
+    // A ref name must not walk out of `snapshots/` (`refs/pr/1` has no snapshot of that name).
+    if commit.is_empty() || commit.contains('/') || commit.starts_with('.') {
+        return None;
+    }
+    let snap = entry.join("snapshots").join(commit);
+    has_checkpoint(&snap).then_some(snap)
 }
 
 /// Reads the Hugging Face token stored in the Keychain.
@@ -689,7 +808,13 @@ mod tests {
         let snap = root.path().join("o--m");
         // A partial left by an earlier, interrupted run.
         std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("config.json"), b"{}").unwrap();
         std::fs::write(snap.join("model.safetensors.part"), &weights[..1000]).unwrap();
+        assert_eq!(
+            find_local_snapshot(&repo, root.path(), None),
+            None,
+            "an interrupted download is not loadable"
+        );
 
         let mut last = Progress::default();
         let dest = download(
@@ -737,6 +862,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(seen.lock().unwrap().len(), 1);
+        assert_eq!(find_local_snapshot(&repo, root.path(), None), Some(snap));
+    }
+
+    #[test]
+    fn finds_snapshots_in_the_hugging_face_cache() {
+        let repo = HubRepo::parse("mlx-community/embeddinggemma-2-bf16").unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let entry = cache
+            .path()
+            .join("models--mlx-community--embeddinggemma-2-bf16");
+        let snap = entry.join("snapshots/abc123");
+        assert_eq!(
+            find_local_snapshot(&repo, models.path(), Some(cache.path())),
+            None
+        );
+
+        // huggingface_hub links finished blobs into the snapshot; a missing weight link
+        // means the download never finished.
+        std::fs::create_dir_all(entry.join("blobs")).unwrap();
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::create_dir_all(entry.join("refs")).unwrap();
+        std::fs::write(entry.join("refs/main"), "abc123\n").unwrap();
+        std::fs::write(entry.join("blobs/cfg"), b"{}").unwrap();
+        std::os::unix::fs::symlink("../../blobs/cfg", snap.join("config.json")).unwrap();
+        assert_eq!(
+            find_local_snapshot(&repo, models.path(), Some(cache.path())),
+            None
+        );
+        std::os::unix::fs::symlink("../../blobs/w", snap.join("model.safetensors")).unwrap();
+        assert_eq!(
+            find_local_snapshot(&repo, models.path(), Some(cache.path())),
+            None,
+            "a dangling weight link is not a checkpoint"
+        );
+        std::fs::write(entry.join("blobs/w"), b"weights").unwrap();
+        assert_eq!(
+            find_local_snapshot(&repo, models.path(), Some(cache.path())),
+            Some(snap.clone())
+        );
+
+        // A pinned commit resolves without a ref; an unknown revision finds nothing.
+        let pinned = HubRepo::parse(
+            "https://huggingface.co/mlx-community/embeddinggemma-2-bf16/tree/abc123",
+        )
+        .unwrap();
+        assert_eq!(
+            find_local_snapshot(&pinned, models.path(), Some(cache.path())),
+            Some(snap)
+        );
+        let other =
+            HubRepo::parse("https://huggingface.co/mlx-community/embeddinggemma-2-bf16/tree/v2")
+                .unwrap();
+        assert_eq!(
+            find_local_snapshot(&other, models.path(), Some(cache.path())),
+            None
+        );
     }
 
     #[test]
@@ -758,6 +940,12 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, HubError::Unauthorized { status: 401, .. }));
         assert!(err.to_string().contains("令牌"));
+        let en = mm_i18n::with_lang(mm_i18n::Lang::En, || err.to_string());
+        assert!(en.starts_with("No permission to download "), "{en}");
+        assert!(
+            en.contains("(HTTP 401)") && en.contains("Hugging Face token"),
+            "{en}"
+        );
 
         let missing = HubRepo::parse(&format!("{base}/o/missing")).unwrap();
         assert!(matches!(

@@ -22,6 +22,10 @@ pub struct CaptionPartial {
     pub start_ms: u64,
     pub text: String,
     pub speaker: SpeakerLabel,
+    /// Leading Unicode scalars (`char`s) of `text` the engine will keep in the next partial;
+    /// the rest may still be rewritten. Older engines omit it (0).
+    #[serde(default)]
+    pub stable_chars: usize,
 }
 
 /// `caption/final`: stable text; retires the partial with the same `utterance_id`.
@@ -220,14 +224,23 @@ pub struct PermissionStatus {
 }
 
 impl PermissionStatus {
-    /// Permissions not granted yet, as `(kind, Chinese label)` for the settings page.
+    /// Permissions not granted yet, as `(kind, label)` for the settings page.
     ///
-    /// Returns: missing permissions in a fixed order.
+    /// Returns: missing permissions in a fixed order; `kind` is the protocol key, `label`
+    /// is in the current UI language.
     pub fn missing(&self) -> Vec<(&'static str, &'static str)> {
         [
-            ("screenCapture", "屏幕与系统录音", &self.screen_capture),
-            ("microphone", "麦克风", &self.microphone),
-            ("calendar", "日历", &self.calendar),
+            (
+                "screenCapture",
+                mm_i18n::tr!("屏幕与系统录音", "Screen & System Audio Recording"),
+                &self.screen_capture,
+            ),
+            (
+                "microphone",
+                mm_i18n::tr!("麦克风", "Microphone"),
+                &self.microphone,
+            ),
+            ("calendar", mm_i18n::tr!("日历", "Calendar"), &self.calendar),
         ]
         .into_iter()
         .filter(|(_, _, v)| v.as_str() != "granted")
@@ -247,6 +260,13 @@ mod tests {
         )
         .expect("decode caption/partial");
         assert_eq!(partial.speaker, SpeakerLabel::Cluster { index: 1 });
+        // Engines before prefix-rollback partials omit `stableChars`.
+        assert_eq!(partial.stable_chars, 0);
+        let partial: CaptionPartial = serde_json::from_str(
+            r#"{"sessionId":"s","utteranceId":3,"origin":"microphone","startMs":1200,"text":"大家好","speaker":{"kind":"unknown"},"stableChars":2}"#,
+        )
+        .expect("decode caption/partial with stableChars");
+        assert_eq!(partial.stable_chars, 2);
 
         let fin: CaptionFinal = serde_json::from_str(
             r#"{"sessionId":"s","utteranceId":3,"origin":"system","startMs":1200,"endMs":2400,"text":"大家好","language":"zh",
@@ -293,6 +313,15 @@ mod tests {
             p.missing(),
             vec![("screenCapture", "屏幕与系统录音"), ("calendar", "日历")]
         );
+        mm_i18n::with_lang(mm_i18n::Lang::En, || {
+            assert_eq!(
+                p.missing(),
+                vec![
+                    ("screenCapture", "Screen & System Audio Recording"),
+                    ("calendar", "Calendar")
+                ]
+            );
+        });
     }
 
     #[test]

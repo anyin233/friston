@@ -10,6 +10,7 @@ use mm_core::{
 };
 use mm_engine::methods::{common, embed, meeting};
 use mm_engine::{EngineClient, EngineEvent, RpcError};
+use mm_i18n::trf;
 use mm_index::pipeline::{EmbedItem, Embedder};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -79,9 +80,19 @@ fn decode<T: DeserializeOwned>(method: &str, value: Value) -> Result<T, ServiceE
 /// Maps an RPC error, keeping the permission codes distinguishable for the UI.
 fn rpc(method: &str, e: RpcError) -> ServiceError {
     match e.code {
-        -32010 => ServiceError::Permission(format!("屏幕录制权限：{}", e.message)),
-        -32011 => ServiceError::Permission(format!("日历权限：{}", e.message)),
-        -32012 => ServiceError::Permission(format!("麦克风权限：{}", e.message)),
+        -32010 => ServiceError::Permission(trf!(
+            "屏幕录制权限：{}",
+            "Screen recording permission: {}",
+            e.message
+        )),
+        -32011 => {
+            ServiceError::Permission(trf!("日历权限：{}", "Calendar permission: {}", e.message))
+        }
+        -32012 => ServiceError::Permission(trf!(
+            "麦克风权限：{}",
+            "Microphone permission: {}",
+            e.message
+        )),
         _ => ServiceError::Engine(format!("{method}: {}", e.message)),
     }
 }
@@ -150,6 +161,16 @@ pub fn refine_params(path: &Path, req: &RefineRequest) -> Value {
         }
     }
     params
+}
+
+/// `models/preload` result: the live caption models now resident in `mm-meetingd`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct SpeechModelsStatus {
+    /// Role (`liveASR`, `vad`, `speakerEmbedding`, `liveDiarization`, `draft`) → model id.
+    pub models: std::collections::BTreeMap<String, String>,
+    /// Optional roles that failed to load; captions still run without them.
+    #[serde(default)]
+    pub unavailable: Vec<String>,
 }
 
 /// Typed client for `mm-meetingd`. Every call blocks; run it off the UI thread.
@@ -303,6 +324,22 @@ impl MeetingEngine {
         req: &RefineRequest,
     ) -> Result<FileTranscript, ServiceError> {
         self.call(meeting::TRANSCRIBE_FILE, refine_params(path, req))
+    }
+
+    /// Loads the live caption models ahead of the first recording (`models/preload`).
+    ///
+    /// Params: `language` – caption language hint; the Mandarin draft model loads only for `zh`.
+    /// Returns: the loaded model ids and the optional roles that failed. Blocks until loaded,
+    /// which takes minutes on a first run that downloads the models.
+    pub fn preload_models(
+        &self,
+        language: Option<&str>,
+    ) -> Result<SpeechModelsStatus, ServiceError> {
+        let params = match language {
+            Some(l) => json!({"language": l}),
+            None => json!({}),
+        };
+        self.call(meeting::MODELS_PRELOAD, params)
     }
 
     /// Asks the engine to finish recordings and exit.
@@ -492,6 +529,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preload_result_decodes() {
+        let s: SpeechModelsStatus = decode(
+            "models/preload",
+            json!({"models":{"liveASR":"mlx-community/Qwen3-ASR-1.7B-4bit","vad":"v"},"unavailable":["draft"]}),
+        )
+        .unwrap();
+        assert_eq!(s.models["liveASR"], "mlx-community/Qwen3-ASR-1.7B-4bit");
+        assert_eq!(s.unavailable, vec!["draft".to_string()]);
+        let bare: SpeechModelsStatus =
+            decode("models/preload", json!({"models":{"liveASR":"a"}})).unwrap();
+        assert!(
+            bare.unavailable.is_empty(),
+            "older engines omit `unavailable`"
+        );
+    }
+
+    #[test]
     fn notices_decode_by_method() {
         let n = decode_notice(
             "caption/final",
@@ -560,6 +614,17 @@ mod tests {
             },
         );
         assert!(matches!(e, ServiceError::Permission(m) if m.contains("麦克风")));
+        let en = mm_i18n::with_lang(mm_i18n::Lang::En, || {
+            rpc(
+                "capture/start",
+                RpcError {
+                    code: -32012,
+                    message: "denied".into(),
+                    data: None,
+                },
+            )
+        });
+        assert!(matches!(en, ServiceError::Permission(m) if m == "Microphone permission: denied"));
     }
 
     #[test]

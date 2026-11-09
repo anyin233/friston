@@ -1,5 +1,7 @@
 //! Renders [`Minutes`] into the note's managed blocks.
 
+use mm_i18n::{tr, trf};
+
 use crate::Minutes;
 
 /// Markdown for the `minutes` and `actions` managed blocks.
@@ -24,9 +26,11 @@ fn clock(ms: u64) -> String {
 ///
 /// Params: `m` – minutes; `seek` – builds a link for a transcript offset (e.g. a
 /// `friston://` URL), or `None` to print plain timestamps.
+/// Section headings follow the UI language (they belong to the note's layout), while the
+/// minutes text itself is in whatever `minutes_language` the provider was asked for.
 /// Returns: the two block bodies.
 pub fn render_minutes(m: &Minutes, seek: Option<&dyn Fn(u64) -> String>) -> RenderedMinutes {
-    let mut minutes = format!("### 摘要\n\n{}\n", m.summary.trim());
+    let mut minutes = trf!("### 摘要\n\n{}\n", "### Summary\n\n{}\n", m.summary.trim());
     let list = |title: &str, items: &[String]| -> String {
         if items.is_empty() {
             return String::new();
@@ -34,11 +38,11 @@ pub fn render_minutes(m: &Minutes, seek: Option<&dyn Fn(u64) -> String>) -> Rend
         let body: Vec<String> = items.iter().map(|i| format!("- {}", i.trim())).collect();
         format!("\n### {title}\n\n{}\n", body.join("\n"))
     };
-    minutes.push_str(&list("决定", &m.decisions));
-    minutes.push_str(&list("待讨论", &m.open_questions));
+    minutes.push_str(&list(tr!("决定", "Decisions"), &m.decisions));
+    minutes.push_str(&list(tr!("待讨论", "Open questions"), &m.open_questions));
     if !m.topics.is_empty() {
         let tags: Vec<String> = m.topics.iter().map(|t| format!("`{}`", t.trim())).collect();
-        minutes.push_str(&format!("\n主题：{}\n", tags.join(" ")));
+        minutes.push_str(&trf!("\n主题：{}\n", "\nTopics: {}\n", tags.join(" ")));
     }
 
     let actions: Vec<String> = m
@@ -64,7 +68,7 @@ pub fn render_minutes(m: &Minutes, seek: Option<&dyn Fn(u64) -> String>) -> Rend
     RenderedMinutes {
         minutes,
         actions: if actions.is_empty() {
-            "_没有待办_".into()
+            tr!("_没有待办_", "_No action items_").into()
         } else {
             actions.join("\n")
         },
@@ -107,5 +111,27 @@ mod tests {
             r.actions,
             "- [ ] 更新预算表 · [[赵磊]] · 📅 周五 · [01:01](mm://seek?t=61000)\n- [ ] 约下次会议"
         );
+    }
+
+    #[test]
+    fn headings_follow_the_ui_language() {
+        use mm_i18n::{Lang, with_lang};
+        let m = Minutes {
+            title: "Weekly".into(),
+            summary: "Budget up.".into(),
+            decisions: vec!["Raise budget".into()],
+            action_items: vec![],
+            open_questions: vec!["Who owns it?".into()],
+            topics: vec!["budget".into()],
+        };
+        let en = with_lang(Lang::En, || render_minutes(&m, None));
+        assert_eq!(
+            en.minutes,
+            "### Summary\n\nBudget up.\n\n### Decisions\n\n- Raise budget\n\n### Open questions\n\n- Who owns it?\n\nTopics: `budget`\n"
+        );
+        assert_eq!(en.actions, "_No action items_");
+        let zh = with_lang(Lang::Zh, || render_minutes(&m, None));
+        assert!(zh.minutes.starts_with("### 摘要\n") && zh.minutes.contains("\n主题：`budget`\n"));
+        assert_eq!(zh.actions, "_没有待办_");
     }
 }

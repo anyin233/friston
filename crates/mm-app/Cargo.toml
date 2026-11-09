@@ -12,6 +12,7 @@ name = "meeting-master"
 path = "src/main.rs"
 
 [dependencies]
+mm-i18n.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

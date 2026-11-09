@@ -1,6 +1,7 @@
 //! Live check of the Antigravity post-meeting pass. Ignored by default because it uploads
 //! audio with the user's Google account. Synthesises a short two-voice meeting with `say`,
-//! then runs prepare → agy transcription → speaker mapping → agy minutes:
+//! then runs prepare → agy transcription → speaker mapping → agy minutes, and separately the
+//! merged route where one agy run returns both:
 //!
 //! `cargo test -p mm-service --test antigravity_live -- --ignored --nocapture`
 //!
@@ -27,16 +28,16 @@ fn say(voice: &str, text: &str, out: &std::path::Path) {
     assert!(ok, "say -v {voice} failed");
 }
 
-#[test]
-#[ignore = "uploads audio through the signed-in Antigravity CLI"]
-fn antigravity_hears_a_meeting_and_writes_minutes() {
-    let agy = antigravity::find_agy().expect("agy not found");
-    let dir = tempfile::tempdir().unwrap();
-    let mic = match std::env::var_os("MM_AGY_RECORDING") {
+/// The test recording: `MM_AGY_RECORDING`, or two synthesised voices in `dir`.
+///
+/// Params: `dir` – scratch folder.
+/// Returns: the microphone recording path.
+fn test_recording(dir: &std::path::Path) -> PathBuf {
+    match std::env::var_os("MM_AGY_RECORDING") {
         Some(p) => PathBuf::from(p),
         None => {
-            let a = dir.path().join("a.wav");
-            let b = dir.path().join("b.wav");
+            let a = dir.join("a.wav");
+            let b = dir.join("b.wav");
             say("Tingting", "今天讨论退款接口联调，赵磊周五之前完成。", &a);
             say(
                 "Eddy (Chinese (China mainland))",
@@ -46,11 +47,63 @@ fn antigravity_hears_a_meeting_and_writes_minutes() {
             let (_, mut s) = external::read_wav_mono16(&a).unwrap();
             s.extend(vec![0i16; 8000]);
             s.extend(external::read_wav_mono16(&b).unwrap().1);
-            let out = dir.path().join("mic.wav");
+            let out = dir.join("mic.wav");
             external::write_wav_mono16(&out, 16_000, &s).unwrap();
             out
         }
+    }
+}
+
+/// One agy run hears the meeting and writes the minutes (the merged refine route).
+#[test]
+#[ignore = "uploads audio through the signed-in Antigravity CLI"]
+fn antigravity_transcribes_and_writes_minutes_in_one_run() {
+    let agy = antigravity::find_agy().expect("agy not found");
+    let dir = tempfile::tempdir().unwrap();
+    let mic = test_recording(dir.path());
+    let chunks =
+        external::prepare_recordings(&[(AudioOrigin::Microphone, mic)], &dir.path().join("work"))
+            .unwrap();
+    assert_eq!(
+        chunks.len(),
+        1,
+        "the merged route needs a one-part recording"
+    );
+    let input = MinutesInput {
+        title: "退款接口联调".into(),
+        when: "2026-11-09 14:00".into(),
+        attendees: vec!["赵磊".into()],
+        language: Some("zh".into()),
+        ..Default::default()
     };
+    let (heard, minutes) = antigravity::transcribe_with_minutes(
+        &agy,
+        &chunks[0].dir,
+        &chunks[0].tracks,
+        Some("参会人：赵磊"),
+        Some("zh"),
+        &input,
+        DEFAULT_MODEL,
+        Duration::from_secs(900),
+    )
+    .expect("agy combined run");
+    println!("{heard:#?}");
+    let minutes = minutes.expect("minutes in the combined output");
+    println!("{minutes:#?}");
+    assert!(!heard.lines.is_empty());
+    assert!(!minutes.summary.is_empty());
+    if std::env::var_os("MM_AGY_RECORDING").is_none() {
+        let all: String = heard.lines.iter().map(|l| l.text.as_str()).collect();
+        assert!(all.contains("赵磊"), "{all}");
+    }
+}
+
+#[test]
+#[ignore = "uploads audio through the signed-in Antigravity CLI"]
+fn antigravity_hears_a_meeting_and_writes_minutes() {
+    let agy = antigravity::find_agy().expect("agy not found");
+    let dir = tempfile::tempdir().unwrap();
+    let mic = test_recording(dir.path());
     // A silent system track must be dropped, never sent.
     let silent = dir.path().join("system.wav");
     external::write_wav_mono16(&silent, 16_000, &vec![0; 16_000]).unwrap();

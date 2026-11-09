@@ -1,6 +1,7 @@
 //! Top-level navigation destinations. Layouts follow `design/mockups/index.html`.
 
 use gpui_kit::component::IconName;
+use mm_i18n::tr;
 
 pub mod library;
 pub mod live;
@@ -42,12 +43,12 @@ impl Page {
     /// Returns: the label text.
     pub fn label(self) -> &'static str {
         match self {
-            Page::Today => "今天",
-            Page::Schedule => "日程",
-            Page::Live => "会议中",
-            Page::Library => "纪要库",
-            Page::People => "说话人",
-            Page::Settings => "设置",
+            Page::Today => tr!("今天", "Today"),
+            Page::Schedule => tr!("日程", "Schedule"),
+            Page::Live => tr!("会议中", "Live"),
+            Page::Library => tr!("纪要库", "Library"),
+            Page::People => tr!("说话人", "Speakers"),
+            Page::Settings => tr!("设置", "Settings"),
         }
     }
 

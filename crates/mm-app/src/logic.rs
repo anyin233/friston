@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
 use mm_core::{CalendarEvent, MeetingStatus, SpeakerLabel};
-use mm_llm::{ByokProvider, Minutes, ProviderConfig};
+use mm_i18n::{tr, trf};
+use mm_llm::{ByokProvider, Minutes, MinutesBackend, ModelOption, ProviderChoice, ProviderConfig};
 use mm_service::AppConfig;
 use mm_service::live::CaptionLine;
 
@@ -28,18 +29,27 @@ pub fn timestamp_token(elapsed_ms: u64) -> String {
     format!("[{}] ", clock(elapsed_ms))
 }
 
-/// Chinese label for a meeting status (tags in lists).
+/// Label for a meeting status (tags in lists), in the interface language.
 ///
 /// Params: `s` – status.
 /// Returns: the label.
 pub fn status_label(s: MeetingStatus) -> &'static str {
     match s {
-        MeetingStatus::Scheduled => "未开始",
-        MeetingStatus::Live => "记录中",
-        MeetingStatus::Processing => "整理中",
-        MeetingStatus::Done => "纪要已生成",
-        MeetingStatus::Cancelled => "已取消",
+        MeetingStatus::Scheduled => tr!("未开始", "Not started"),
+        MeetingStatus::Live => tr!("记录中", "Recording"),
+        MeetingStatus::Processing => tr!("整理中", "Processing"),
+        MeetingStatus::Done => tr!("纪要已生成", "Minutes ready"),
+        MeetingStatus::Cancelled => tr!("已取消", "Cancelled"),
     }
+}
+
+/// English count with the noun in the right number, e.g. `1 meeting`, `3 meetings`.
+///
+/// Chinese needs no plural, so callers use this only in the English arm of `trf!`.
+/// Params: `n` – the count; `one` – singular noun; `many` – plural noun.
+/// Returns: e.g. `3 meetings`.
+pub fn count_en(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// Maps a dBFS level to a meter fill fraction; −60 dB and below is silent.
@@ -126,41 +136,48 @@ pub fn group_by_day(events: &[CalendarEvent]) -> Vec<(NaiveDate, Vec<CalendarEve
     map.into_iter().collect()
 }
 
-/// Day heading such as `11月5日 周四`, with 今天/明天 when applicable.
+/// Day heading such as `11月5日 周四` / `Thu, Nov 5`, with 今天/明天 (Today/Tomorrow)
+/// when applicable.
 ///
 /// Params: `day` – the day; `today` – the current local day.
 /// Returns: the heading.
 pub fn day_heading(day: NaiveDate, today: NaiveDate) -> String {
     const WEEK: [&str; 7] = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-    let base = format!(
-        "{}月{}日 {}",
-        day.month(),
-        day.day(),
-        WEEK[day.weekday().num_days_from_monday() as usize]
-    );
+    let base = match mm_i18n::current() {
+        mm_i18n::Lang::Zh => format!(
+            "{}月{}日 {}",
+            day.month(),
+            day.day(),
+            WEEK[day.weekday().num_days_from_monday() as usize]
+        ),
+        // chrono's `%a`/`%b` are always English without its locale feature, which is
+        // exactly what this arm needs.
+        mm_i18n::Lang::En => day.format("%a, %b %-d").to_string(),
+    };
     match (day - today).num_days() {
-        0 => format!("今天 · {base}"),
-        1 => format!("明天 · {base}"),
+        0 => trf!("今天 · {base}", "Today · {base}"),
+        1 => trf!("明天 · {base}", "Tomorrow · {base}"),
         _ => base,
     }
 }
 
-/// Relative description of an event's timing, e.g. `8 分钟后`, `进行中`, `已结束`.
+/// Relative description of an event's timing, e.g. `8 分钟后` / `In 8 min`, `进行中`,
+/// `已结束`.
 ///
 /// Params: `now`; `start`; `end`.
 /// Returns: the text.
 pub fn relative_start(now: DateTime<Utc>, start: DateTime<Utc>, end: DateTime<Utc>) -> String {
     if now >= end {
-        return "已结束".into();
+        return tr!("已结束", "Ended").into();
     }
     if now >= start {
-        return "进行中".into();
+        return tr!("进行中", "In progress").into();
     }
     let mins = (start - now).num_minutes();
     match mins {
-        0 => "马上开始".into(),
-        1..=59 => format!("{mins} 分钟后"),
-        _ => format!("{} 小时 {} 分钟后", mins / 60, mins % 60),
+        0 => tr!("马上开始", "Starting now").into(),
+        1..=59 => trf!("{mins} 分钟后", "In {mins} min"),
+        _ => trf!("{} 小时 {} 分钟后", "In {} h {} min", mins / 60, mins % 60),
     }
 }
 
@@ -176,13 +193,16 @@ pub fn time_span(start: DateTime<Utc>, end: DateTime<Utc>) -> String {
     )
 }
 
-/// Short local date-time for meeting lists (`11月5日 14:00`).
+/// Short local date-time for meeting lists (`11月5日 14:00` / `Nov 5, 14:00`).
 ///
 /// Params: `t` – time.
 /// Returns: the text.
 pub fn short_datetime(t: DateTime<Utc>) -> String {
     let l = t.with_timezone(&Local);
-    format!("{}月{}日 {}", l.month(), l.day(), l.format("%H:%M"))
+    match mm_i18n::current() {
+        mm_i18n::Lang::Zh => format!("{}月{}日 {}", l.month(), l.day(), l.format("%H:%M")),
+        mm_i18n::Lang::En => l.format("%b %-d, %H:%M").to_string(),
+    }
 }
 
 /// Events that have not ended yet, soonest first.
@@ -193,6 +213,27 @@ pub fn upcoming(events: &[CalendarEvent], now: DateTime<Utc>) -> Vec<CalendarEve
     let mut out: Vec<_> = events.iter().filter(|e| e.end > now).cloned().collect();
     out.sort_by_key(|e| e.start);
     out
+}
+
+/// How early the sidebar offers to record a calendar meeting before it starts.
+pub const RECORD_EVENT_LEAD: Duration = Duration::minutes(10);
+
+/// The calendar meeting the sidebar offers to record: one that is running now or starts
+/// within [`RECORD_EVENT_LEAD`].
+///
+/// All-day and multi-day entries (24 h or longer) are skipped, since they are not meetings
+/// you sit in. With back-to-back meetings the one whose start is closest to `now` wins, so
+/// a meeting about to begin beats one that is ending.
+///
+/// Params: `events`; `now`.
+/// Returns: the event to offer, if any.
+pub fn recordable_event(events: &[CalendarEvent], now: DateTime<Utc>) -> Option<CalendarEvent> {
+    events
+        .iter()
+        .filter(|e| e.end > now && e.start <= now + RECORD_EVENT_LEAD)
+        .filter(|e| e.end - e.start < Duration::hours(24))
+        .min_by_key(|e| (e.start - now).num_seconds().abs())
+        .cloned()
 }
 
 /// Parses stored minutes JSON.
@@ -253,51 +294,140 @@ pub fn locator_ms(locator: &serde_json::Value) -> Option<u64> {
     locator.get("start_ms").and_then(|v| v.as_u64())
 }
 
-/// Chinese label for a search modality.
+/// Label for a search modality, in the interface language.
 ///
 /// Params: `m` – `text`, `image`, `audio` or `video`.
 /// Returns: the label.
 pub fn modality_label(m: &str) -> &'static str {
     match m {
-        "image" => "图片",
-        "audio" => "音频",
-        "video" => "视频",
-        _ => "文字",
+        "image" => tr!("图片", "Image"),
+        "audio" => tr!("音频", "Audio"),
+        "video" => tr!("视频", "Video"),
+        _ => tr!("文字", "Text"),
     }
 }
 
 /// Builds the provider policy input from settings and the detected environment.
 ///
 /// Params: `cfg`; `key_present` – Keychain has the BYOK key; `codex` – signed-in codex path;
-/// `local_model` – loaded local LLM folder.
+/// `agy` – Antigravity CLI path; `local_model` – loaded local LLM folder.
 /// Returns: the provider config.
 pub fn provider_config(
     cfg: &AppConfig,
     key_present: bool,
     codex: Option<String>,
+    agy: Option<String>,
     local_model: Option<String>,
 ) -> ProviderConfig {
     ProviderConfig {
+        backend: cfg.minutes_backend,
         byok: cfg.byok.clone(),
         byok_key_present: cfg.byok.is_some() && key_present,
-        codex_signed_in: if cfg.use_codex { codex } else { None },
+        codex_signed_in: codex,
+        codex_in_auto: cfg.use_codex,
+        codex_model: cfg.codex_model.clone(),
+        agy,
+        antigravity_model: cfg.antigravity_minutes_model.clone(),
         local_model,
     }
 }
 
-/// BYOK provider kinds offered in settings (`""` = none).
-pub const BYOK_KINDS: [(&str, &str); 5] = [
-    ("", "不使用"),
-    ("openai", "OpenAI"),
-    ("anthropic", "Anthropic"),
-    ("gemini", "Gemini"),
-    ("openai_compatible", "OpenAI 兼容"),
-];
+/// Names a minutes provider for progress messages and notices.
+///
+/// Params: `choice`.
+/// Returns: e.g. "Codex（ChatGPT · gpt-6.1-terra）", in the current UI language.
+pub fn provider_label(choice: &ProviderChoice) -> String {
+    match choice {
+        ProviderChoice::Byok(p) => {
+            trf!(
+                "API 密钥（{}）",
+                "API key ({})",
+                mm_llm::byok::keychain_account(p)
+            )
+        }
+        ProviderChoice::Codex { model: None, .. } => {
+            tr!("Codex（ChatGPT）", "Codex (ChatGPT)").to_string()
+        }
+        ProviderChoice::Codex { model: Some(m), .. } => {
+            trf!("Codex（ChatGPT · {m}）", "Codex (ChatGPT · {m})")
+        }
+        ProviderChoice::Antigravity { model, .. } => {
+            let label = mm_llm::antigravity::model_label(model);
+            trf!("Antigravity（{label}）", "Antigravity ({label})")
+        }
+        ProviderChoice::LocalMlx { .. } => tr!("本地模型", "Local model").to_string(),
+    }
+}
+
+/// Options for a model picker.
+///
+/// Params: `listed` – what the CLI reported, or `None` before it answered; `fallback` – shown
+/// while `listed` is `None`; `keep` – which ids to offer; `saved` – the configured id, kept
+/// even when the CLI no longer lists it so the picker never shows a blank selection;
+/// `default_entry` – label of an extra "use the CLI's default" entry with the value `""`.
+/// Returns: `(id, label)` pairs in display order.
+pub fn model_choices(
+    listed: Option<&[ModelOption]>,
+    fallback: &[(&str, &str)],
+    keep: fn(&str) -> bool,
+    saved: &str,
+    default_entry: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = default_entry
+        .map(|l| (String::new(), l.to_string()))
+        .into_iter()
+        .collect();
+    match listed {
+        Some(models) => out.extend(
+            models
+                .iter()
+                .filter(|m| keep(&m.id))
+                .map(|m| (m.id.clone(), m.label.clone())),
+        ),
+        None => out.extend(
+            fallback
+                .iter()
+                .filter(|(id, _)| keep(id))
+                .map(|(id, l)| (id.to_string(), l.to_string())),
+        ),
+    }
+    if !saved.is_empty() && !out.iter().any(|(id, _)| id == saved) {
+        out.push((saved.to_string(), saved.to_string()));
+    }
+    out
+}
+
+/// Names a minutes backend in settings and notices.
+///
+/// Params: `b`.
+/// Returns: the label in the current UI language.
+pub fn minutes_backend_label(b: MinutesBackend) -> &'static str {
+    match b {
+        MinutesBackend::Auto => tr!("自动", "Automatic"),
+        MinutesBackend::ApiKey => tr!("API 密钥", "API key"),
+        MinutesBackend::Codex => "Codex",
+        MinutesBackend::Antigravity => "Antigravity",
+    }
+}
+
+/// BYOK provider kinds offered in settings (`""` = none). A function rather than a
+/// `const` because the labels follow the interface language.
+///
+/// Returns: `(kind, label)` pairs in display order.
+pub fn byok_kinds() -> [(&'static str, &'static str); 5] {
+    [
+        ("", tr!("不使用", "None")),
+        ("openai", "OpenAI"),
+        ("anthropic", "Anthropic"),
+        ("gemini", "Gemini"),
+        ("openai_compatible", tr!("OpenAI 兼容", "OpenAI compatible")),
+    ]
+}
 
 /// Builds a provider from the settings form.
 ///
-/// Params: `kind` – one of [`BYOK_KINDS`]; `model`; `base_url` – compatible endpoints only.
-/// Returns: the provider, or `None` for "不使用" or an empty model.
+/// Params: `kind` – one of [`byok_kinds`]; `model`; `base_url` – compatible endpoints only.
+/// Returns: the provider, or `None` for "不使用" (none) or an empty model.
 pub fn byok_from_form(kind: &str, model: &str, base_url: &str) -> Option<ByokProvider> {
     let model = model.trim().to_string();
     if model.is_empty() {
@@ -418,14 +548,14 @@ pub const DIRECTION_CENTRE_BAND: f32 = 0.33;
 /// Direction label for a speaker's average left-right coordinate.
 ///
 /// Params: `x` – average `spatial/cue` `position[0]`, about −1 (left) … 1 (right).
-/// Returns: `偏左`, `居中` or `偏右`.
+/// Returns: `偏左`, `居中` or `偏右` (`Left`, `Center`, `Right` in English).
 pub fn direction_label(x: f32) -> &'static str {
     if x < -DIRECTION_CENTRE_BAND {
-        "偏左"
+        tr!("偏左", "Left")
     } else if x > DIRECTION_CENTRE_BAND {
-        "偏右"
+        tr!("偏右", "Right")
     } else {
-        "居中"
+        tr!("居中", "Center")
     }
 }
 
@@ -450,7 +580,8 @@ pub fn seat_point(x: f32) -> (f32, f32) {
 /// Parses the optional "麦克风间距（厘米）" field.
 ///
 /// Params: `s` – field text; blank clears the value.
-/// Returns: `Ok(None)` for blank, `Ok(Some(cm))` for 1–500 cm, `Err` with a Chinese message otherwise.
+/// Returns: `Ok(None)` for blank, `Ok(Some(cm))` for 1–500 cm, `Err` with a message in the
+/// interface language otherwise.
 pub fn parse_spacing_cm(s: &str) -> Result<Option<f64>, String> {
     let t = s
         .trim()
@@ -463,8 +594,9 @@ pub fn parse_spacing_cm(s: &str) -> Result<Option<f64>, String> {
     match t.parse::<f64>() {
         // Narrower than a capsule pair or wider than a room is a typo, not a microphone.
         Ok(cm) if cm.is_finite() && (1.0..=500.0).contains(&cm) => Ok(Some(cm)),
-        _ => Err(format!(
+        _ => Err(trf!(
             "麦克风间距要填 1 到 500 之间的厘米数，收到的是“{}”",
+            "Mic spacing must be 1 to 500 cm; got “{}”",
             s.trim()
         )),
     }
@@ -504,17 +636,22 @@ pub fn human_bytes(bytes: u64) -> String {
 /// Describes a running model download for the settings page.
 ///
 /// Params: `repo` – `owner/name`; `p` – progress.
-/// Returns: e.g. `正在下载 o/m：620 MB / 1.5 GB（41%），第 9/15 个文件`.
+/// Returns: e.g. `正在下载 o/m：620 MB / 1.5 GB（41%），第 9/15 个文件` /
+/// `Downloading o/m: 620 MB / 1.5 GB (41%), file 9 of 15`.
 pub fn download_line(repo: &str, p: &mm_service::hub::Progress) -> String {
     if p.files_total == 0 {
-        return format!("正在获取 {repo} 的文件列表…");
+        return trf!(
+            "正在获取 {repo} 的文件列表…",
+            "Getting the file list for {repo}…"
+        );
     }
     let percent = (p.done_bytes * 100)
         .checked_div(p.total_bytes)
-        .map(|pct| format!("（{pct}%）"))
+        .map(|pct| trf!("（{pct}%）", " ({pct}%)"))
         .unwrap_or_default();
-    format!(
+    trf!(
         "正在下载 {repo}：{} / {}{percent}，第 {}/{} 个文件",
+        "Downloading {repo}: {} / {}{percent}, file {} of {}",
         human_bytes(p.done_bytes),
         human_bytes(p.total_bytes),
         (p.files_done + 1).min(p.files_total),
@@ -603,26 +740,40 @@ pub fn default_microphone(inputs: &[mm_core::AudioInput]) -> Option<String> {
         .map(|i| i.uid.clone())
 }
 
-/// Caption language choices: `(config value, label)`; `None` = auto.
-pub const CAPTION_LANGUAGES: [(Option<&str>, &str); 4] = [
-    (Some("zh"), "中文"),
-    (Some("en"), "English"),
-    (Some("ja"), "日本語"),
-    (None, "自动识别"),
-];
+/// Caption language choices. A function rather than a `const` because the labels follow
+/// the interface language.
+///
+/// Returns: `(config value, label)` pairs; `None` = auto.
+pub fn caption_languages() -> [(Option<&'static str>, &'static str); 4] {
+    [
+        (Some("zh"), tr!("中文", "Chinese")),
+        (Some("en"), "English"),
+        (Some("ja"), tr!("日本語", "Japanese")),
+        (None, tr!("自动识别", "Auto-detect")),
+    ]
+}
 
-/// Minutes language choices.
-pub const MINUTES_LANGUAGES: [(&str, &str); 3] =
-    [("zh", "中文"), ("en", "English"), ("ja", "日本語")];
+/// Minutes language choices, labelled in the interface language.
+///
+/// Returns: `(config value, label)` pairs.
+pub fn minutes_languages() -> [(&'static str, &'static str); 3] {
+    [
+        ("zh", tr!("中文", "Chinese")),
+        ("en", "English"),
+        ("ja", tr!("日本語", "Japanese")),
+    ]
+}
 
 /// System Settings deep link for a permission error message.
 ///
-/// Params: `message` – error text from the service layer.
+/// Params: `message` – error text from the service layer, in either interface language.
 /// Returns: the `x-apple.systempreferences:` URL.
 pub fn privacy_settings_url(message: &str) -> &'static str {
-    if message.contains("日历") {
+    // The service may word the error in Chinese or English, so match both.
+    let lower = message.to_lowercase();
+    if message.contains("日历") || lower.contains("calendar") {
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars"
-    } else if message.contains("麦克风") {
+    } else if message.contains("麦克风") || lower.contains("microphone") {
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
     } else {
         "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
@@ -742,6 +893,25 @@ mod tests {
     }
 
     #[test]
+    fn recordable_event_picks_running_or_imminent_meeting() {
+        let now = Utc::now();
+        let m = Duration::minutes;
+        let running = event("running", now - m(20), 60);
+        let soon = event("soon", now + m(8), 30);
+        let later = event("later", now + m(11), 30);
+        let ended = event("ended", now - m(60), 30);
+        let all_day = event("all-day", now - m(60), 24 * 60);
+        assert_eq!(recordable_event(&[], now), None);
+        assert_eq!(recordable_event(&[later.clone(), ended.clone()], now), None);
+        assert_eq!(recordable_event(std::slice::from_ref(&all_day), now), None);
+        let pick = |evs: &[CalendarEvent]| recordable_event(evs, now).map(|e| e.id);
+        assert_eq!(pick(&[running.clone(), all_day]), Some("running".into()));
+        assert_eq!(pick(&[later.clone(), soon.clone()]), Some("soon".into()));
+        // Back to back: the meeting about to start beats the one that is winding down.
+        assert_eq!(pick(&[running, soon, later]), Some("soon".into()));
+    }
+
+    #[test]
     fn events_group_by_local_day_and_filter_upcoming() {
         let today = Local::now().date_naive();
         let (from, _) = local_days(today, 1);
@@ -811,15 +981,99 @@ mod tests {
     #[test]
     fn provider_config_respects_switches() {
         let mut cfg = AppConfig::default();
-        let p = provider_config(&cfg, true, Some("/bin/codex".into()), None);
+        let p = provider_config(&cfg, true, Some("/bin/codex".into()), None, None);
         assert!(!p.byok_key_present, "no provider configured");
         assert_eq!(p.codex_signed_in.as_deref(), Some("/bin/codex"));
+        assert!(p.codex_in_auto);
         cfg.use_codex = false;
         cfg.byok = byok_from_form("anthropic", "claude-opus-5-5", "");
-        let p = provider_config(&cfg, true, Some("/bin/codex".into()), Some("/m".into()));
+        cfg.minutes_backend = MinutesBackend::Antigravity;
+        cfg.antigravity_minutes_model = "claude-opus-5-5-high".into();
+        let p = provider_config(
+            &cfg,
+            true,
+            Some("/bin/codex".into()),
+            Some("/bin/agy".into()),
+            Some("/m".into()),
+        );
         assert!(p.byok_key_present);
-        assert!(p.codex_signed_in.is_none());
+        // The switch only keeps Codex out of the automatic chain; an explicit pick still works.
+        assert!(!p.codex_in_auto);
+        assert_eq!(p.codex_signed_in.as_deref(), Some("/bin/codex"));
         assert_eq!(p.local_model.as_deref(), Some("/m"));
+        assert!(matches!(
+            mm_llm::select_provider(&p),
+            Ok(ProviderChoice::Antigravity { ref model, .. }) if model == "claude-opus-5-5-high"
+        ));
+    }
+
+    #[test]
+    fn model_choices_keep_the_saved_model_and_filter() {
+        let listed = vec![
+            ModelOption {
+                id: "gemini-3.8-flash-medium".into(),
+                label: "Gemini 3.8 Flash (Medium)".into(),
+                is_default: true,
+            },
+            ModelOption {
+                id: "claude-opus-5-5-high".into(),
+                label: "Claude Opus 5.5 (High)".into(),
+                is_default: false,
+            },
+        ];
+        let all = |_: &str| true;
+        let ids = |v: Vec<(String, String)>| v.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(model_choices(
+                Some(&listed),
+                &[],
+                all,
+                "gone-model",
+                Some("Default")
+            )),
+            [
+                "",
+                "gemini-3.8-flash-medium",
+                "claude-opus-5-5-high",
+                "gone-model"
+            ]
+        );
+        assert_eq!(
+            ids(model_choices(
+                Some(&listed),
+                &[],
+                mm_llm::antigravity::refine_capable,
+                "gemini-3.8-flash-medium",
+                None
+            )),
+            ["gemini-3.8-flash-medium"]
+        );
+        // Before the CLI answers, the built-in list stands in.
+        assert_eq!(
+            ids(model_choices(None, &[("a", "A")], all, "", None)),
+            ["a"]
+        );
+    }
+
+    #[test]
+    fn provider_labels_name_the_model() {
+        mm_i18n::with_lang(mm_i18n::Lang::En, || {
+            let codex = |m: Option<&str>| ProviderChoice::Codex {
+                codex_path: "/c".into(),
+                model: m.map(String::from),
+            };
+            assert_eq!(provider_label(&codex(None)), "Codex (ChatGPT)");
+            assert_eq!(
+                provider_label(&codex(Some("gpt-6-luna"))),
+                "Codex (ChatGPT · gpt-6-luna)"
+            );
+            let agy = ProviderChoice::Antigravity {
+                agy_path: "/a".into(),
+                model: "gemini-3.8-flash-medium".into(),
+            };
+            assert_eq!(provider_label(&agy), "Antigravity (Gemini 3.8 Flash)");
+            assert_eq!(minutes_backend_label(MinutesBackend::Auto), "Automatic");
+        });
     }
 
     #[test]
@@ -831,7 +1085,7 @@ mod tests {
             byok_parts(&p),
             ("openai_compatible", "qwen".into(), "http://x".into())
         );
-        for (kind, _) in BYOK_KINDS.iter().skip(1) {
+        for (kind, _) in byok_kinds().iter().skip(1) {
             let p = byok_from_form(kind, "m", "u").unwrap();
             assert_eq!(byok_parts(&p).0, *kind);
         }
@@ -979,6 +1233,7 @@ mod tests {
             text: "x".into(),
             speaker,
             is_final: e.is_some(),
+            stable_chars: 1,
         };
         let lines = vec![
             line(
@@ -1011,5 +1266,75 @@ mod tests {
         assert!(privacy_settings_url("日历权限：denied").ends_with("Privacy_Calendars"));
         assert!(privacy_settings_url("麦克风权限：x").ends_with("Privacy_Microphone"));
         assert!(privacy_settings_url("屏幕录制权限：x").ends_with("Privacy_ScreenCapture"));
+    }
+}
+
+#[cfg(test)]
+mod english_tests {
+    use super::*;
+    use mm_i18n::{Lang, with_lang};
+    use mm_service::hub::Progress;
+
+    #[test]
+    fn day_headings_and_dates_read_naturally_in_english() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
+        with_lang(Lang::En, || {
+            assert_eq!(day_heading(day, day), "Today · Thu, Nov 5");
+            assert_eq!(
+                day_heading(day, day - Duration::days(1)),
+                "Tomorrow · Thu, Nov 5"
+            );
+            assert_eq!(day_heading(day, day - Duration::days(3)), "Thu, Nov 5");
+            let t = Local.with_ymd_and_hms(2026, 11, 8, 9, 5, 0).unwrap();
+            assert_eq!(short_datetime(t.with_timezone(&Utc)), "Nov 8, 09:05");
+        });
+        // The Chinese wording is untouched.
+        assert_eq!(day_heading(day, day - Duration::days(3)), "11月5日 周四");
+    }
+
+    #[test]
+    fn relative_times_and_counts_in_english() {
+        let now = Utc::now();
+        let at = |m: i64| now + Duration::minutes(m);
+        with_lang(Lang::En, || {
+            assert_eq!(relative_start(now, at(8), at(60)), "In 8 min");
+            assert_eq!(relative_start(now, at(125), at(130)), "In 2 h 5 min");
+            assert_eq!(relative_start(now, at(-5), at(60)), "In progress");
+            assert_eq!(relative_start(now, at(-60), at(-5)), "Ended");
+            assert_eq!(status_label(MeetingStatus::Done), "Minutes ready");
+            assert_eq!(direction_label(0.0), "Center");
+            assert_eq!(byok_kinds()[0].1, "None");
+            assert_eq!(caption_languages()[3], (None, "Auto-detect"));
+        });
+        assert_eq!(count_en(1, "meeting", "meetings"), "1 meeting");
+        assert_eq!(count_en(3, "meeting", "meetings"), "3 meetings");
+        assert_eq!(count_en(0, "meeting", "meetings"), "0 meetings");
+    }
+
+    #[test]
+    fn download_progress_and_errors_in_english() {
+        let p = Progress {
+            file: "model.safetensors".into(),
+            done_bytes: 620_000_000,
+            total_bytes: 1_500_000_000,
+            files_done: 8,
+            files_total: 15,
+        };
+        with_lang(Lang::En, || {
+            assert_eq!(
+                download_line("o/m", &Progress::default()),
+                "Getting the file list for o/m…"
+            );
+            assert_eq!(
+                download_line("o/m", &p),
+                "Downloading o/m: 620 MB / 1.5 GB (41%), file 9 of 15"
+            );
+            assert_eq!(
+                parse_spacing_cm("0").unwrap_err(),
+                "Mic spacing must be 1 to 500 cm; got “0”"
+            );
+        });
+        assert!(privacy_settings_url("Calendar access: denied").ends_with("Privacy_Calendars"));
+        assert!(privacy_settings_url("Microphone permission: x").ends_with("Privacy_Microphone"));
     }
 }

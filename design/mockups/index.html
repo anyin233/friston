@@ -70,24 +70,26 @@ a:hover { text-decoration: underline; }
   display: flex; flex-direction: column;
   box-shadow: 0 0 0 .5px rgba(23,26,51,.28), 0 28px 70px -18px rgba(23,26,51,.45);
 }
-.titlebar {
-  height: 44px; flex: none; display: grid; grid-template-columns: 216px 1fr auto; align-items: center;
-  border-bottom: 1px solid var(--rule); background: var(--paper);
-}
-.lights { display: flex; gap: 8px; padding-left: 14px; align-items: center; }
+/* No title bar: the sidebar's top strip carries the traffic lights and drags the window. */
+.win-controls { height: 28px; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 2px 0 4px; margin-bottom: 6px; }
+.lights { display: flex; gap: 8px; align-items: center; }
 .lights span { width: 12px; height: 12px; border-radius: 50%; background: #FF5F57; box-shadow: inset 0 0 0 .5px rgba(0,0,0,.15); }
 .lights span:nth-child(2) { background: #FEBC2E; } .lights span:nth-child(3) { background: #28C840; }
-.lights .i { margin-left: 18px; color: var(--ink-3); }
+.win-controls .i { color: var(--ink-3); }
+.brand { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px; font-weight: 600; }
+.brand .logo { width: 20px; height: 20px; border-radius: 5px; background: var(--accent); flex: none; }
+.rec-btn { width: 100%; justify-content: center; margin-top: 6px; }
+.rec-btn .when-rec { display: none; }
+.window[data-recording="true"] .rec-btn .when-rec { display: inline; }
+.window[data-recording="true"] .rec-btn .when-idle { display: none; }
 .cmd {
-  justify-self: center; width: 440px; height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 10px;
-  border-radius: var(--r-control); background: var(--sunken); color: var(--ink-3); font-size: 12.5px;
+  height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 10px; margin: 8px 0 4px;
+  border-radius: var(--r-control); background: var(--panel); box-shadow: 0 0 0 1px var(--rule); color: var(--ink-3); font-size: 12.5px; cursor: text;
 }
 .cmd kbd { margin-left: auto; font: 11px var(--ui); color: var(--ink-3); }
-.tb-right { display: flex; align-items: center; gap: 14px; padding-right: 14px; font-size: 12px; color: var(--ink-2); }
-.rec { display: none; align-items: center; gap: 7px; color: var(--rec); font-weight: 600; }
+.rec { display: none; align-items: center; gap: 7px; padding: 6px 2px 0; color: var(--rec); font-weight: 600; font-size: 12px; }
 .rec::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--rec); animation: pulse 1.6s ease-in-out infinite; }
 .window[data-recording="true"] .rec { display: flex; }
-.tb-status { display: flex; align-items: center; gap: 6px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
 .dot.idle { background: var(--ink-3); } .dot.busy { background: var(--warn); }
 @keyframes pulse { 50% { opacity: .35; } }
@@ -106,8 +108,26 @@ a:hover { text-decoration: underline; }
 .nav-item[aria-current="page"] { background: var(--panel); color: var(--ink); box-shadow: 0 0 0 1px var(--rule); }
 .nav-item .count { margin-left: auto; font-size: 11.5px; color: var(--ink-3); }
 .nav-item .live-badge { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--rec); }
-.side-foot { margin-top: 6px; padding: 10px; display: grid; gap: 7px; font-size: 11.5px; color: var(--ink-2); border-top: 1px solid var(--rule); }
-.side-foot div { display: flex; align-items: center; gap: 7px; }
+/* Status lights: one dot per resource (red = not loaded, amber = loading, green = loaded). */
+.side-foot { position: relative; margin-top: 6px; padding: 10px 10px 4px; border-top: 1px solid var(--rule); outline: none; }
+/* Hover background hugs the dots exactly: a small rounded rectangle, not the whole footer. */
+.lights-row { display: flex; gap: 6px; padding: 4px 6px; margin-left: -6px; width: max-content; border-radius: 6px; cursor: default; }
+.lights-row:hover, .side-foot:focus-within .lights-row { background: rgba(23,26,51,.06); }
+/* Loading blinks, so amber reads as "in progress" rather than a warning. Never fully off. */
+.dot.busy { animation: blink 1.2s ease-in-out infinite; }
+@keyframes blink { 50% { opacity: .25; } }
+.dot.err { background: var(--rec); }
+.status-card {
+  display: none; position: absolute; left: 4px; bottom: calc(100% + 6px); width: 260px; z-index: 5; padding: 12px;
+  gap: 12px; background: var(--panel); border-radius: var(--r-control); box-shadow: 0 0 0 1px var(--rule), 0 10px 28px -10px rgba(23,26,51,.35);
+}
+/* Opens from the dots only; stays open while the pointer moves onto the card. */
+.lights-row:hover + .status-card, .status-card:hover, .side-foot:focus-within .status-card { display: grid; }
+.status-card::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 18px; }
+.sc-row { display: grid; gap: 2px; }
+.sc-title { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-3); }
+.sc-row b { padding-left: 15px; font-size: 13px; font-weight: 500; color: var(--ink); }
+.sc-row small { padding-left: 15px; font-size: 11.5px; color: var(--ink-3); }
 
 main { flex: 1; min-width: 0; position: relative; }
 .screen { position: absolute; inset: 0; display: none; }
@@ -304,11 +324,23 @@ main { flex: 1; min-width: 0; position: relative; }
 .overlay .trans { font-size: 14px; color: #B9BEEA; margin-top: 2px; }
 
 /* During a meeting the sidebar collapses to an icon rail so captions + notes get the width. */
-.window[data-screen="live"] .sidebar { width: 56px; padding: 10px 8px; }
+/* 76px, not 56px: the traffic lights (3×12px + 2×8px gaps) live in the sidebar now. */
+.window[data-screen="live"] .sidebar { width: 76px; padding: 10px 12px; }
+.window[data-screen="live"] .win-controls { padding: 0; }
+.window[data-screen="live"] .win-controls > .i,
+.window[data-screen="live"] .brand-name,
+.window[data-screen="live"] .rec-btn span[class],
+.window[data-screen="live"] .cmd-text,
+.window[data-screen="live"] .cmd kbd { display: none; }
+.window[data-screen="live"] .brand { justify-content: center; padding: 0; }
+.window[data-screen="live"] .rec-btn { padding: 0; }
+.window[data-screen="live"] .cmd { justify-content: center; padding: 0; }
+.window[data-screen="live"] .rec { font-size: 0; justify-content: center; gap: 0; }
 .window[data-screen="live"] .nav-item { font-size: 0; justify-content: center; padding: 0; position: relative; }
 .window[data-screen="live"] .nav-item .count,
-.window[data-screen="live"] .nav-group,
-.window[data-screen="live"] .side-foot { display: none; }
+.window[data-screen="live"] .nav-group { display: none; }
+.window[data-screen="live"] .side-foot { padding: 10px 0 4px; }
+.window[data-screen="live"] .lights-row { margin: 0 auto; }
 .window[data-screen="live"] .nav-item .live-badge { position: absolute; top: 6px; right: 8px; margin: 0; }
 .icon-btn { width: 28px; height: 28px; border-radius: var(--r-control); border: 0; background: none; display: grid; place-items: center; color: var(--ink-2); cursor: pointer; }
 .icon-btn:hover { background: var(--sunken); }
@@ -531,17 +563,20 @@ main { flex: 1; min-width: 0; position: relative; }
 <div class="scaler" id="scaler">
 <div class="window" id="win" data-recording="false">
 
-  <header class="titlebar">
-    <div class="lights"><span></span><span></span><span></span><svg class="i"><use href="#i-panel-left"/></svg></div>
-    <div class="cmd"><svg class="i sm"><use href="#i-search"/></svg>搜索会议、纪要、人物，或问一个问题<kbd>⌘K</kbd></div>
-    <div class="tb-right">
-      <span class="rec num" id="recTimer">录制中 00:41:52</span>
-      <span class="tb-status"><span class="dot"></span>索引最新</span>
-    </div>
-  </header>
-
+  <!-- No title bar: the traffic lights sit in the sidebar's top strip, above the brand. -->
   <div class="body">
     <nav class="sidebar" aria-label="主导航">
+      <div class="win-controls" title="拖动这里移动窗口">
+        <div class="lights"><span></span><span></span><span></span></div>
+        <svg class="i"><use href="#i-panel-left"/></svg>
+      </div>
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span class="brand-name">Friston</span></div>
+      <button class="btn danger rec-btn" title="开始或结束记录">
+        <svg class="i sm when-idle"><use href="#i-mic"/></svg><span class="when-idle">开始记录</span>
+        <svg class="i sm when-rec"><use href="#i-square"/></svg><span class="when-rec">结束记录</span>
+      </button>
+      <span class="rec num" id="recTimer">录制中 00:41:52</span>
+      <div class="cmd" title="搜索"><svg class="i sm"><use href="#i-search"/></svg><span class="cmd-text">搜索或提问</span><kbd>⌘K</kbd></div>
       <div class="nav-group">工作台</div>
       <button class="nav-item" data-go="today"><svg class="i"><use href="#i-layout-dashboard"/></svg>今天</button>
       <button class="nav-item" data-go="schedule"><svg class="i"><use href="#i-calendar"/></svg>日程<span class="count">4</span></button>
@@ -552,16 +587,20 @@ main { flex: 1; min-width: 0; position: relative; }
       <button class="nav-item" data-go="minutes" data-secondary><svg class="i"><use href="#i-file-text"/></svg>产品周会</button>
       <button class="nav-item" data-go="minutes"><svg class="i"><use href="#i-file-text"/></svg>架构评审</button>
       <button class="nav-item" style="margin-top:auto" data-go="settings"><svg class="i"><use href="#i-settings"/></svg>设置</button>
-      <div class="side-foot">
-        <div><span class="dot"></span>Obsidian：Work Notes</div>
-        <div><span class="dot" id="engineDot"></span><span id="engineText">字幕引擎就绪</span></div>
-        <div><span class="dot idle"></span>嵌入引擎空闲</div>
+      <!-- Status: a bare row of lights; names and details show only on hover, as in the app. -->
+      <div class="side-foot" tabindex="0" aria-label="运行状态">
+        <div class="lights-row"><span class="dot"></span><span class="dot" id="engineDot"></span><span class="dot busy"></span></div>
+        <div class="status-card" role="tooltip">
+          <div class="sc-row"><span class="sc-title"><span class="dot"></span>Obsidian 库</span><b>Work Notes</b><small>~/Documents/Work Notes</small></div>
+          <div class="sc-row"><span class="sc-title"><span class="dot"></span>字幕引擎</span><b id="engineText">Qwen3-ASR 0.6B</b><small>说话人分离 · 声纹已加载</small></div>
+          <div class="sc-row"><span class="sc-title"><span class="dot busy"></span>嵌入模型</span><b>EmbeddingGemma 2</b><small>正在加载…</small></div>
+        </div>
       </div>
     </nav>
 
     <main>
 <!-- ============================== 今天 ============================== -->
-<section class="screen" id="s-today" data-gpui="TitleBar · Sidebar / SidebarMenu · Button(primary / outline) · Tag · Avatar · List (virtualized for long days) · Checkbox · Resizable (main | rail)">
+<section class="screen" id="s-today" data-gpui="Sidebar (traffic lights in header strip) / SidebarMenu · Button(primary / outline) · Tag · Avatar · List (virtualized for long days) · Checkbox · Resizable (main | rail)">
   <div class="today">
     <div class="today-main">
       <header class="page-head">
@@ -1160,7 +1199,7 @@ main { flex: 1; min-width: 0; position: relative; }
     const live = name === 'live';
     win.dataset.recording = String(live);
     $('#liveBadge').hidden = !live;
-    $('#engineText').textContent = live ? '字幕引擎运行中' : '字幕引擎就绪';
+    $('#engineText').textContent = live ? 'Qwen3-ASR 0.6B（运行中）' : 'Qwen3-ASR 0.6B';
     overlay.classList.toggle('show', live && ovToggle.getAttribute('aria-pressed') === 'true');
     $('#annoText').textContent = $('#s-' + name).dataset.gpui || '';
     history.replaceState(null, '', '#' + name);

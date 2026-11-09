@@ -77,11 +77,23 @@
 .overlay .trans { font-size: 14px; color: #B9BEEA; margin-top: 2px; }
 
 /* During a meeting the sidebar collapses to an icon rail so captions + notes get the width. */
-.window[data-screen="live"] .sidebar { width: 56px; padding: 10px 8px; }
+/* 76px, not 56px: the traffic lights (3×12px + 2×8px gaps) live in the sidebar now. */
+.window[data-screen="live"] .sidebar { width: 76px; padding: 10px 12px; }
+.window[data-screen="live"] .win-controls { padding: 0; }
+.window[data-screen="live"] .win-controls > .i,
+.window[data-screen="live"] .brand-name,
+.window[data-screen="live"] .rec-btn span[class],
+.window[data-screen="live"] .cmd-text,
+.window[data-screen="live"] .cmd kbd { display: none; }
+.window[data-screen="live"] .brand { justify-content: center; padding: 0; }
+.window[data-screen="live"] .rec-btn { padding: 0; }
+.window[data-screen="live"] .cmd { justify-content: center; padding: 0; }
+.window[data-screen="live"] .rec { font-size: 0; justify-content: center; gap: 0; }
 .window[data-screen="live"] .nav-item { font-size: 0; justify-content: center; padding: 0; position: relative; }
 .window[data-screen="live"] .nav-item .count,
-.window[data-screen="live"] .nav-group,
-.window[data-screen="live"] .side-foot { display: none; }
+.window[data-screen="live"] .nav-group { display: none; }
+.window[data-screen="live"] .side-foot { padding: 10px 0 4px; }
+.window[data-screen="live"] .lights-row { margin: 0 auto; }
 .window[data-screen="live"] .nav-item .live-badge { position: absolute; top: 6px; right: 8px; margin: 0; }
 .icon-btn { width: 28px; height: 28px; border-radius: var(--r-control); border: 0; background: none; display: grid; place-items: center; color: var(--ink-2); cursor: pointer; }
 .icon-btn:hover { background: var(--sunken); }

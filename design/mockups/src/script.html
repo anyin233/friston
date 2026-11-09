@@ -49,7 +49,7 @@
     const live = name === 'live';
     win.dataset.recording = String(live);
     $('#liveBadge').hidden = !live;
-    $('#engineText').textContent = live ? '字幕引擎运行中' : '字幕引擎就绪';
+    $('#engineText').textContent = live ? 'Qwen3-ASR 0.6B（运行中）' : 'Qwen3-ASR 0.6B';
     overlay.classList.toggle('show', live && ovToggle.getAttribute('aria-pressed') === 'true');
     $('#annoText').textContent = $('#s-' + name).dataset.gpui || '';
     history.replaceState(null, '', '#' + name);

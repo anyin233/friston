@@ -18,17 +18,20 @@
 <div class="scaler" id="scaler">
 <div class="window" id="win" data-recording="false">
 
-  <header class="titlebar">
-    <div class="lights"><span></span><span></span><span></span><svg class="i"><use href="#i-panel-left"/></svg></div>
-    <div class="cmd"><svg class="i sm"><use href="#i-search"/></svg>搜索会议、纪要、人物，或问一个问题<kbd>⌘K</kbd></div>
-    <div class="tb-right">
-      <span class="rec num" id="recTimer">录制中 00:41:52</span>
-      <span class="tb-status"><span class="dot"></span>索引最新</span>
-    </div>
-  </header>
-
+  <!-- No title bar: the traffic lights sit in the sidebar's top strip, above the brand. -->
   <div class="body">
     <nav class="sidebar" aria-label="主导航">
+      <div class="win-controls" title="拖动这里移动窗口">
+        <div class="lights"><span></span><span></span><span></span></div>
+        <svg class="i"><use href="#i-panel-left"/></svg>
+      </div>
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span class="brand-name">Friston</span></div>
+      <button class="btn danger rec-btn" title="开始或结束记录">
+        <svg class="i sm when-idle"><use href="#i-mic"/></svg><span class="when-idle">开始记录</span>
+        <svg class="i sm when-rec"><use href="#i-square"/></svg><span class="when-rec">结束记录</span>
+      </button>
+      <span class="rec num" id="recTimer">录制中 00:41:52</span>
+      <div class="cmd" title="搜索"><svg class="i sm"><use href="#i-search"/></svg><span class="cmd-text">搜索或提问</span><kbd>⌘K</kbd></div>
       <div class="nav-group">工作台</div>
       <button class="nav-item" data-go="today"><svg class="i"><use href="#i-layout-dashboard"/></svg>今天</button>
       <button class="nav-item" data-go="schedule"><svg class="i"><use href="#i-calendar"/></svg>日程<span class="count">4</span></button>
@@ -39,16 +42,20 @@
       <button class="nav-item" data-go="minutes" data-secondary><svg class="i"><use href="#i-file-text"/></svg>产品周会</button>
       <button class="nav-item" data-go="minutes"><svg class="i"><use href="#i-file-text"/></svg>架构评审</button>
       <button class="nav-item" style="margin-top:auto" data-go="settings"><svg class="i"><use href="#i-settings"/></svg>设置</button>
-      <div class="side-foot">
-        <div><span class="dot"></span>Obsidian：Work Notes</div>
-        <div><span class="dot" id="engineDot"></span><span id="engineText">字幕引擎就绪</span></div>
-        <div><span class="dot idle"></span>嵌入引擎空闲</div>
+      <!-- Status: a bare row of lights; names and details show only on hover, as in the app. -->
+      <div class="side-foot" tabindex="0" aria-label="运行状态">
+        <div class="lights-row"><span class="dot"></span><span class="dot" id="engineDot"></span><span class="dot busy"></span></div>
+        <div class="status-card" role="tooltip">
+          <div class="sc-row"><span class="sc-title"><span class="dot"></span>Obsidian 库</span><b>Work Notes</b><small>~/Documents/Work Notes</small></div>
+          <div class="sc-row"><span class="sc-title"><span class="dot"></span>字幕引擎</span><b id="engineText">Qwen3-ASR 0.6B</b><small>说话人分离 · 声纹已加载</small></div>
+          <div class="sc-row"><span class="sc-title"><span class="dot busy"></span>嵌入模型</span><b>EmbeddingGemma 2</b><small>正在加载…</small></div>
+        </div>
       </div>
     </nav>
 
     <main>
 <!-- ============================== 今天 ============================== -->
-<section class="screen" id="s-today" data-gpui="TitleBar · Sidebar / SidebarMenu · Button(primary / outline) · Tag · Avatar · List (virtualized for long days) · Checkbox · Resizable (main | rail)">
+<section class="screen" id="s-today" data-gpui="Sidebar (traffic lights in header strip) / SidebarMenu · Button(primary / outline) · Tag · Avatar · List (virtualized for long days) · Checkbox · Resizable (main | rail)">
   <div class="today">
     <div class="today-main">
       <header class="page-head">

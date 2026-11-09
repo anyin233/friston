@@ -13,3 +13,17 @@ import Testing
     #expect(usbStereo.supportsSpatialCues)
     #expect(!builtIn.supportsSpatialCues)
 }
+
+@Test func tapRatePrefersTheDevicesLiveRate() {
+    // AirPods in the hands-free profile: the engine still says 48 kHz, the stream runs at 24 kHz.
+    #expect(AudioInputProbe.tapSampleRate(engineReported: 48_000, device: 24_000) == 24_000)
+    #expect(AudioInputProbe.tapSampleRate(engineReported: 48_000, device: 48_000) == 48_000)
+    // Unreadable device rate: keep what the engine reported.
+    #expect(AudioInputProbe.tapSampleRate(engineReported: 44_100, device: 0) == 44_100)
+}
+
+@Test func liveRateOfTheDefaultInputIsReadable() throws {
+    // Machines without any input (CI) have nothing to read.
+    guard let uid = AudioInputProbe.defaultInputUID(), let id = AudioInputProbe.deviceID(forUID: uid) else { return }
+    #expect(AudioInputProbe.inputStreamRate(id) > 0)
+}

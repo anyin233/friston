@@ -69,6 +69,45 @@ public enum AudioInputProbe {
         return stringProperty(id, kAudioDevicePropertyDeviceUID)
     }
 
+    /// The rate a device's input stream runs at right now.
+    ///
+    /// Bluetooth headsets switch to the hands-free profile (16 or 24 kHz) once their microphone
+    /// is opened, while `AVAudioEngine` may still report the 48 kHz it saw before; tapping with
+    /// that stale rate raises "format mismatch". The stream's virtual format is what the tap is
+    /// checked against, so it is read first; the nominal rate is the fallback.
+    /// - Parameter id: Core Audio device ID.
+    /// - Returns: Rate in Hz, or 0 when neither property can be read.
+    public static func inputStreamRate(_ id: AudioObjectID) -> Double {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams, mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        if AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr, size > 0 {
+            var streams = [AudioStreamID](repeating: 0, count: Int(size) / MemoryLayout<AudioStreamID>.size)
+            if AudioObjectGetPropertyData(id, &address, 0, nil, &size, &streams) == noErr, let first = streams.first {
+                var formatAddress = AudioObjectPropertyAddress(
+                    mSelector: kAudioStreamPropertyVirtualFormat, mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain)
+                var format = AudioStreamBasicDescription()
+                var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+                if AudioObjectGetPropertyData(first, &formatAddress, 0, nil, &formatSize, &format) == noErr,
+                   format.mSampleRate > 0 {
+                    return format.mSampleRate
+                }
+            }
+        }
+        return nominalSampleRate(id)
+    }
+
+    /// Chooses the sample rate to tap a microphone with.
+    /// - Parameters:
+    ///   - engineReported: `AVAudioInputNode.inputFormat(forBus: 0).sampleRate`, possibly stale.
+    ///   - device: ``inputStreamRate(_:)`` of the selected device, or 0 when unknown.
+    /// - Returns: The device's live rate when known, otherwise what the engine reported.
+    public static func tapSampleRate(engineReported: Double, device: Double) -> Double {
+        device > 0 ? device : engineReported
+    }
+
     private static func deviceIDs() -> [AudioObjectID] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal,

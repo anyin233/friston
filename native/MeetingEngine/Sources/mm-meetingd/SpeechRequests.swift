@@ -132,17 +132,21 @@ enum SpeechRequests {
         } catch {
             throw RPCError(code: -32000, message: "\(method): \(error)")
         }
-        let format = engine.inputNode.inputFormat(forBus: 0)
+        let format = InputTap.format(of: engine, uid: params.microphoneUID)
         let collected = LockedValue<[Float]>([])
-        engine.inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
-            guard let data = buffer.floatChannelData else { return }
-            let frames = Int(buffer.frameLength)
-            let channels = (0..<Int(buffer.format.channelCount)).map { Array(UnsafeBufferPointer(start: data[$0], count: frames)) }
-            let mono = buffer.format.isInterleaved
-                ? StreamingResampler.downmix(interleaved: Array(UnsafeBufferPointer(start: data[0], count: frames * channels.count)),
-                                             channelCount: channels.count)
-                : StreamingResampler.downmix(channels)
-            collected.mutate { $0 += mono }
+        do {
+            try InputTap.install(on: engine.inputNode, format: format, device: params.microphoneUID ?? "default input") { buffer in
+                guard let data = buffer.floatChannelData else { return }
+                let frames = Int(buffer.frameLength)
+                let channels = (0..<Int(buffer.format.channelCount)).map { Array(UnsafeBufferPointer(start: data[$0], count: frames)) }
+                let mono = buffer.format.isInterleaved
+                    ? StreamingResampler.downmix(interleaved: Array(UnsafeBufferPointer(start: data[0], count: frames * channels.count)),
+                                                 channelCount: channels.count)
+                    : StreamingResampler.downmix(channels)
+                collected.mutate { $0 += mono }
+            }
+        } catch {
+            throw RPCError(code: -32000, message: "\(method): \(error)")
         }
         engine.prepare()
         do { try engine.start() } catch {

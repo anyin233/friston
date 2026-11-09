@@ -16,6 +16,7 @@ enum RecorderError: Error, CustomStringConvertible {
     case displayNotFound(UInt32?)
     case microphoneNotFound(String)
     case microphoneSelect(String, OSStatus)
+    case microphoneTap(String, String)
     case writer(String)
 
     /// Message sent back as the RPC error text.
@@ -25,6 +26,7 @@ enum RecorderError: Error, CustomStringConvertible {
         case .displayNotFound(let id): "display \(id.map(String.init) ?? "(main)") is not available"
         case .microphoneNotFound(let uid): "audio input \(uid) disappeared before capture started"
         case .microphoneSelect(let uid, let status): "could not select audio input \(uid) (OSStatus \(status))"
+        case .microphoneTap(let device, let detail): "could not record from audio input \(device) (\(detail))"
         case .writer(let detail): detail
         }
     }
@@ -57,7 +59,10 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var micThrottle = Throttle(interval: 0.1)
     private(set) var microphoneChannels: Int?
     /// Live captions; fed from the capture threads, does its model work elsewhere.
-    private let captioner: LiveCaptioner
+    /// Replaced once in `startMicrophone` (before any audio flows) when the device's live rate
+    /// differs from the probed one.
+    private var captioner: LiveCaptioner
+    private let systemRate: Double?
 
     /// Creates a session; nothing is captured until `start()`.
     /// - Parameters:
@@ -69,8 +74,9 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.notify = notify
         startedAt = .now
         // ScreenCaptureKit is configured for 48 kHz below; the mic runs at its nominal rate.
+        systemRate = plan.preset.systemAudio ? 48_000 : nil
         captioner = LiveCaptioner(sessionId: id, plan: plan, micRate: plan.microphone?.sampleRate,
-                                  systemRate: plan.preset.systemAudio ? 48_000 : nil, notify: notify)
+                                  systemRate: systemRate, notify: notify)
     }
 
     /// Creates the output folder and starts every requested source.
@@ -117,14 +123,21 @@ final class CaptureSession: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let input = engine.inputNode
 
         // The hardware-side format keeps every channel; AVAudioEngine would otherwise mix down.
-        let format = input.inputFormat(forBus: 0)
+        // Its rate is read from the device, since a Bluetooth headset may have changed it.
+        let format = InputTap.format(of: engine, uid: mic.uid)
+        if format.sampleRate != plan.microphone?.sampleRate {
+            // Nothing has been fed yet, so the captioner can still take the live rate; a stale one
+            // would make it drop every microphone buffer.
+            captioner = LiveCaptioner(sessionId: id, plan: plan, micRate: format.sampleRate, systemRate: systemRate,
+                                      notify: notify)
+        }
         let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatFloat32,
                                    interleaved: false)
         micLock.withLock { micFile = file }
         microphoneChannels = Int(format.channelCount)
         log("capture \(id): microphone \(mic.name) \(format.channelCount)ch @ \(format.sampleRate) Hz -> \(url.path)")
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+        try InputTap.install(on: input, format: format, device: mic.name) { [weak self] buffer in
             self?.handleMicrophone(buffer)
         }
         engine.prepare()

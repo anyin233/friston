@@ -350,6 +350,54 @@ impl MeetingEngine {
     }
 }
 
+/// A separate `mm-meetingd` process for the post-meeting refine (`transcribe/file`).
+///
+/// Within one engine every MLX call goes through a process-wide gate, so a refine running
+/// in the recording engine would hold up live captions (file diarization takes the gate for
+/// the whole recording at once). A second process has its own gate and its own models, so
+/// the next meeting's captions never wait for an earlier meeting's refine. The process lives
+/// for one job and is shut down on drop, which also returns the refine models' memory.
+pub struct RefineWorker {
+    engine: MeetingEngine,
+}
+
+impl RefineWorker {
+    /// Starts a refine process and completes the handshake.
+    ///
+    /// Params: `path` – the `mm-meetingd` executable.
+    /// Returns: the worker; errors name the executable.
+    pub fn spawn(path: &Path) -> Result<Self, ServiceError> {
+        // A refine process sends no notifications the app needs; dropping the stream is safe
+        // because the client ignores sends to a closed event channel.
+        let (engine, _events) = MeetingEngine::spawn(path)?;
+        Self::from_engine(engine)
+            .map_err(|e| ServiceError::Engine(format!("refine engine {}: {e}", path.display())))
+    }
+
+    /// Wraps an engine and completes the handshake (also used by tests).
+    ///
+    /// Params: `engine`.
+    /// Returns: the worker, or the `initialize` error.
+    pub fn from_engine(engine: MeetingEngine) -> Result<Self, ServiceError> {
+        engine.initialize()?;
+        Ok(Self { engine })
+    }
+
+    /// The engine to send `transcribe/file` to.
+    ///
+    /// Returns: the handle (valid until the worker drops).
+    pub fn engine(&self) -> &MeetingEngine {
+        &self.engine
+    }
+}
+
+impl Drop for RefineWorker {
+    /// Shuts the process down so its models do not stay resident between jobs.
+    fn drop(&mut self) {
+        self.engine.shutdown();
+    }
+}
+
 /// Typed client for `mm-embedd`.
 #[derive(Clone)]
 pub struct EmbedEngine {
@@ -656,5 +704,37 @@ mod tests {
             vec!["audio", "text"]
         );
         assert_eq!(normalise_modalities(&[]), vec!["text"]);
+    }
+
+    #[test]
+    fn refine_worker_initializes_and_shuts_down_on_drop() {
+        use std::io::{BufRead, BufReader, Write};
+        let (app_read, mut engine_write) = std::io::pipe().expect("pipe");
+        let (engine_read, app_write) = std::io::pipe().expect("pipe");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = seen.clone();
+        let fake = std::thread::spawn(move || {
+            for line in BufReader::new(engine_read).lines() {
+                let req: Value = serde_json::from_str(&line.expect("line")).expect("request");
+                let method = req["method"].as_str().unwrap_or_default().to_string();
+                writeln!(
+                    engine_write,
+                    "{}",
+                    json!({"jsonrpc": "2.0", "id": req["id"], "result": {}})
+                )
+                .expect("reply");
+                let done = method == "shutdown";
+                log.lock().unwrap().push(method);
+                if done {
+                    break;
+                }
+            }
+        });
+        let (client, _events) = EngineClient::connect(app_read, app_write);
+        let worker = RefineWorker::from_engine(MeetingEngine::from_client(client)).unwrap();
+        let _ = worker.engine();
+        drop(worker);
+        fake.join().unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec!["initialize", "shutdown"]);
     }
 }

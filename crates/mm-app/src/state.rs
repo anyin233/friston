@@ -2100,8 +2100,8 @@ impl AppState {
 
     /// Starts the next queued refine → minutes job when none is running.
     ///
-    /// Settings and engines are read now, not when the meeting stopped, so a job that waited
-    /// uses the current configuration and a restarted engine.
+    /// Settings are read now, not when the meeting stopped, so a job that waited uses the
+    /// current configuration. The local refine starts its own engine process for the job.
     ///
     /// Params: `cx`.
     fn run_next_post(&mut self, cx: &mut Context<Self>) {
@@ -2120,11 +2120,12 @@ impl AppState {
         })
         .detach();
         let minutes = self.minutes_ctx();
-        let engine = self.meeting_engine.clone();
         bg(
             cx,
             move || {
-                pipeline::process_meeting(&minutes, engine.as_ref(), stopped, &|s| {
+                // The local refine gets its own mm-meetingd, never the recording engine, so
+                // a meeting recording meanwhile keeps its live captions on time.
+                pipeline::process_meeting(&minutes, pipeline::spawn_refine_worker, stopped, &|s| {
                     let _ = ptx.send_blocking(s);
                 })
             },

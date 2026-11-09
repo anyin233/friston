@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use mm_core::{AudioOrigin, CaptureFiles, CaptureStarted, CaptureStopped, FileTranscript, Meeting};
 use mm_i18n::{tr, trf};
 use mm_llm::{LlmError, MinutesBackend, ProviderChoice, antigravity, byok, codex};
-use mm_service::engines::{EmbedEngine, MeetingEngine, RefineRequest};
+use mm_service::engines::{
+    EmbedEngine, MEETINGD, MeetingEngine, RefineRequest, RefineWorker, locate_engine,
+};
 use mm_service::{AppConfig, RefineBackend, external, flow};
 use mm_store::Store;
 
@@ -283,7 +285,22 @@ pub fn finish_meeting(job: FinishJob, progress: &dyn Fn(String)) -> Result<Finis
         },
         progress,
     )?;
-    process_meeting(&minutes, engine.as_ref(), stopped, progress)
+    // Like the app: the refine gets its own process; without a recording engine (unit tests)
+    // there is none to start either.
+    let refine_engine = || match engine {
+        Some(_) => spawn_refine_worker(),
+        None => Err(tr!("字幕引擎不在运行", "the caption engine isn’t running").into()),
+    };
+    process_meeting(&minutes, refine_engine, stopped, progress)
+}
+
+/// Starts the dedicated refine process (see [`RefineWorker`]).
+///
+/// Returns: the worker, or why it could not start (UI language).
+pub fn spawn_refine_worker() -> Result<RefineWorker, String> {
+    let path = locate_engine(MEETINGD)
+        .ok_or_else(|| trf!("找不到 {MEETINGD}", "{MEETINGD} wasn’t found"))?;
+    RefineWorker::spawn(&path).map_err(|e| e.to_string())
 }
 
 /// Stop phase: capture/stop → mark stopped → save the live transcript. Short, and the only
@@ -348,14 +365,18 @@ pub fn stop_meeting(job: StopJob, progress: &dyn Fn(String)) -> Result<StoppedMe
 /// Processing phase: refine → transcript sync → minutes. Runs from the post-meeting queue,
 /// possibly while the next meeting is recording.
 ///
+/// The local refine runs in its own engine process, started by `refine_engine` only when
+/// that pass runs, so live captions of a meeting recording meanwhile never wait for it.
+///
 /// Params: `minutes` – settings, store and minutes providers (read when the job starts, so
-/// settings changed while it waited apply); `engine` – caption engine for the local refine;
-/// `stopped` – from [`stop_meeting`]; `progress` – step descriptions in the UI language.
+/// settings changed while it waited apply); `refine_engine` – starts the refine process
+/// (normally [`spawn_refine_worker`]); `stopped` – from [`stop_meeting`]; `progress` – step
+/// descriptions in the UI language.
 /// Returns: the report (stop-phase warnings first); never fails today, kept fallible for
 /// symmetry with the stop phase.
 pub fn process_meeting(
     minutes: &MinutesCtx,
-    engine: Option<&MeetingEngine>,
+    refine_engine: impl FnOnce() -> Result<RefineWorker, String>,
     stopped: StoppedMeeting,
     progress: &dyn Fn(String),
 ) -> Result<FinishReport, String> {
@@ -381,15 +402,21 @@ pub fn process_meeting(
         }
     }
     if cfg.refine_after_meeting && !refined {
-        match engine {
-            Some(engine) => refine(engine, minutes, &meeting, &files, progress, &mut warnings),
-            None => warnings.push(
-                tr!(
-                    "字幕引擎不可用，跳过会后精转写",
-                    "Caption engine unavailable; skipped the post-meeting refine"
-                )
-                .into(),
+        progress(tr!("正在启动精转写引擎…", "Starting the refine engine…").into());
+        match refine_engine() {
+            // The worker shuts its process down when it drops at the end of this arm.
+            Ok(worker) => refine(
+                worker.engine(),
+                minutes,
+                &meeting,
+                &files,
+                progress,
+                &mut warnings,
             ),
+            Err(e) => warnings.push(trf!(
+                "精转写引擎启动失败，跳过会后精转写：{e}",
+                "Couldn’t start the refine engine, so the post-meeting refine was skipped: {e}"
+            )),
         }
     }
 
@@ -887,7 +914,13 @@ mod tests {
             codex: None,
             embed: None,
         };
-        let report = process_meeting(&ctx, None, stopped, &|_| {}).unwrap();
+        let report = process_meeting(
+            &ctx,
+            || panic!("refine is off, so no refine engine starts"),
+            stopped,
+            &|_| {},
+        )
+        .unwrap();
         assert!(!report.minutes_done);
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("停止录制"));

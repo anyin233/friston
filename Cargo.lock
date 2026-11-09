@@ -3813,6 +3813,7 @@ dependencies = [
  "gpui-kit",
  "mm-core",
  "mm-engine",
+ "mm-i18n",
  "mm-index",
  "mm-llm",
  "mm-service",
@@ -3830,6 +3831,7 @@ name = "mm-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mm-i18n",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -3846,6 +3848,15 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "mm-i18n"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sys-locale",
 ]
 
 [[package]]
@@ -3873,6 +3884,7 @@ dependencies = [
  "keyring",
  "mm-core",
  "mm-engine",
+ "mm-i18n",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -3890,6 +3902,7 @@ dependencies = [
  "dirs 6.0.0",
  "mm-core",
  "mm-engine",
+ "mm-i18n",
  "mm-index",
  "mm-llm",
  "mm-store",
@@ -3925,6 +3938,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "mm-core",
+ "mm-i18n",
  "percent-encoding",
  "serde",
  "serde_json",

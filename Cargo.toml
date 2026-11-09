@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 # Internal crates
 mm-core = { path = "crates/mm-core" }
+mm-i18n = { path = "crates/mm-i18n" }
 mm-engine = { path = "crates/mm-engine" }
 mm-store = { path = "crates/mm-store" }
 mm-index = { path = "crates/mm-index" }
@@ -35,6 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-channel = "2"
 blake3 = "1"
 dirs = "6"
+sys-locale = "0.3" # already in the tree via GPUI; reads the macOS preferred languages
 percent-encoding = "2"
 rusqlite = { version = "0.41", features = ["bundled"] }
 sqlite-vec = "=0.1.9" # 0.1.10-alpha.* ships without sqlite-vec-diskann.c and fails to build

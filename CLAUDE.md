@@ -27,4 +27,4 @@ Read `docs/architecture.md` and `docs/tech-stack.md` before changing structure o
 
 - Every function has a doc comment (purpose, params, return). Comments explain *why*.
 - Errors carry context: include the path, method or value.
-- UI copy is Chinese, sentence-style, active voice. Speaker hues are identity, so one person keeps one hue on every surface.
+- UI copy is bilingual (`mm-i18n`): wrap every user-visible string in `tr!("中文", "English")` or `trf!(…)`, sentence-style, active voice in both. Never translate prompts, ASR context, index text, logs or protocol keys; code that parses note text must accept both languages. Tests pin a language with `mm_i18n::with_lang`. Speaker hues are identity, so one person keeps one hue on every surface.

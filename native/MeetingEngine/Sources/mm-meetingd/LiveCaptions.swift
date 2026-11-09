@@ -89,12 +89,21 @@ struct LiveModels: @unchecked Sendable {
     let speaker: WeSpeakerModel?
     /// `nil` when Sortformer failed to load: speakers then come from embeddings (and direction) only.
     let turns: SortformerDiarizer?
+    /// Prefix-rollback decoding for partials; `nil` falls back to re-transcribing from scratch.
+    let prefix: PrefixDecoder?
+    /// Streaming Zipformer draft captions (Chinese only), used per ``DraftPolicy``: when a
+    /// stream switches to it, partials come from it and Qwen3-ASR only produces finals.
+    let draft: DraftModel?
+    /// How streams choose between the draft and Qwen3-ASR partials.
+    let draftMode: DraftPolicy.Mode
 }
 
 /// A caption work item for ``LiveCaptioner``, after Sortformer has had its say.
 enum CaptionWork: Equatable {
     /// Transcribe `start..<end` as a replaceable caption.
     case partial(id: Int, start: Int, end: Int)
+    /// Show `text` from the streaming draft model as the replaceable caption of `id`.
+    case draft(id: Int, start: Int, end: Int, text: String, stableChars: Int)
     /// Transcribe `start..<end` as the stable text of `id`. `cuts` are the Sortformer speaker
     /// changes inside it (ascending, usually empty); fusion decides whether each cut stands.
     case final(id: Int, start: Int, end: Int, hadPartial: Bool, cuts: [Int])
@@ -107,8 +116,21 @@ final class CaptionStream: @unchecked Sendable {
     private var resampler: StreamingResampler
     private var vad: StreamingVADProcessor?
     private var segmenter: UtteranceSegmenter
-    /// Adapts the partial refresh to this machine's decode speed.
-    private var pacer = PartialPacer(initial: CaptionStream.segmenterConfig.partialInterval)
+    /// Adapts the partial refresh to this machine's decode speed. The floor is lower than the
+    /// pacer's default because prefix-rollback partials only decode the tail of the sentence.
+    private var pacer = PartialPacer(initial: CaptionStream.segmenterConfig.partialInterval, minInterval: 0.2)
+    /// Tokens of the latest partial per open utterance, forced (minus the rollback) on the next one.
+    private var hypotheses: [Int: [Int32]] = [:]
+    /// Speaker guess per open utterance, taken once so partials do not re-run the embedding model.
+    private var partialSpeakers: [Int: SpeakerLabel] = [:]
+    /// Draft decoding of the utterance in progress.
+    private var draft: (id: Int, stream: DraftStream, fedUntil: Int, text: String)?
+    /// Utterances that showed a draft, so their final retires it even when Qwen3-ASR hears nothing.
+    private var drafted: Set<Int> = []
+    /// Audio fed to the draft before the VAD's onset, like ``slice(_:_:)``'s pre-roll.
+    static let draftPreRoll = rate / 10
+    /// Draft or Qwen3-ASR partials; set by the captioner once models are loaded.
+    var draftPolicy = DraftPolicy(mode: .auto)
     /// Decode timings for the end-of-session log line.
     private(set) var stats = DecodeStats()
     private var clock: CaptionClock?
@@ -203,8 +225,44 @@ final class CaptionStream: @unchecked Sendable {
             offset = end
         }
         pushTurns(samples, models: models)
-        return releaseFinals(Self.coalesce(actions), flushing: false)
+        return releaseFinals(Self.coalesce(actions), flushing: false) + advanceDraft(models: models)
     }
+
+    /// Feeds the utterance in progress to the streaming draft model.
+    ///
+    /// A new utterance (VAD onset or a split) gets a fresh stream, primed with its audio since
+    /// the onset; afterwards only new samples are fed, so each call costs one or two 320 ms
+    /// chunks at most.
+    /// - Parameter models: Loaded models; without a draft model nothing happens.
+    /// - Returns: A draft caption when its text changed.
+    private func advanceDraft(models: LiveModels) -> [CaptionWork] {
+        guard let model = models.draft, let start = segmenter.activeStart, let id = segmenter.activeID else {
+            draft = nil
+            return []
+        }
+        if draft?.id != id {
+            // Decided per utterance so one caption never mixes the two sources.
+            guard draftPolicy.useDraft else {
+                draft = nil
+                return []
+            }
+            draft = (id, model.makeStream(), max(audioBase, start - Self.draftPreRoll), "")
+        }
+        guard var d = draft, processed > d.fedUntil else { return [] }
+        let text = d.stream.accept(exactSlice(d.fedUntil..<processed))
+        d.fedUntil = processed
+        defer { draft = d }
+        guard !text.isEmpty, text != d.text else { return [] }
+        d.text = text
+        drafted.insert(id)
+        return [.draft(id: id, start: start, end: processed, text: text, stableChars: DraftCaption.stableScalars(text))]
+    }
+
+    /// Whether `id` showed a draft caption that its final must retire.
+    func hadDraft(_ id: Int) -> Bool { drafted.contains(id) }
+
+    /// Whether the draft model owns the partials of `id`.
+    func draftOwns(_ id: Int) -> Bool { draft?.id == id }
 
     /// Ends the stream: closes any open utterance.
     /// - Returns: The last final, if any.
@@ -313,11 +371,38 @@ final class CaptionStream: @unchecked Sendable {
     static let vadConfig = VADConfig(onset: 0.5, offset: 0.35, minSpeechDuration: 0.25, minSilenceDuration: 0.5,
                                      windowDuration: 0.032, stepRatio: 1.0)
 
-    /// Segmentation: first partial after 0.4 s of speech, then as often as ``PartialPacer``
-    /// allows (starting at 0.5 s); utterances past 8 s are cut at their longest pause, past 12 s at
-    /// the quietest point. See `docs/engine-protocol.md` › 实时字幕.
+    /// Segmentation: first partial after 0.25 s of confirmed speech, then as often as
+    /// ``PartialPacer`` allows (starting at 0.5 s) and at every word gap of ≥ 0.15 s; utterances
+    /// past 8 s are cut at their longest pause, past 12 s at the quietest point. See
+    /// `docs/engine-protocol.md` › 实时字幕.
     static let segmenterConfig = UtteranceSegmenter.Config(
-        sampleRate: rate, partialInterval: 0.5, firstPartialDelay: 0.4, maxDuration: 12, splitAfter: 8, minPause: 0.2)
+        sampleRate: rate, partialInterval: 0.5, firstPartialDelay: 0.25, maxDuration: 12, splitAfter: 8, minPause: 0.2,
+        pauseTrigger: 0.15, minPauseAdvance: 0.1)
+
+    /// Tokens of the previous partial of `id`, for prefix-rollback decoding.
+    func hypothesis(_ id: Int) -> [Int32] { hypotheses[id] ?? [] }
+
+    /// Stores the newest partial tokens of `id`.
+    func setHypothesis(_ id: Int, _ tokens: [Int32]) { hypotheses[id] = tokens }
+
+    /// The cached partial speaker guess of `id`, computing it once with `make` when absent.
+    /// - Parameters:
+    ///   - id: Utterance.
+    ///   - make: Computes the guess; returning `nil` (too little audio) leaves the cache empty.
+    /// - Returns: The guess, or `unknown`.
+    func partialSpeaker(_ id: Int, _ make: () -> SpeakerLabel?) -> SpeakerLabel {
+        if let known = partialSpeakers[id] { return known }
+        guard let label = make() else { return .unknown }
+        partialSpeakers[id] = label
+        return label
+    }
+
+    /// Drops per-utterance partial state once the utterance is final.
+    func forget(_ id: Int) {
+        hypotheses[id] = nil
+        partialSpeakers[id] = nil
+        drafted.remove(id)
+    }
 
     /// Records how long a partial took and retunes the refresh interval.
     /// - Parameter seconds: Wall time of the partial's transcription.
@@ -325,6 +410,10 @@ final class CaptionStream: @unchecked Sendable {
         stats.partials.append(seconds)
         pacer.record(decodeSeconds: seconds)
         segmenter.setPartialInterval(pacer.interval)
+        if draftPolicy.observe(partialInterval: pacer.interval) {
+            log("captions \(origin.rawValue): Qwen3-ASR partials refresh every \(Int(pacer.interval * 1000)) ms; "
+                + "switching to draft captions")
+        }
     }
 
     /// Records how long a final took to transcribe.
@@ -555,7 +644,35 @@ final class LiveCaptioner: @unchecked Sendable {
             async let turns = Self.loadTurnDiarizer(sessionId)
             let loaded = (try await asr, try await vad, await speaker, await turns)
             if loaded.2 == nil { log("captions \(sessionId): speaker embeddings unavailable; speakers will be unknown") }
-            models = LiveModels(asr: loaded.0.value, vad: loaded.1.value, speaker: loaded.2?.value, turns: loaded.3?.value)
+            var prefix: PrefixDecoder?
+            // MM_PARTIAL_PREFIX=0 restores whole-utterance re-decoding, for A/B runs of eval-captions.
+            if ProcessInfo.processInfo.environment["MM_PARTIAL_PREFIX"] == "0" {
+                log("captions \(sessionId): prefix-rollback partials off (MM_PARTIAL_PREFIX=0)")
+            } else {
+                do { prefix = try await SpeechModels.shared.livePrefixDecoder().value } catch {
+                    log("captions \(sessionId): prefix-rollback partials disabled, re-decoding from scratch: \(error)")
+                }
+            }
+            var draft: DraftModel?
+            // MM_DRAFT=0 turns the draft layer off and MM_DRAFT=1 forces it, for A/B runs of
+            // eval-captions; the default switches to it only when Qwen3-ASR partials get slow.
+            // The model is Mandarin-only, so other caption languages keep Qwen3-ASR partials.
+            let draftSetting = ProcessInfo.processInfo.environment["MM_DRAFT"]
+            let draftMode: DraftPolicy.Mode = draftSetting == "1" ? .always : .auto
+            if languageCode != "zh" {
+                log("captions \(sessionId): draft captions off (language \(languageCode ?? "auto"), model is Mandarin-only)")
+            } else if draftSetting == "0" {
+                log("captions \(sessionId): draft captions off (MM_DRAFT=0)")
+            } else {
+                do { draft = try await SpeechModels.shared.draft().value } catch {
+                    log("captions \(sessionId): draft captions unavailable, using Qwen3-ASR partials: \(error)")
+                }
+            }
+            models = LiveModels(asr: loaded.0.value, vad: loaded.1.value, speaker: loaded.2?.value, turns: loaded.3?.value,
+                                prefix: prefix, draft: draft, draftMode: draftMode)
+            // Without a draft model a stream must never switch away from Qwen3-ASR partials.
+            let policy = draft == nil ? DraftPolicy(mode: .auto, switchInterval: .infinity) : DraftPolicy(mode: draftMode)
+            for stream in streams { stream.draftPolicy = policy }
         } catch {
             log("captions \(sessionId): disabled, models unavailable: \(error)")
             microphone?.close()
@@ -583,7 +700,8 @@ final class LiveCaptioner: @unchecked Sendable {
                 }
             }
             if last { break }
-            try? await Task.sleep(for: .milliseconds(100))
+            // 50 ms keeps the loop's own wait well under the 0.2 s partial floor.
+            try? await Task.sleep(for: .milliseconds(50))
         }
         for stream in streams {
             stream.logStereoSummary()
@@ -606,26 +724,41 @@ final class LiveCaptioner: @unchecked Sendable {
     /// Transcribes one work item and sends its notifications (runs inside ``MLXGate``).
     private func perform(_ work: CaptionWork, on stream: CaptionStream, models: LiveModels, skipPartials: Bool) {
         switch work {
+        case .draft(let id, let start, let end, let text, let stable):
+            let speaker = stream.partialSpeaker(id) {
+                let audio = stream.slice(start, end)
+                guard audio.count >= CaptionStream.rate * 3 / 2, let embedding = embed(audio, models) else { return nil }
+                return tracker.peek(SpeechObservation(embedding: embedding, origin: stream.origin,
+                                                      turnSlot: stream.turnSlot(start, end)))
+            }
+            send(Methods.Meeting.nCaptionPartial, CaptionPartialEvent(
+                sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: stream.ms(start),
+                text: text, speaker: speaker, stableChars: stable))
+
         case .partial(let id, let start, let end):
+            // The draft model already shows this utterance; Qwen3-ASR only finalizes it.
+            guard !stream.draftOwns(id) else { return }
             guard !skipPartials else {
                 stream.recordSkippedPartial()
                 return
             }
             let audio = stream.slice(start, end)
             let began = DispatchTime.now()
-            let text = transcribe(audio, models)
+            let (text, stable) = transcribePartial(id: id, audio, on: stream, models)
             stream.recordPartialDecode(seconds: Self.seconds(since: began))
             guard !text.isEmpty else { return }
-            var speaker = SpeakerLabel.unknown
-            if audio.count >= CaptionStream.rate * 3 / 2, let embedding = embed(audio, models) {
-                speaker = tracker.peek(SpeechObservation(embedding: embedding, origin: stream.origin,
-                                                         turnSlot: stream.turnSlot(start, end)))
+            let speaker = stream.partialSpeaker(id) {
+                guard audio.count >= CaptionStream.rate * 3 / 2, let embedding = embed(audio, models) else { return nil }
+                return tracker.peek(SpeechObservation(embedding: embedding, origin: stream.origin,
+                                                      turnSlot: stream.turnSlot(start, end)))
             }
             send(Methods.Meeting.nCaptionPartial, CaptionPartialEvent(
                 sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: stream.ms(start),
-                text: text, speaker: speaker))
+                text: text, speaker: speaker, stableChars: stable))
 
-        case .final(let id, let start, let end, let hadPartial, let cuts) where cuts.isEmpty:
+        case .final(let id, let start, let end, var hadPartial, let cuts) where cuts.isEmpty:
+            hadPartial = hadPartial || stream.hadDraft(id)
+            stream.forget(id)
             let audio = stream.slice(start, end)
             let began = DispatchTime.now()
             let text = transcribe(audio, models)
@@ -634,13 +767,15 @@ final class LiveCaptioner: @unchecked Sendable {
             let speaker = text.isEmpty ? SpeakerLabel.unknown : attribute(audio, start, end, on: stream, models: models)
             sendFinal(id: id, start, end, text: text, speaker: speaker, on: stream)
 
-        case .final(let id, let start, let end, let hadPartial, let cuts):
+        case .final(let id, let start, let end, var hadPartial, let cuts):
             // Attribute each Sortformer piece first: where fusion hears the same person on both
             // sides of a cut, the cut is Sortformer slot jitter and the caption stays whole.
             let bounds = [start] + cuts + [end]
             let labels = (0..<bounds.count - 1).map { i in
                 attribute(stream.slice(bounds[i], bounds[i + 1]), bounds[i], bounds[i + 1], on: stream, models: models)
             }
+            hadPartial = hadPartial || stream.hadDraft(id)
+            stream.forget(id)
             let pieces = SortformerTimeline.joinPieces(bounds: bounds, labels: labels)
             if pieces.count > 1 {
                 log("captions \(stream.origin.rawValue): utterance \(id) split at "
@@ -703,6 +838,24 @@ final class LiveCaptioner: @unchecked Sendable {
     /// Seconds elapsed since `start` on the monotonic clock.
     private static func seconds(since start: DispatchTime) -> Double {
         Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+    }
+
+    /// Transcribes a partial, forcing most of the previous partial of the same utterance.
+    /// - Parameters:
+    ///   - id: Utterance.
+    ///   - audio: 16 kHz audio of the utterance so far.
+    ///   - stream: Holds the previous hypothesis.
+    ///   - models: Loaded models; without a prefix decoder this re-transcribes from scratch.
+    /// - Returns: Caption text and how many of its leading Unicode scalars are stable.
+    private func transcribePartial(id: Int, _ audio: [Float], on stream: CaptionStream,
+                                   _ models: LiveModels) -> (String, Int) {
+        guard let prefix = models.prefix else { return (transcribe(audio, models), 0) }
+        guard audio.count >= CaptionStream.rate / 5 else { return ("", 0) }
+        let seconds = Double(audio.count) / Double(CaptionStream.rate)
+        let h = prefix.decode(audio: audio, language: languageName, previous: stream.hypothesis(id),
+                              maxTokens: ASRLanguage.maxTokens(forSeconds: seconds))
+        stream.setHypothesis(id, h.tokens)
+        return (h.text, h.stableChars)
     }
 
     /// Runs Qwen3-ASR on 16 kHz audio.

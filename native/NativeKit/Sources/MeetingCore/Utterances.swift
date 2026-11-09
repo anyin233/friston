@@ -47,12 +47,18 @@ public struct UtteranceSegmenter: Sendable {
         public var splitAfter: Double
         /// Shortest gap that counts as a pause for `splitAfter`; shorter dips are breaths or plosives.
         public var minPause: Double
+        /// When set, a word gap this long (seconds) triggers a partial right away, once per gap,
+        /// as long as `minPauseAdvance` of new speech arrived since the last partial. Needs
+        /// `advance(to:audio:)`. `nil` keeps partials on the timed cadence only.
+        public var pauseTrigger: Double?
+        /// New speech required before a pause may trigger another partial.
+        public var minPauseAdvance: Double
 
         /// Creates a config.
         /// - Parameters: see the stored properties.
         public init(sampleRate: Int = 16_000, partialInterval: Double = 1.0, firstPartialDelay: Double = 0.5,
                     maxDuration: Double = 12, minFinalDuration: Double = 0.3, splitAfter: Double = 8,
-                    minPause: Double = 0.2) {
+                    minPause: Double = 0.2, pauseTrigger: Double? = nil, minPauseAdvance: Double = 0.1) {
             self.sampleRate = sampleRate
             self.partialInterval = partialInterval
             self.firstPartialDelay = firstPartialDelay
@@ -60,6 +66,8 @@ public struct UtteranceSegmenter: Sendable {
             self.minFinalDuration = minFinalDuration
             self.splitAfter = splitAfter
             self.minPause = minPause
+            self.pauseTrigger = pauseTrigger
+            self.minPauseAdvance = minPauseAdvance
         }
     }
 
@@ -79,7 +87,11 @@ public struct UtteranceSegmenter: Sendable {
     private var id: Int?
     /// Start of the utterance in progress, or `nil` between utterances. Audio before it can be dropped.
     public private(set) var activeStart: Int?
+    /// Id of the utterance in progress, or `nil` between utterances.
+    public var activeID: Int? { id }
     private var lastPartialEnd: Int?
+    /// A pause already triggered its partial; cleared when speech resumes.
+    private var pauseFired = false
 
     /// Creates a segmenter for one stream.
     /// - Parameters:
@@ -101,6 +113,7 @@ public struct UtteranceSegmenter: Sendable {
         id = ids.next()
         lastPartialEnd = nil
         nextPauseCheck = 0
+        pauseFired = false
         return []
     }
 
@@ -158,7 +171,28 @@ public struct UtteranceSegmenter: Sendable {
                 : sample
             return split(at: cut)
         }
+        if let partial = partialAtPause(at: sample, audio: audio) { return [partial] }
         return partialIfDue(at: sample)
+    }
+
+    /// A partial at a word gap, once per gap, when `pauseTrigger` is set.
+    /// - Parameters:
+    ///   - sample: Samples processed so far.
+    ///   - audio: Stream audio accessor.
+    /// - Returns: The partial, or `nil` when there is no fresh pause.
+    private mutating func partialAtPause(at sample: Int, audio: (Range<Int>) -> [Float]) -> Action? {
+        guard let trigger = config.pauseTrigger, let start = activeStart, let id else { return nil }
+        // Two seconds give the level reference; the whole utterance would cost more per VAD step.
+        let window = max(start, sample - samples(2))..<sample
+        guard window.count > samples(trigger),
+              PauseFinder.endsInPause(audio(window), sampleRate: config.sampleRate, minPause: trigger) else {
+            pauseFired = false
+            return nil
+        }
+        guard !pauseFired, sample - (lastPartialEnd ?? start) >= samples(config.minPauseAdvance) else { return nil }
+        pauseFired = true
+        lastPartialEnd = sample
+        return .partial(id: id, start: start, end: sample)
     }
 
     /// Changes how much speech separates consecutive partials (see ``PartialPacer``).
@@ -177,6 +211,7 @@ public struct UtteranceSegmenter: Sendable {
         self.id = ids.next()
         lastPartialEnd = nil
         nextPauseCheck = 0
+        pauseFired = false
         return [action]
     }
 

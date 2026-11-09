@@ -17,6 +17,8 @@ public enum Methods {
         public static let permissionsRequest = "permissions/request"
         /// Runs the live caption pipeline over an audio file (testing without capture permissions).
         public static let captionSimulateFile = "caption/simulateFile"
+        /// Loads the live caption models now instead of on the first `capture/start`.
+        public static let modelsPreload = "models/preload"
 
         public static let nCaptionPartial = "caption/partial"
         public static let nCaptionFinal = "caption/final"

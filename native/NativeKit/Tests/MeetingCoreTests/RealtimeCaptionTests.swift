@@ -176,3 +176,97 @@ private func silence(_ seconds: Double, level: Float = 0) -> [Float] {
     let long = String(repeating: "名", count: 2_000)
     #expect(ASRModelChoice.context(long)?.count == ASRModelChoice.maxContextCharacters)
 }
+
+// MARK: Pause-triggered partials
+
+@Test func pauseFinderSeesATrailingPauseOnlyAfterSpeech() {
+    #expect(PauseFinder.endsInPause(tone(1) + silence(0.2), sampleRate: sr, minPause: 0.15))
+    #expect(!PauseFinder.endsInPause(tone(1) + silence(0.1), sampleRate: sr, minPause: 0.15))
+    #expect(!PauseFinder.endsInPause(tone(1.2), sampleRate: sr, minPause: 0.15))
+    #expect(!PauseFinder.endsInPause(silence(1), sampleRate: sr, minPause: 0.15))
+}
+
+@Test func segmenterEmitsOnePartialPerWordGap() {
+    let ids = UtteranceIDAllocator()
+    var seg = UtteranceSegmenter(config: .init(sampleRate: sr, partialInterval: 5, firstPartialDelay: 5,
+                                               pauseTrigger: 0.15, minPauseAdvance: 0.1), ids: ids)
+    let audio = tone(0.6) + silence(0.4) + tone(0.6) + silence(0.4)
+    let slice: (Range<Int>) -> [Float] = { r in Array(audio[max(0, r.lowerBound)..<min(audio.count, r.upperBound)]) }
+    _ = seg.speechStarted(atSample: 0)
+    var partialEnds: [Int] = []
+    // Advance in VAD-sized steps (32 ms) the way the caption loop does.
+    for end in stride(from: 512, through: audio.count, by: 512) {
+        for case .partial(_, _, let e) in seg.advance(to: end, audio: slice) { partialEnds.append(e) }
+    }
+    // Timed partials are off (5 s), so each partial comes from one of the two gaps.
+    #expect(partialEnds.count == 2)
+    let firstGap = Int(0.6 * Double(sr))..<Int(1.0 * Double(sr))
+    let secondGap = Int(1.6 * Double(sr))..<Int(2.0 * Double(sr))
+    #expect(firstGap.contains(partialEnds[0]) && secondGap.contains(partialEnds[1]))
+}
+
+@Test func segmenterWithoutPauseTriggerKeepsTheTimedCadence() {
+    let ids = UtteranceIDAllocator()
+    var seg = UtteranceSegmenter(config: .init(sampleRate: sr, partialInterval: 5, firstPartialDelay: 5), ids: ids)
+    let audio = tone(0.6) + silence(0.4)
+    _ = seg.speechStarted(atSample: 0)
+    #expect(seg.advance(to: audio.count) { r in Array(audio[r]) }.isEmpty)
+}
+
+// MARK: Prefix rollback
+
+@Test func forcedPrefixGivesBackTheTailButKeepsTheHeader() {
+    let asr: Int32 = 99
+    // Forced language: no header, keep all but the last 5.
+    #expect(PrefixRollback.forcedCount(previous: Array(1...12), rollback: 5, asrTextToken: asr, headerExpected: false) == 7)
+    // Short hypotheses are fully re-decoded.
+    #expect(PrefixRollback.forcedCount(previous: [1, 2, 3], rollback: 5, asrTextToken: asr, headerExpected: false) == 0)
+    // Auto-detect: the `language X<asr_text>` header is never rolled back…
+    let withHeader: [Int32] = [7, 8, asr, 1, 2]
+    #expect(PrefixRollback.headerLength(withHeader, asrTextToken: asr) == 3)
+    #expect(PrefixRollback.forcedCount(previous: withHeader, rollback: 5, asrTextToken: asr, headerExpected: true) == 3)
+    // …and nothing is forced before the model has committed to a language.
+    #expect(PrefixRollback.forcedCount(previous: [7, 8], rollback: 0, asrTextToken: asr, headerExpected: true) == 0)
+}
+
+@Test func stableScalarsStopAtTheFirstDifferenceAndIgnoreHalfCharacters() {
+    #expect(PrefixRollback.stableScalars(text: "今天我们讨论路线图", stableText: "今天我们") == 4)
+    #expect(PrefixRollback.stableScalars(text: "今天我们讨论路线图", stableText: "今天我\u{FFFD}") == 3)
+    #expect(PrefixRollback.stableScalars(text: "今天我们", stableText: " 今天你们") == 2)
+    #expect(PrefixRollback.stableScalars(text: "ab", stableText: "abc") == 2)
+    #expect(PrefixRollback.stableScalars(text: "", stableText: "") == 0)
+}
+
+// MARK: Draft captions
+
+@Test func draftKeepsOnlyTheNewestCharacterVolatile() {
+    #expect(DraftCaption.stableScalars("今天我们") == 3)
+    #expect(DraftCaption.stableScalars("今") == 0)
+    #expect(DraftCaption.stableScalars("") == 0)
+    #expect(DraftCaption.stableScalars("今天", volatileTail: 0) == 2)
+}
+
+@Test func segmenterReportsTheActiveUtterance() {
+    let ids = UtteranceIDAllocator()
+    var seg = UtteranceSegmenter(config: .init(sampleRate: sr), ids: ids)
+    #expect(seg.activeID == nil)
+    _ = seg.speechStarted(atSample: 0)
+    #expect(seg.activeID == 1)
+    _ = seg.speechEnded(endSample: 16_000)
+    #expect(seg.activeID == nil)
+}
+
+@Test func draftPolicySwitchesOnceWhenPartialsGetSlow() {
+    var auto = DraftPolicy(mode: .auto, switchInterval: 0.6)
+    #expect(!auto.useDraft)
+    // `#expect` cannot call a mutating method, so record each call first.
+    let fast = auto.observe(partialInterval: 0.2)
+    let nan = auto.observe(partialInterval: .nan)
+    #expect(!fast && !nan && !auto.useDraft)
+    let slow = auto.observe(partialInterval: 0.6)
+    #expect(slow && auto.useDraft)
+    // Stays on the draft and reports the switch only once.
+    let again = auto.observe(partialInterval: 0.2)
+    #expect(!again && auto.useDraft)
+    #expect(DraftPolicy(mode: .always).useDraft)
+}

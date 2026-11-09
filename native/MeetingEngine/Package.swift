@@ -27,12 +27,20 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 // AudioFileLoader (any AVAudioFile format → 16 kHz mono) for transcribe/file and clips.
                 .product(name: "AudioCommon", package: "speech-swift"),
+                // Streaming Zipformer draft captions (CPU, ONNX Runtime); see docs/asr-model-survey.md §9.
+                "CSherpaOnnx",
             ],
             linkerSettings: [
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("EventKit"),
                 .linkedFramework("AVFoundation"),
+                // ONNX Runtime's static library needs these system frameworks.
+                .linkedFramework("Foundation"),
+                .linkedFramework("CoreML"),
             ]
-        )
+        ),
+        // sherpa-onnx C API as a static xcframework, built by scripts/fetch-sherpa-onnx.sh
+        // (pinned version and checksums; not committed).
+        .binaryTarget(name: "CSherpaOnnx", path: "Vendor/CSherpaOnnx.xcframework"),
     ]
 )

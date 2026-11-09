@@ -138,7 +138,7 @@ private func json<T: Encodable>(_ value: T) throws -> [String: Any] {
 @Test func captionEventsUseCamelCaseWithSnakeCaseSpatial() throws {
     let partial = try json(CaptionPartialEvent(sessionId: "s", utteranceId: 4, origin: .system, startMs: 1200,
                                                text: "大家好", speaker: .unknown))
-    #expect(Set(partial.keys) == ["sessionId", "utteranceId", "origin", "startMs", "text", "speaker"])
+    #expect(Set(partial.keys) == ["sessionId", "utteranceId", "origin", "startMs", "text", "speaker", "stableChars"])
     #expect(partial["origin"] as? String == "system")
 
     let final = try json(CaptionFinalEvent(

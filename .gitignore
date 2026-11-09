@@ -11,3 +11,5 @@
 *.sqlite
 *.sqlite-*
 __pycache__/
+# sherpa-onnx xcframework, fetched by scripts/fetch-sherpa-onnx.sh.
+/native/MeetingEngine/Vendor/

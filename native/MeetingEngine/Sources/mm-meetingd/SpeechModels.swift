@@ -175,6 +175,32 @@ actor SpeechModels {
     /// - Throws: ``SpeechModelError`` when download or loading fails.
     func liveASR() async throws -> Unchecked<Qwen3ASRModel> { try await live.get() }
 
+    private let zipformer = LazyModel<DraftModel>(id: DraftModel.modelId) { try await DraftModel.load() }
+
+    /// Streaming Zipformer for draft captions (sherpa-onnx, CPU), downloaded on first use.
+    /// - Returns: The shared model; each caption stream opens its own ``DraftStream``.
+    /// - Throws: ``SpeechModelError``.
+    func draft() async throws -> Unchecked<DraftModel> { try await zipformer.get() }
+
+    private var prefixDecoder: Unchecked<PrefixDecoder>?
+
+    /// Prefix-rollback decoder over the live model, for cheap and stable partials.
+    ///
+    /// The tokenizer is read again from the same directory `liveASR()` loaded from, because
+    /// speech-swift keeps the model's own tokenizer private.
+    /// - Returns: The shared decoder.
+    /// - Throws: ``SpeechModelError`` from loading the model, or ``PrefixDecoderError`` when the
+    ///   tokenizer files are missing.
+    func livePrefixDecoder() async throws -> Unchecked<PrefixDecoder> {
+        if let prefixDecoder { return prefixDecoder }
+        let model = try await liveASR()
+        let directory = try HubCacheLocator.snapshot(repo: SpeechModelIDs.liveASR)
+            ?? HuggingFaceDownloader.getCacheDirectory(for: SpeechModelIDs.liveASR)
+        let decoder = Unchecked(PrefixDecoder(model: model.value, tokenizer: try PrefixDecoder.loadTokenizer(from: directory)))
+        prefixDecoder = decoder
+        return decoder
+    }
+
     /// Silero VAD; callers take `makeIndependentStream()` for per-stream state.
     /// - Returns: The shared model (weights only; do not run it directly from two streams).
     /// - Throws: ``SpeechModelError``.
@@ -190,6 +216,41 @@ actor SpeechModels {
     /// - Returns: The shared diarizer.
     /// - Throws: ``SpeechModelError``.
     func turnDiarizer() async throws -> Unchecked<SortformerDiarizer> { try await sortformer.get() }
+
+    /// Loads every model `capture/start` needs, so the first meeting's captions start at once.
+    ///
+    /// Mirrors what ``LiveCaptions`` loads: Qwen3-ASR and Silero VAD are required (captions
+    /// cannot run without them); speaker embeddings, Sortformer, the prefix decoder and the
+    /// Mandarin draft model are optional, so their failures are reported, not thrown.
+    /// - Parameter language: Caption language hint; the draft model is loaded only for `zh`,
+    ///   the one language it supports.
+    /// - Returns: The ids of the loaded models and the names of the optional ones that failed.
+    /// - Throws: ``SpeechModelError`` when a required model cannot be loaded.
+    func preloadLive(language: String?) async throws -> PreloadResult {
+        async let asr = liveASR()
+        async let vad = vad()
+        _ = (try await asr, try await vad)
+        var models = ["liveASR": SpeechModelIDs.liveASR, "vad": SpeechModelIDs.vad]
+        var unavailable: [String] = []
+        if (try? await speaker()) != nil {
+            models["speakerEmbedding"] = SpeechModelIDs.speakerEmbedding
+        } else { unavailable.append("speakerEmbedding") }
+        if (try? await turnDiarizer()) != nil {
+            models["liveDiarization"] = SpeechModelIDs.turnDiarizer
+        } else { unavailable.append("liveDiarization") }
+        do { _ = try await livePrefixDecoder() } catch {
+            log("preload: prefix-rollback decoder unavailable: \(error)")
+            unavailable.append("prefixDecoder")
+        }
+        // Same switches as LiveCaptions.run, so preload never fetches a model captions will not use.
+        if language == "zh" && ProcessInfo.processInfo.environment["MM_DRAFT"] != "0" {
+            if (try? await draft()) != nil {
+                models["draft"] = DraftModel.modelId
+            } else { unavailable.append("draft") }
+        }
+        log("preload: live models ready \(models.keys.sorted()), unavailable \(unavailable)")
+        return PreloadResult(models: models, unavailable: unavailable)
+    }
 
     /// Loads the refine model: the requested checkpoint, or Qwen3-ASR 1.7B 8bit preferring an
     /// existing `huggingface_hub` copy.
@@ -298,4 +359,12 @@ final class LockedValue<T: Sendable>: @unchecked Sendable {
     /// Changes the value in place under the lock.
     /// - Parameter change: Mutation to apply.
     func mutate(_ change: (inout T) -> Void) { lock.withLock { change(&value) } }
+}
+
+/// `models/preload` result.
+struct PreloadResult: Codable, Sendable {
+    /// Role (`liveASR`, `vad`, …) → model id actually loaded.
+    let models: [String: String]
+    /// Optional roles that failed to load; captions run without them.
+    let unavailable: [String]
 }

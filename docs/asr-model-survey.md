@@ -236,6 +236,167 @@
 
 **实时字幕也用 Silero 断句**，远场时可能同样漏检。不过实时场景多是近讲麦克风，这次没有测。
 
+## 8. 边说边出字：Foresight 的做法与本项目的差距（2026-11-08）
+
+第 6 节把 partial 刷新压到约 0.33 秒，但字幕仍然是“一段一段跳出来”，而不是随着说话一个字一个字长出来。为了找出差距，拆解了本机的 Google AI Edge Foresight（`/Applications/Foresight.app`，1.0.0，构建号 1.0.0.28.20261005）。以下结论来自二进制里的 protobuf 描述、日志字符串和本地模型文件，**没有反编译代码逻辑**，数值默认值也拿不到。
+
+### 8.1 Foresight 的转写管线
+
+**组成。** Flutter 界面加 Google 内部的 `odml/audio/transcription` C++ 库，推理用 LiteRT-LM（Metal 后端）。
+
+| 模型文件（`~/Library/Application Support/com.google.AIEdgeForesight/models/`） | 大小 | 判断 |
+| --- | --- | --- |
+| `3/1.1/*.litertlm` | 178 MB | 实时 ASR，模型类型 `TinyGemmaAsr`：USM 风格音频编码器加小 Gemma 解码器。用 Tink 加密，缓存里有 `streaming_audio_encoder` 和 `audio_adapter` |
+| `16/2.0/*.litertlm` | 6.4 GB | Gemma 4 系列大模型，带 MTP 草稿头（`mtp_drafter`），负责笔记、摘要和问答 |
+| `1/3.0/*.litertlm` | 445 MB | 多模态嵌入或小模型（文本、图像、音频编码器），用于 RAG |
+| `4/1.1/*.tflite`、`2/1.0/*.model` | 171 MB、4.5 MB | 可能是 NAM 后处理（见下文）或嵌入模型的 tflite 与 SentencePiece 词表，无法确认 |
+
+LiteRT-LM 的 `AsrModelType` 里同时有 `TinyGemmaAsr` 和 **`Qwen3Asr`**，说明谷歌的运行时也支持 Qwen3-ASR，下面的增量方法可以直接套用在 Qwen3-ASR 上。
+
+**管线（`LiteRtLmSpeechProcessorOptions` 的字段和日志里的函数名）：**
+
+1. **VAD 分段。** 使用 WebRTC RNN VAD（rnnoise，10 ms 帧）。`VadSegmenterOptions` 有 `start_trigger_duration_ms`、`end_trigger_duration_ms`、`lookahead_duration_ms`、`min_onset_threshold`、`max_offset_threshold`（双阈值滞回），事件有 `VAD_SPEECH_ONSET`、`VAD_SPEECH_OFFSET` 和 `VAD_SPEECH_RESUMED`。
+2. **流式音频编码。** 模型里有单独的 `streaming_audio_encoder`，执行器为 `AudioLiteRtCompiledModelExecutor::AudioStreamingEncoder`，状态保存在 `AudioStreamingContext`。编码器参数有 `block_size`、`past_horizon`、`future_horizon`、`pad_for_streaming` 和 `tokens_per_frame`，也就是带有限右看的块状因果注意力。每来一块频谱就编码一次，用 `AddAudioSpectrum` **追加**进 LLM 会话的 KV 缓存（`prefilled_spectrogram_columns`），已经处理过的音频不再重算。
+3. **interim 结果（临时字幕）。** 日志里有 `ProcessInterimSegment` 和 `cloned_session->AddQueryChunk(TranscriptTokensToString(*transcript_tokens_prefill))`，参数有 `decoder_prefill_backoff` 和 `extra_decode_tokens`，据此推断流程如下：
+   - **克隆**已经装好音频的会话，主会话继续接收新音频；
+   - 把**上一次的转写结果去掉末尾 N 个 token**（backoff）当作已知前缀一次性预填；
+   - 只往后解码若干个新 token（`extra_decode_tokens`），得到 interim 后丢弃克隆的会话。
+
+   这样前面的字不会变，**只有末尾几个字会被改写**，Foresight 的“实时改字”就是这么来的。解码步数从“整句的 token 数”降到“回退数加新增数”。
+4. **触发时机。** 除了按块刷新，还有 `interim_results_trigger_silence_ms`：在**短停顿**处（比断句静音短，代码校验它必须小于 `end_trigger_duration_ms`）立即出一次 interim，也就是在词边界出字，不会卡在半个词上。
+5. **定稿。** VAD 判定说完后执行 `ProcessFinalSegment`。由 `final_prefill_disabled`、`final_prefill_same_as_interim` 和 `final_decoder_prefill_backoff` 决定：定稿是整句重新解码（可以改前面的字），还是沿用前缀只重解尾部。结果带 `is_final`，覆盖同一段的 interim。
+6. **界面层。** Dart 端有 `activeInterims`、`_areInterimsEqual`（相同的 interim 不重绘）、`flushPendingInterims` 和 `LiveTranscriptNotifier`。
+7. **NAM 后处理。** `NamPostProcessorOptions`（attention、text encoder、spm 三个模型）是谷歌的 Neural Associative Memory 上下文偏置，用来纠正人名和术语。
+
+**本机的“Foresight Multilingual”补丁**（`~/Applications/Foresight Multilingual.app`）把 `OdmlSpeechProcessorTranscribe` 换成了经 Unix socket 调用 Python mlx-audio 的 Qwen3-ASR，**每段说完才整段识别一次**，所以它没有 interim，看不到边说边出字的效果。要体验原版效果，需要直接打开 `/Applications/Foresight.app`（英文模型）。
+
+### 8.2 本项目实时字幕现在的做法
+
+见 `LiveCaptions.swift` 和 `MeetingCore/Utterances.swift`：
+
+- Silero VAD 确认开口（`minSpeechDuration` 0.25 s）后，再等 0.4 s 才出第一条 partial；
+- **每次 partial 都从头识别整句**：`Qwen3ASRModel.transcribe` 重新提取梅尔特征、重新编码整句、从第一个 token 开始贪心解码，没有任何复用；
+- 句子越长，每次 partial 越贵，`PartialPacer` 会自动放慢刷新；落后实时时直接跳过 partial；
+- 整句重识别，前面的字随时可能变，界面只能整行替换，所以看起来是“跳”出来的，不像一个字一个字地长出来；
+- partial 路径上，音频 ≥ 1.5 s 时每次还会跑一遍 WeSpeaker 声纹，进一步占用 MLX 时间。
+
+### 8.3 Qwen3-ASR 能借用哪些做法
+
+Qwen3-ASR 的编码器先按 1 s 一块独立做卷积，再在 8 s 窗口内做块对角注意力（speech-swift `AudioEncoder.swift`：`nWindow` 50，`nWindowInfer` 800）。所以：**已经填满的 8 s 窗口，编码结果不会再变，可以缓存；当前窗口内是双向注意力，新音频会改变整窗的编码。** 这和 Foresight 的因果流式编码器不同，音频 KV 缓存无法像 Foresight 那样逐块追加。
+
+社区的 C 实现 antirez/qwen-asr 默认的流式参数是：2 s 一块、8 s 编码窗口、**回退 5 个 token**、最后 2 块视为未定；只输出稳定的文字，最后一块再补齐剩余部分。思路与 Foresight 的 backoff 一致。Qwen 官方仓库的流式接口和参数名还没有核对源码。
+
+按收益从高到低排列：
+
+1. **前缀回退解码（最关键）。** 记住上一次 partial 的 token；下一次 partial 照常编码音频，再把“上次结果去掉末尾 k 个 token”（k ≈ 5）接在 `<asr_text>` 后面一次性预填，然后继续贪心解码到结束。
+   - 稳定前缀不再闪动，只有末尾几个字会被改写；
+   - 解码步数从整句降到 k 加新增字数，长句也能保持约 0.3 s 刷新；
+   - 定稿时仍然整句不带前缀重新解码，保证准确率（相当于 Foresight 的 `final_prefill_disabled`）。
+
+   speech-swift 0.0.29 的 `generateText` 不支持传入强制前缀，需要在本地给 speech-swift 打补丁或 fork（它锁定在 exact 版本，不影响 `mlx-swift-lm` 3.31.4 的锁定）。**具体改法尚未验证。**
+2. **在停顿处出字。** 除了固定间隔，检测到约 150–200 ms 的短停顿（低于 0.5 s 断句静音）时立即出一次 partial，这样出字多落在词边界上。
+3. **缩短首字延迟。**
+   - 第一条 partial 从“确认开口 + 0.4 s”提前到“确认开口 + 0.2–0.25 s”；
+   - partial 路径不再计算声纹，说话人留到定稿时再定；
+   - partial 和 final 在 `MLXGate` 里排队时，final 优先（现在落后时只会跳过 partial）。
+4. **界面区分稳定文字与未定文字。** `caption/partial` 增加 `stableChars`（稳定前缀的长度），界面把稳定部分正常显示，末尾未定的字用浅色显示，新字直接接在后面，不再整行替换。这要同时修改 `crates/mm-engine/src/methods.rs`、`EngineKit/Methods.swift`、`docs/engine-protocol.md` 和 GPUI 字幕视图。
+5. **编码器窗口缓存（低优先）。** 句子目前最长 12 s，最多只能省掉一个 8 s 窗口的编码。只有将来放宽切句长度时才值得做。
+
+不建议为了实时性换模型：真正的流式模型里，Nemotron 3.5 的中文明显较差（见第 3 节）。sherpa-onnx 的流式 Paraformer 中文尚可，可以作为“草稿层”，先出字再由 Qwen3-ASR 覆盖，但这样要多维护一套模型和运行时，而且没有实测，所以排在前缀回退之后。
+
+**验证方法。** 扩展 `scripts/eval-captions.py`，在现有指标之外增加：
+
+- 每个字从说出到显示的延迟（用合成语音的分词时间戳）；
+- 已显示的字后来又被改掉的比例（闪动率）；
+- 每次 partial 的解码耗时随句长的变化。
+
+先只做第 1、3 项，比较 k = 3、5、8 下的闪动率和定稿字错误率，再决定是否修改协议和界面。
+
+### 8.4 实测与落地（2026-11-08）
+
+**Foresight 原版效果**（用 computer use 驱动 `/Applications/Foresight.app`，用 `say` 从扬声器播放测试语音）：
+
+- 正在说的句子以**灰色斜体**显示，随说话逐词变长；说完后变成黑色定稿。肉眼看是一个词一个词往后长，前面的词基本不动，和 8.1 节的推断一致。
+- 麦克风和系统声音是**两路独立转写**，同一段扬声器声音会出两份（一份 “Mac”，一份 “map”）。
+- 两句之间停顿短时，会合成一个约 20 秒的长段，定稿要等整段说完。
+- **TinyGemmaAsr 只支持英文。** 普通话（婷婷，约 20 秒）只出了一条 “..!!.” 的临时结果，没有任何定稿；西班牙语（Paulina）和日语（Kyoko）也只有 “ster” 之类的碎片。中文会议用不了，我们继续用 Qwen3-ASR，只借鉴它的调度方法。
+
+**本项目落地的改动**（引擎 `PrefixDecoder.swift`、`MeetingCore/PrefixRollback.swift`、`Utterances.swift`；协议见 `engine-protocol.md` › 实时字幕）：
+
+1. **前缀回退解码。** 直接调用 speech-swift 公开的特征提取、编码器、解码器和分词器，自己拼提示词：上一条 partial 去掉末尾 5 个 token 后接在 `<asr_text>` 后面，和音频一起预填，只往后解码。不需要 fork speech-swift，也不影响版本锁定。定稿仍然整句从头识别。
+2. **停顿触发。** 说话中出现 ≥ 0.15 s 的词间停顿时立即出一次 partial，每个停顿一次。
+3. **首字更早。** VAD 确认开口后 0.25 s 出第一条（原来是 0.4 s）；刷新下限从 0.3 s 降到 0.2 s；字幕循环每 50 ms 一轮（原来 100 ms）；partial 的说话人每句只估计一次。
+4. **界面。** `caption/partial` 新增 `stableChars`；主窗口和浮窗把稳定部分正常显示，末尾未定的字用浅色显示，新字接在后面。
+
+**测评。** `scripts/eval-captions.py`，Release 引擎，M5 Pro，合成语音 68 秒 12 句。两组都用了第 2、3 项的新调度，区别只在 partial 的解码方式（`MM_PARTIAL_PREFIX=0` 关闭前缀回退）。新增“改字率”指标：partial 已显示的字被下一条 partial 或定稿改掉的比例。
+
+| 指标 | 整句重解码 | 前缀回退 |
+| --- | --- | --- |
+| partial 解码耗时（中位 / p90） | 109 / 216 ms | **81 / 116 ms** |
+| partial 刷新间隔（中位 / p90） | 300 / 500 ms | **209 / 306 ms** |
+| 第一条字幕（开口 → 显示，中位 / p90） | 791 / 1086 ms | **702** / 1105 ms |
+| 句末到显示最后几个字（中位 / p90） | −25 / 152 ms | **−179 / −68 ms** |
+| 改字率 | 2.1% | **1.4%** |
+| 定稿延迟（中位） | 1164 ms | 1144 ms |
+| 字错误率 | 0 | 0 |
+
+和第 6 节（今天之前）相比，partial 刷新间隔中位从 330 ms 降到 209 ms，句子说完前约 0.18 s 屏幕上就已经出现最后几个字。p90 解码耗时几乎减半，说明长句不再拖慢刷新。合成语音很干净，改字率和字错误率的绝对值都偏低，真实会议要用真人录音复测。
+
+**还没做到的。** 第一条字幕仍然约 0.7 s，主要卡在 Silero VAD 确认开口（≥ 0.25 s 语音）和第一次解码上。要再快，就得在 VAD 确认前先用低阈值试解码；这样容易对噪声出假字，暂时没做。在真实 App 里用 computer use 看到中文字幕边说边出、定稿正常，但截图没能抓到“浅色未定尾巴”正在显示的那一刻，这一点只有单元测试和协议数据可以证明。
+
+## 9. TinyGemmaAsr 的中文替代：小型流式模型实测（2026-11-08）
+
+**目标。** 找一个和 TinyGemmaAsr 同一定位的模型：小（约 200 MB 以内）、真正流式（逐块出字、已出的字基本不改）、中文好、在 Mac 上便宜到可以一直跑。
+
+**测试集。**
+- AISHELL-1 测试集随机 200 句（朗读，991 s）；
+- WenetSpeech test_meeting 随机 200 句（真实会议，≥ 1.5 s，1335 s）。
+
+**方法。**
+- 字错误率：转简体，阿拉伯数字转中文，去掉标点和空格后逐字比较。
+- 流式模型按 100 ms 一块喂音频，和实时字幕一样；计时是全部计算时间，RTF = 计算时间 / 音频时长。“单块最慢”是每 100 ms 音频的最大计算时间（p99），决定会不会卡顿；“partial 改字率”是已显示的字被后续 partial 改掉的比例。
+- 非流式模型整句识别一次。
+- sherpa-onnx（ONNX Runtime）跑 CPU 2 线程，Fun-ASR-Nano 用 4 线程；MLX 跑 GPU。机器为 M5 Pro。
+
+| 模型 | 大小 | 流式 | AISHELL-1 | 会议集 | RTF | 单块最慢 | partial 改字率 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen3-ASR 1.7B 4bit（现用，MLX） | 1.5 GB | 伪流式 | **3.84** | **6.19** | 0.065 | – | – |
+| Fun-ASR-Nano int8（sherpa，CPU） | 0.84 GB | 否（LLM 解码） | 4.19 | 7.09 | 0.06–0.075 | – | – |
+| Qwen3-ASR 0.6B 4bit（MLX） | 0.7 GB | 伪流式 | 4.19 | 7.87 | 0.024 | – | – |
+| **流式 Zipformer 中文 int8**（sherpa） | **167 MB** | **是，320 ms 一块** | 4.65 | 9.85 | 0.045 | 17 ms | 0.3% |
+| 流式 Zipformer 中文 xlarge int8 | 746 MB | 是，320 ms | 4.33 | 8.86 | 0.10 | 39 ms | 0.3% |
+| SenseVoice Small int8（sherpa） | 247 MB | 否 | 5.00 | 10.81 | 0.022 | – | – |
+| Cohere Transcribe 2B（MLX bf16） | 约 4 GB | 否 | 6.02 | 10.96 | 0.027 | – | – |
+| X-ASR 中英 160 ms int8（带标点） | 175 MB | 是，160 ms | 6.27 | 11.80 | 0.070 | 12 ms | 0 |
+| X-ASR 中英 480 ms int8（带标点） | 175 MB | 是，480 ms | 7.11 | 11.85 | 0.033 | 17 ms | 0 |
+| 流式 Paraformer 中英 int8 | 230 MB | 是，600 ms | 5.95 | 14.45 | 0.037 | 23 ms | 0 |
+| Moonshine base 中文 | 144 MB | 否 | 8.24 | 23.02 | 0.018–0.027 | – | – |
+| 流式 Zipformer small CTC 中文 int8 | 26 MB | 是 | 8.87 | 22.40 | 0.015 | 9 ms | 0 |
+
+**排除的两个指定模型。**
+- **Cohere Transcribe（`CohereLabs/cohere-transcribe-03-2026`）。** 2B、离线，不流式。中文明显不如 Qwen3-ASR 0.6B（会议集 10.96% 对 7.87%），体积是后者的近 6 倍。它是英文第一（Open ASR Leaderboard），但不适合中文会议。另外 `mlx-community/cohere-transcribe-03-2026-mlx-8bit` 在 mlx-audio 2.0.1 里只输出乱码，要用官方仓库（需在 Hugging Face 同意协议）。
+- **Kroko ASR（`Banafo/Kroko-ASR`）。** 结构上正是我们要的（sherpa-onnx 流式 Zipformer，约 156 MB），但**没有中文模型**，只有德、英、西、法、意等欧洲语言加希伯来语和土耳其语，所以没有实测。
+
+**结论：TinyGemmaAsr 的中文替代选流式 Zipformer 中文 int8**（`sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30`，源自 icefall `multi_zh-hans` zipformer-large，Apache-2.0）。理由：
+
+- 定位一致：167 MB（TinyGemmaAsr 约 178 MB），真正流式，每 320 ms 一块（加约 130 ms 前瞻）；
+- 便宜：CPU 2 线程 RTF 0.045，每块最多 17 ms，完全不占 GPU，不和 Qwen3-ASR 抢 MLX；
+- 稳：partial 改字率 0.1–0.3%，字基本只往后长，正是“边说边出字”要的效果；
+- 准确率在真正流式的模型里最好：会议集 9.85%，比同大小的 X-ASR（11.8%）、流式 Paraformer（14.45%）都好。xlarge 版好 1 个点，但体积 4.5 倍、计算 2 倍，不划算。
+
+**但它不能单独替代 Qwen3-ASR。** 会议集 9.85% 对 6.19%，差 3.7 个点，所以要像 Foresight / Google 的两段式那样用：
+
+1. **草稿层：** 流式 Zipformer 每 320 ms 出一次字，直接显示，几乎不改字；
+2. **定稿层：** VAD 判定说完后，仍由 Qwen3-ASR 1.7B 整句识别，覆盖草稿。
+
+这样首字延迟只取决于 Zipformer 的分块（按 320 ms 分块加前瞻推算约 0.45 s，尚未在实时管线里实测；不再等 VAD 确认和第一次 LLM 解码），GPU 只在定稿时用。代价是定稿时会改掉草稿里约 3–4% 的字，以及多一个 ONNX Runtime 依赖（sherpa-onnx 有 Swift / C API 和 macOS arm64 预编译库）。
+
+**其他发现。**
+- **Fun-ASR-Nano** 是最接近 Qwen3-ASR 1.7B 的小模型（会议集 7.09%），但它是 LLM 解码、不流式，CPU 上长句要 1.4 s。适合做定稿或精转的备选，不适合草稿层。
+- **Qwen3-ASR 0.6B** 在准确率上胜过所有流式小模型（会议集 7.87%），GPU 计算只有 1.7B 的 37%。如果不想加 sherpa-onnx 依赖，可以只把 partial 换成 0.6B（配合第 8 节的前缀回退），定稿仍用 1.7B。
+- **X-ASR 中英** 是唯一能处理中英夹杂并自带标点的小型流式模型，但中文比 Zipformer 差约 2 个点。中英混说多的会议可以考虑。
+- 合成语音和朗读语音都偏干净；会议集是真实录音，但每句是人工切好的，不含 VAD 切分误差。
+
 ## 资料来源
 
 - Qwen3-ASR 官方仓库与技术报告：https://github.com/QwenLM/Qwen3-ASR
@@ -262,3 +423,14 @@
 - speech-swift MOSS MLX 测评：https://github.com/soniqo/speech-swift/blob/main/docs/benchmarks/moss-mlx.md
 - Fun-ASR v1.5 介绍：https://qwenaudio.github.io/funasr/
 - 多教师蒸馏论文（Qwen3-ASR 会议集另一组数字）：https://arxiv.org/abs/2608.03610
+- Cohere Transcribe 模型卡：https://huggingface.co/CohereLabs/cohere-transcribe-03-2026
+- Kroko ASR 模型列表：https://huggingface.co/Banafo/Kroko-ASR
+- sherpa-onnx 流式 Zipformer 中文：https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30（训练结果：https://github.com/k2-fsa/icefall/blob/master/egs/multi_zh-hans/ASR/RESULTS.md）
+- X-ASR 中英流式：https://huggingface.co/GilgameshWind/X-ASR-zh-en
+- sherpa-onnx 模型发布页：https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+- Fun-ASR-Nano：https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512
+- SenseVoice Small：https://huggingface.co/FunAudioLLM/SenseVoiceSmall
+- 测试集：AISHELL-1 测试集 https://huggingface.co/datasets/AudioLLMs/aishell_1_zh_test；WenetSpeech test_meeting https://huggingface.co/datasets/TwinkStart/WenetSpeech
+- Qwen3-ASR 技术报告（1–8 s 动态注意力窗口，支持流式）：https://arxiv.org/abs/2601.21337
+- antirez/qwen-asr（C 实现，流式默认 2 s 分块、回退 5 token）：https://github.com/antirez/qwen-asr
+- Foresight 拆解：本机 `/Applications/Foresight.app` 1.0.0 的二进制字符串与模型目录（2026-11-08）

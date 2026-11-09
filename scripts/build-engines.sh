@@ -19,6 +19,8 @@ xcrun metal --version >/dev/null 2>&1 || {
 }
 
 for pkg in "${PACKAGES[@]}"; do
+  # mm-meetingd links the sherpa-onnx xcframework, fetched (once) outside git.
+  [[ "$pkg" == MeetingEngine ]] && "$ROOT/scripts/fetch-sherpa-onnx.sh"
   case "$pkg" in
     MeetingEngine) binary=mm-meetingd ;;
     EmbedEngine) binary=mm-embedd ;;

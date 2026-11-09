@@ -110,6 +110,27 @@ public enum PauseFinder {
         return best
     }
 
+    /// Whether a span ends in a pause of at least `minPause` after some speech.
+    ///
+    /// Used to show a partial at a word gap instead of waiting for the next timed refresh, so
+    /// new text tends to land on word boundaries (Foresight's `interim_results_trigger_silence_ms`).
+    /// - Parameters:
+    ///   - samples: Mono audio, ending now; levels are relative to its loud frames.
+    ///   - sampleRate: Its rate.
+    ///   - minPause: Shortest trailing quiet run, in seconds.
+    /// - Returns: `true` when the last `minPause` is quiet and something before it is not.
+    public static func endsInPause(_ samples: [Float], sampleRate: Int, minPause: Double) -> Bool {
+        let frame = Int(Double(sampleRate) * frameSeconds)
+        let env = envelope(samples, frame: frame)
+        let minFrames = max(1, Int((minPause / frameSeconds).rounded(.up)))
+        guard env.count > minFrames else { return false }
+        let loud = env.sorted()[env.count * 9 / 10]
+        guard loud > 0 else { return false }
+        let threshold = loud * quietRatio
+        return env.suffix(minFrames).allSatisfy { $0 < threshold }
+            && env.dropLast(minFrames).contains { $0 >= threshold }
+    }
+
     /// The centre of the quietest 100 ms of a span, the least damaging place for a forced cut.
     /// - Parameters:
     ///   - samples: Mono audio of the span.

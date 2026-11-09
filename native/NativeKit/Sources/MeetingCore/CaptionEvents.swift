@@ -34,16 +34,21 @@ public struct CaptionPartialEvent: Codable, Sendable, Equatable {
     public var startMs: Int
     public var text: String
     public var speaker: SpeakerLabel
+    /// Leading Unicode scalars of `text` the next partial will keep (forced prefix); the rest may
+    /// still be rewritten. 0 when the engine makes no promise.
+    public var stableChars: Int
 
     /// Creates the payload.
     /// - Parameters: see the stored properties.
-    public init(sessionId: String, utteranceId: Int, origin: AudioOrigin, startMs: Int, text: String, speaker: SpeakerLabel) {
+    public init(sessionId: String, utteranceId: Int, origin: AudioOrigin, startMs: Int, text: String,
+                speaker: SpeakerLabel, stableChars: Int = 0) {
         self.sessionId = sessionId
         self.utteranceId = utteranceId
         self.origin = origin
         self.startMs = startMs
         self.text = text
         self.speaker = speaker
+        self.stableChars = stableChars
     }
 }
 

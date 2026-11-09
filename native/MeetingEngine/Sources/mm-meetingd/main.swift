@@ -109,6 +109,11 @@ await server.register(Methods.Meeting.captionSimulateFile) { params in
     }))
 }
 
+await server.register(Methods.Meeting.modelsPreload) { params in
+    let language = params?["language"]?.stringValue
+    return try JSONValue.from(try await SpeechModels.shared.preloadLive(language: language))
+}
+
 await server.register(Methods.shutdown) { _ in
     // Finalize recordings first; an unfinished screen.mov has no moov atom and is unreadable.
     _ = try? await capture.stop()

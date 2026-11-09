@@ -27,6 +27,8 @@ pub mod meeting {
     pub const PERMISSIONS_REQUEST: &str = "permissions/request";
     /// Runs the live caption pipeline over an audio file (testing without capture permissions).
     pub const CAPTION_SIMULATE_FILE: &str = "caption/simulateFile";
+    /// Loads the live caption models now instead of on the first `capture/start`.
+    pub const MODELS_PRELOAD: &str = "models/preload";
 
     // Notifications (engine → app)
     pub const N_CAPTION_PARTIAL: &str = "caption/partial";

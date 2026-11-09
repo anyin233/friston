@@ -9,6 +9,8 @@ short in-sentence pauses, 0.6–1.2 s between turns, one long monologue), stream
 - follow lag: sentence end → first partial/final that shows its last characters;
 - final latency: sentence end → the `caption/final` that contains its last characters;
 - partial interval: time between consecutive partials of one utterance;
+- rewrite rate: of the characters a partial showed, the share the next partial or final of the
+  same utterance changed (0 = text only grows; whole-line re-decoding flickers);
 - CER of all finals against the reference text (punctuation and spaces removed).
 
 Usage:
@@ -90,6 +92,8 @@ class Report:
     follow_lag_ms: list[float] = field(default_factory=list)
     final_latency_ms: list[float] = field(default_factory=list)
     partial_interval_ms: list[float] = field(default_factory=list)
+    shown_chars: int = 0
+    rewritten_chars: int = 0
     missed_first: int = 0
     missed_final: int = 0
 
@@ -172,9 +176,23 @@ def measure(refs: list[RefSentence], events: list[Event], probe_len: int = 3) ->
         else:
             report.final_latency_ms.append(final.at_ms - r.end_ms)
     last_partial: dict[int, float] = {}
+    last_text: dict[int, str] = {}
     for e in events:
+        # Characters of the previous partial that this caption no longer starts with were
+        # visibly rewritten; a final counts too, since it replaces the partial on screen.
+        if e.utterance in last_text:
+            prev, cur = last_text[e.utterance], normalize(e.text)
+            common = 0
+            for a, b in zip(prev, cur):
+                if a != b:
+                    break
+                common += 1
+            report.shown_chars += len(prev)
+            report.rewritten_chars += len(prev) - common
         if e.kind != "partial":
+            last_text.pop(e.utterance, None)
             continue
+        last_text[e.utterance] = normalize(e.text)
         if e.utterance in last_partial:
             report.partial_interval_ms.append(e.at_ms - last_partial[e.utterance])
         last_partial[e.utterance] = e.at_ms
@@ -344,6 +362,7 @@ def summary(report: Report) -> dict:
         "followLagMs": stats(report.follow_lag_ms),
         "finalLatencyMs": stats(report.final_latency_ms),
         "partialIntervalMs": stats(report.partial_interval_ms),
+        "rewriteRate": round(report.rewritten_chars / report.shown_chars, 3) if report.shown_chars else None,
         "missedFirst": report.missed_first,
         "missedFinal": report.missed_final,
     }

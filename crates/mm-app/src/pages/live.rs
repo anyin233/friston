@@ -13,6 +13,7 @@ use mm_i18n::{tr, trf};
 use crate::assign;
 use crate::logic;
 use crate::pages::Page;
+use crate::post_queue::{PostMeeting, PostStage};
 use crate::state::{AppEvent, AppState, LiveSession};
 use crate::ui;
 
@@ -161,59 +162,90 @@ impl LivePage {
             )
     }
 
-    /// Post-meeting progress card.
-    fn post_card(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let post = self.app.read(cx).post.clone()?;
+    /// Post-meeting progress cards, one per stopped meeting, in stop order.
+    fn post_cards(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let (cards, positions) = {
+            let q = &self.app.read(cx).post;
+            let cards = q.cards();
+            let positions: Vec<_> = cards.iter().map(|c| q.position(c.meeting_id)).collect();
+            (cards, positions)
+        };
+        cards
+            .into_iter()
+            .zip(positions)
+            .enumerate()
+            .map(|(i, (post, position))| self.post_card(i, post, position, cx).into_any_element())
+            .collect()
+    }
+
+    /// One meeting's post-meeting progress.
+    ///
+    /// Params: `ix` – card index for element ids; `post`; `position` – place in the queue
+    /// when waiting; `cx`.
+    fn post_card(
+        &self,
+        ix: usize,
+        post: PostMeeting,
+        position: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let app = self.app.clone();
         let id = post.meeting_id;
-        Some(
-            ui::card(cx)
-                .max_w(px(720.))
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .child(ui::section_title(trf!(
-                            "会后整理：{}",
-                            "After the meeting: {}",
-                            post.title
-                        )))
-                        .child(if post.running {
-                            Tag::warning()
-                                .small()
-                                .child(tr!("进行中", "In progress"))
-                                .into_any_element()
-                        } else {
-                            Button::new("post-open")
-                                .small()
-                                .outline()
-                                .label(tr!("在纪要库中查看", "View in library"))
-                                .on_click(move |_, _, cx| {
-                                    app.update(cx, |_, cx| cx.emit(AppEvent::OpenMeeting(id, None)))
-                                })
-                                .into_any_element()
-                        }),
-                )
-                .children(
-                    post.steps
-                        .iter()
-                        .map(|s| div().text_sm().child(format!("· {s}"))),
-                )
-                .when(post.running, |el| {
-                    el.child(ui::loading(
-                        tr!(
-                            "请稍候，录音已经安全保存。",
-                            "Please wait. The recording is saved safely."
-                        ),
-                        cx,
-                    ))
+        let badge = |label: String| Tag::warning().small().child(label).into_any_element();
+        let status = match post.stage {
+            PostStage::Stopping => badge(tr!("正在停止", "Stopping").into()),
+            PostStage::Queued => badge(match position {
+                Some(n) => trf!("排队中 · 第 {n} 位", "Queued · number {n}"),
+                None => tr!("排队中", "Queued").into(),
+            }),
+            PostStage::Running => badge(tr!("进行中", "In progress").into()),
+            PostStage::Done | PostStage::Failed => Button::new(("post-open", ix))
+                .small()
+                .outline()
+                .label(tr!("在纪要库中查看", "View in library"))
+                .on_click(move |_, _, cx| {
+                    app.update(cx, |_, cx| cx.emit(AppEvent::OpenMeeting(id, None)))
                 })
-                .children(post.warnings.iter().map(|w| {
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().warning)
-                        .child(format!("⚠ {w}"))
-                })),
-        )
+                .into_any_element(),
+        };
+        let waiting = match post.stage {
+            PostStage::Queued => Some(tr!(
+                "录音已经安全保存，前面的会议整理完后会自动开始。现在可以开始新的记录。",
+                "The recording is saved safely. Processing starts once earlier meetings finish. You can start a new recording now."
+            )),
+            PostStage::Running => Some(tr!(
+                "请稍候，录音已经安全保存。现在可以开始新的记录。",
+                "Please wait. The recording is saved safely. You can start a new recording now."
+            )),
+            _ => None,
+        };
+        ui::card(cx)
+            .max_w(px(720.))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(ui::section_title(trf!(
+                        "会后整理：{}",
+                        "After the meeting: {}",
+                        post.title
+                    )))
+                    .child(status),
+            )
+            .children(
+                post.steps
+                    .iter()
+                    .map(|s| div().text_sm().child(format!("· {s}"))),
+            )
+            .when_some(waiting, |el, text| match post.stage {
+                PostStage::Running => el.child(ui::loading(text, cx)),
+                _ => el.child(ui::muted(text, cx)),
+            })
+            .children(post.warnings.iter().map(|w| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().warning)
+                    .child(format!("⚠ {w}"))
+            }))
     }
 
     /// Capture bar: state, timer, meters, actions.
@@ -244,6 +276,14 @@ impl LivePage {
         let sys = meter_of(LevelSource::System);
         let channels = live.started.microphone_channels.unwrap_or(1);
         let floating = self.app.read(cx).floating_open();
+        // Earlier meetings still being refined while this one records.
+        let backlog = match self.app.read(cx).post.counts() {
+            (0, 0) => None,
+            (running, waiting) => Some(trf!(
+                "会后整理：{running} 场进行中，{waiting} 场排队",
+                "After meetings: {running} in progress, {waiting} queued"
+            )),
+        };
         let (a1, a2, a3) = (self.app.clone(), self.app.clone(), self.app.clone());
         let notes = self.notes.clone();
         h_flex()
@@ -292,6 +332,14 @@ impl LivePage {
                 el.child(div().text_xs().text_color(cx.theme().danger).child(e))
             })
             .child(div().flex_1())
+            .when_some(backlog, |el, text| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text),
+                )
+            })
             .child(
                 Button::new("shot")
                     .small()
@@ -713,7 +761,7 @@ impl Render for LivePage {
                 ),
                 cx,
             ))
-            .children(self.post_card(cx))
+            .children(self.post_cards(cx))
             .child(self.idle(cx))
             .into_any_element()
     }

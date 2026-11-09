@@ -7,6 +7,7 @@ mod floating;
 mod logic;
 mod pages;
 mod pipeline;
+mod post_queue;
 mod state;
 mod status;
 mod ui;

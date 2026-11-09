@@ -212,7 +212,8 @@ pub fn generate_minutes(ctx: &MinutesCtx, meeting: &mut Meeting) -> Result<Minut
     Ok(MinutesWritten { label, warnings })
 }
 
-/// Inputs of the post-meeting job.
+/// Inputs of the whole post-meeting job in one go (tests; the app queues the two phases).
+#[cfg(test)]
 pub struct FinishJob {
     pub minutes: MinutesCtx,
     pub engine: Option<MeetingEngine>,
@@ -221,6 +222,28 @@ pub struct FinishJob {
     pub started: CaptureStarted,
     /// Elapsed time, used when the engine cannot report the duration.
     pub elapsed_ms: u64,
+}
+
+/// Inputs of the stop phase: everything that must finish before the next recording starts.
+pub struct StopJob {
+    pub store: Arc<Mutex<Store>>,
+    pub cfg: AppConfig,
+    pub engine: Option<MeetingEngine>,
+    pub writer: LiveWriter,
+    pub meeting: Meeting,
+    pub started: CaptureStarted,
+    /// Elapsed time, used when the engine cannot report the duration.
+    pub elapsed_ms: u64,
+}
+
+/// A stopped meeting waiting for refine and minutes.
+#[derive(Debug, Clone)]
+pub struct StoppedMeeting {
+    pub meeting: Meeting,
+    /// Recorded files (stop-time report, falling back to those announced at start).
+    pub files: CaptureFiles,
+    /// Non-fatal problems of the stop phase, in order.
+    pub warnings: Vec<String>,
 }
 
 /// What the post-meeting job achieved.
@@ -233,20 +256,51 @@ pub struct FinishReport {
     pub minutes_done: bool,
 }
 
-/// Stops capture and runs refine → transcript sync → minutes.
+/// Stops capture and runs refine → transcript sync → minutes in one go. The app runs the two
+/// phases separately ([`stop_meeting`], then [`process_meeting`] from the queue).
 ///
 /// Params: `job`; `progress` – called with a step description in the UI language.
 /// Returns: the report; only a missing store makes it fail.
+#[cfg(test)]
 pub fn finish_meeting(job: FinishJob, progress: &dyn Fn(String)) -> Result<FinishReport, String> {
     let FinishJob {
         minutes,
+        engine,
+        writer,
+        meeting,
+        started,
+        elapsed_ms,
+    } = job;
+    let stopped = stop_meeting(
+        StopJob {
+            store: minutes.store.clone(),
+            cfg: minutes.cfg.clone(),
+            engine: engine.clone(),
+            writer,
+            meeting,
+            started,
+            elapsed_ms,
+        },
+        progress,
+    )?;
+    process_meeting(&minutes, engine.as_ref(), stopped, progress)
+}
+
+/// Stop phase: capture/stop → mark stopped → save the live transcript. Short, and the only
+/// part that has to finish before the recorder can start the next meeting.
+///
+/// Params: `job`; `progress` – called with a step description in the UI language.
+/// Returns: the stopped meeting for [`process_meeting`]; only a store failure is an error.
+pub fn stop_meeting(job: StopJob, progress: &dyn Fn(String)) -> Result<StoppedMeeting, String> {
+    let StopJob {
+        store,
+        cfg,
         engine,
         writer,
         mut meeting,
         started,
         elapsed_ms,
     } = job;
-    let cfg = minutes.cfg.clone();
     let mut warnings = Vec::new();
 
     progress(tr!("正在停止录制…", "Stopping recording…").into());
@@ -269,7 +323,7 @@ pub fn finish_meeting(job: FinishJob, progress: &dyn Fn(String)) -> Result<Finis
             }
         }
     };
-    flow::mark_stopped(&*lock(&minutes.store)?, &mut meeting, &stopped).map_err(|e| {
+    flow::mark_stopped(&*lock(&store)?, &mut meeting, &stopped).map_err(|e| {
         trf!(
             "更新会议状态失败：{e}",
             "Couldn’t update the meeting status: {e}"
@@ -278,19 +332,44 @@ pub fn finish_meeting(job: FinishJob, progress: &dyn Fn(String)) -> Result<Finis
 
     progress(tr!("正在写入实时转写…", "Saving the live transcript…").into());
     writer.flush_blocking();
-    if let Err(e) = flow::sync_transcript(&cfg, &mut *lock(&minutes.store)?, &meeting) {
+    if let Err(e) = flow::sync_transcript(&cfg, &mut *lock(&store)?, &meeting) {
         warnings.push(trf!(
             "同步转写到笔记失败：{e}",
             "Couldn’t sync the transcript to the note: {e}"
         ));
     }
+    Ok(StoppedMeeting {
+        meeting,
+        files: merged_files(&stopped.files, &started.files),
+        warnings,
+    })
+}
 
-    let files = merged_files(&stopped.files, &started.files);
+/// Processing phase: refine → transcript sync → minutes. Runs from the post-meeting queue,
+/// possibly while the next meeting is recording.
+///
+/// Params: `minutes` – settings, store and minutes providers (read when the job starts, so
+/// settings changed while it waited apply); `engine` – caption engine for the local refine;
+/// `stopped` – from [`stop_meeting`]; `progress` – step descriptions in the UI language.
+/// Returns: the report (stop-phase warnings first); never fails today, kept fallible for
+/// symmetry with the stop phase.
+pub fn process_meeting(
+    minutes: &MinutesCtx,
+    engine: Option<&MeetingEngine>,
+    stopped: StoppedMeeting,
+    progress: &dyn Fn(String),
+) -> Result<FinishReport, String> {
+    let StoppedMeeting {
+        mut meeting,
+        files,
+        mut warnings,
+    } = stopped;
+    let cfg = &minutes.cfg;
     let mut minutes_done = false;
     // Antigravity first when chosen; any failure there falls through to the local pass.
     let mut refined = false;
     if cfg.refine_after_meeting && cfg.refine_backend == RefineBackend::Antigravity {
-        match antigravity_pass(&minutes, &mut meeting, &files, progress, &mut warnings) {
+        match antigravity_pass(minutes, &mut meeting, &files, progress, &mut warnings) {
             Ok(wrote_minutes) => {
                 refined = true;
                 minutes_done = wrote_minutes;
@@ -302,8 +381,8 @@ pub fn finish_meeting(job: FinishJob, progress: &dyn Fn(String)) -> Result<Finis
         }
     }
     if cfg.refine_after_meeting && !refined {
-        match &engine {
-            Some(engine) => refine(engine, &minutes, &meeting, &files, progress, &mut warnings),
+        match engine {
+            Some(engine) => refine(engine, minutes, &meeting, &files, progress, &mut warnings),
             None => warnings.push(
                 tr!(
                     "字幕引擎不可用，跳过会后精转写",
@@ -316,7 +395,7 @@ pub fn finish_meeting(job: FinishJob, progress: &dyn Fn(String)) -> Result<Finis
 
     if cfg.auto_minutes && !minutes_done {
         progress(tr!("正在生成纪要…", "Writing minutes…").into());
-        match generate_minutes(&minutes, &mut meeting) {
+        match generate_minutes(minutes, &mut meeting) {
             Ok(MinutesWritten {
                 label,
                 warnings: handover,
@@ -758,5 +837,59 @@ mod tests {
         assert!(report.warnings.iter().any(|w| w.contains("停止录制")));
         assert!(report.warnings.iter().any(|w| w.contains("精转写")));
         assert!(!steps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_phase_hands_its_warnings_to_the_queued_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (indexer, _ev) = mm_service::indexer::Indexer::start(store.clone(), None);
+        let (writer, _err) = LiveWriter::start(store.clone(), indexer);
+        let cfg = AppConfig {
+            vault_path: Some(dir.path().into()),
+            auto_minutes: false,
+            refine_after_meeting: false,
+            ..Default::default()
+        };
+        let mut m = flow::quick_meeting(&store.lock().unwrap(), "排队").unwrap();
+        let started = CaptureStarted {
+            session_id: "s".into(),
+            directory: dir.path().join("rec"),
+            files: CaptureFiles {
+                microphone: Some(dir.path().join("rec/mic.caf")),
+                ..Default::default()
+            },
+            microphone_channels: Some(1),
+            started_at: chrono::Utc::now(),
+        };
+        flow::mark_live(&store.lock().unwrap(), &mut m, &started).unwrap();
+        let stopped = stop_meeting(
+            StopJob {
+                store: store.clone(),
+                cfg: cfg.clone(),
+                engine: None,
+                writer,
+                meeting: m,
+                started,
+                elapsed_ms: 1000,
+            },
+            &|_| {},
+        )
+        .unwrap();
+        // The recorder is free from here on; the files travel with the queued job.
+        assert_eq!(stopped.meeting.status, mm_core::MeetingStatus::Processing);
+        assert!(stopped.files.microphone.is_some());
+        assert_eq!(stopped.warnings.len(), 1, "{:?}", stopped.warnings);
+
+        let ctx = MinutesCtx {
+            cfg,
+            store,
+            codex: None,
+            embed: None,
+        };
+        let report = process_meeting(&ctx, None, stopped, &|_| {}).unwrap();
+        assert!(!report.minutes_done);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("停止录制"));
     }
 }

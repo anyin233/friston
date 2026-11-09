@@ -36,7 +36,8 @@ use mm_store::{IndexStats, Store};
 
 use crate::logic::{self, ActionRow};
 use crate::pages::Page;
-use crate::pipeline::{self, CodexStatus, FinishJob, MinutesCtx};
+use crate::pipeline::{self, CodexStatus, MinutesCtx, StopJob, StoppedMeeting};
+use crate::post_queue::PostQueue;
 use crate::writer::{LiveWriter, WriteMsg, lock};
 
 /// Runs `work` on the background executor and applies `done` to the view afterwards.
@@ -213,16 +214,6 @@ impl LiveSession {
     }
 }
 
-/// Progress of the post-meeting job.
-#[derive(Debug, Clone)]
-pub struct PostMeeting {
-    pub meeting_id: MeetingId,
-    pub title: String,
-    pub steps: Vec<String>,
-    pub warnings: Vec<String>,
-    pub running: bool,
-}
-
 /// How a speaker gets named.
 #[derive(Debug, Clone)]
 pub enum PersonChoice {
@@ -263,7 +254,8 @@ pub struct AppState {
 
     pub live: Option<LiveSession>,
     pub live_starting: bool,
-    pub post: Option<PostMeeting>,
+    /// Post-meeting jobs: one refine/minutes run at a time, later meetings wait in line.
+    pub post: PostQueue<StoppedMeeting>,
     /// Window chosen on the 会议中 page; used by every start path.
     pub selected_window: Option<u32>,
 
@@ -480,7 +472,7 @@ impl AppState {
             autoload_llm: cfg_has_llm,
             live: None,
             live_starting: false,
-            post: None,
+            post: PostQueue::default(),
             selected_window: None,
             meetings: Loadable::Loading,
             actions: vec![],
@@ -1729,12 +1721,14 @@ impl AppState {
             self.navigate(Page::Live, cx);
             return true;
         }
-        if self.post.as_ref().is_some_and(|p| p.running) {
+        // Only the short stop phase holds the recorder; refine and minutes of earlier
+        // meetings keep running in the post-meeting queue while the next one records.
+        if self.post.stopping() {
             self.notify(
                 NoticeKind::Info,
                 tr!(
-                    "上一场会议还在整理，完成后再开始新的记录。",
-                    "The previous meeting is still being processed. Start a new recording once it’s done.",
+                    "上一场录制正在停止，几秒后再开始新的记录。",
+                    "The previous recording is still stopping. Start a new one in a few seconds.",
                 ),
                 cx,
             );
@@ -1897,7 +1891,7 @@ impl AppState {
                             window_id,
                             last_sync: Instant::now(),
                         });
-                        this.post = None;
+                        this.post.clear_finished();
                         this.indexer.send(IndexerMsg::SetLive(true));
                         cx.emit(AppEvent::LiveStarted { notes });
                         this.start_ticker(cx);
@@ -2022,7 +2016,7 @@ impl AppState {
         );
     }
 
-    /// capture/stop → mark stopped → refine → transcript → minutes, with progress.
+    /// Stops the recording (short, holds the recorder), then queues refine → minutes.
     ///
     /// Params: `cx`.
     pub fn stop_recording(&mut self, cx: &mut Context<Self>) {
@@ -2031,29 +2025,13 @@ impl AppState {
         let notes = self.notes_pending.take().zip(live.note_path.clone());
         self.indexer.send(IndexerMsg::SetLive(false));
         self.close_floating(cx);
-        self.post = Some(PostMeeting {
-            meeting_id: live.meeting.id,
-            title: live.meeting.title.clone(),
-            steps: vec![],
-            warnings: vec![],
-            running: true,
-        });
+        let id = live.meeting.id;
+        self.post.push_stopping(id, live.meeting.title.clone());
         cx.notify();
 
-        let (ptx, prx) = async_channel::unbounded::<String>();
-        cx.spawn(async move |this, cx| {
-            while let Ok(step) = prx.recv().await {
-                let _ = this.update(cx, |s, cx| {
-                    if let Some(p) = s.post.as_mut() {
-                        p.steps.push(step);
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        let job = FinishJob {
-            minutes: self.minutes_ctx(),
+        let job = StopJob {
+            store: self.store.clone(),
+            cfg: self.cfg.clone(),
             engine: self.meeting_engine.clone(),
             writer: self.writer.clone(),
             elapsed_ms: live.elapsed_ms(),
@@ -2064,22 +2042,96 @@ impl AppState {
         bg(
             cx,
             move || {
+                // Stop-phase progress is collected and shown once it ends (a few seconds).
+                let steps = Mutex::new(Vec::new());
+                let mut warnings = Vec::new();
                 if let Some((text, path)) = notes
                     && let Err(e) = write_notes(&path, &text, &indexer)
                 {
-                    let _ = ptx.send_blocking(e);
+                    warnings.push(e);
                 }
-                pipeline::finish_meeting(job, &|s| {
+                let push = |s: String| {
+                    if let Ok(mut v) = steps.lock() {
+                        v.push(s);
+                    }
+                };
+                let res = pipeline::stop_meeting(job, &push);
+                let steps = steps.into_inner().unwrap_or_default();
+                res.map(|mut stopped| {
+                    warnings.append(&mut stopped.warnings);
+                    (stopped, steps, warnings)
+                })
+            },
+            move |this, res, cx| {
+                match res {
+                    Ok((stopped, steps, warnings)) => {
+                        this.post.stopped(id, stopped, steps, warnings);
+                        if let Some(n) = this.post.position(id)
+                            && this.post.counts().0 > 0
+                        {
+                            this.notify(
+                                NoticeKind::Info,
+                                trf!(
+                                    "录制已停止，精转写排在第 {n} 位",
+                                    "Recording stopped. Refine is number {n} in the queue",
+                                ),
+                                cx,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        this.post.fail(id, e.clone());
+                        this.notify(
+                            NoticeKind::Error,
+                            trf!(
+                                "会后整理失败，录音已保留：{e}",
+                                "Post-meeting processing failed; the recording was kept: {e}",
+                            ),
+                            cx,
+                        );
+                    }
+                }
+                this.run_next_post(cx);
+                this.refresh_meetings(cx);
+                cx.notify();
+            },
+        );
+    }
+
+    /// Starts the next queued refine → minutes job when none is running.
+    ///
+    /// Settings and engines are read now, not when the meeting stopped, so a job that waited
+    /// uses the current configuration and a restarted engine.
+    ///
+    /// Params: `cx`.
+    fn run_next_post(&mut self, cx: &mut Context<Self>) {
+        let Some((id, stopped)) = self.post.start_next() else {
+            return;
+        };
+        cx.notify();
+        let (ptx, prx) = async_channel::unbounded::<String>();
+        cx.spawn(async move |this, cx| {
+            while let Ok(step) = prx.recv().await {
+                let _ = this.update(cx, |s, cx| {
+                    s.post.step(id, step);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        let minutes = self.minutes_ctx();
+        let engine = self.meeting_engine.clone();
+        bg(
+            cx,
+            move || {
+                pipeline::process_meeting(&minutes, engine.as_ref(), stopped, &|s| {
                     let _ = ptx.send_blocking(s);
                 })
             },
-            |this, res, cx| {
+            move |this, res, cx| {
                 match res {
                     Ok(report) => {
-                        if let Some(p) = this.post.as_mut() {
-                            p.running = false;
-                            p.warnings = report.warnings.clone();
-                        }
+                        this.post.finish(id, report.warnings.clone());
                         let msg = if report.minutes_done {
                             trf!("{}：纪要已生成", "{}: minutes ready", report.meeting.title)
                         } else {
@@ -2096,10 +2148,7 @@ impl AppState {
                         cx.emit(AppEvent::MeetingChanged(report.meeting.id));
                     }
                     Err(e) => {
-                        if let Some(p) = this.post.as_mut() {
-                            p.running = false;
-                            p.warnings.push(e.clone());
-                        }
+                        this.post.fail(id, e.clone());
                         this.notify(
                             NoticeKind::Error,
                             trf!(
@@ -2110,6 +2159,7 @@ impl AppState {
                         );
                     }
                 }
+                this.run_next_post(cx);
                 this.refresh_meetings(cx);
                 this.refresh_stats(cx);
                 cx.notify();

@@ -135,6 +135,11 @@ impl Workbench {
                     this.library.update(cx, |l, cx| l.open(*id, *t, cx));
                     cx.notify();
                 }
+                AppEvent::FocusLibrarySearch => {
+                    this.page = Page::Library;
+                    this.library.update(cx, |l, cx| l.focus_search(window, cx));
+                    cx.notify();
+                }
                 AppEvent::MeetingChanged(_) | AppEvent::LiveStarted { .. } => {}
             },
         )
@@ -152,6 +157,9 @@ impl Workbench {
             }
         })
         .detach();
+        // The close button hides the window so a recording and its notes survive; the Dock
+        // icon or ⌘0 shows it again.
+        crate::shortcuts::hide_on_close(window, cx);
         let pending = app.update(cx, |a, _| a.take_startup_notices());
         show_startup_notices(pending, window, cx);
         Self {

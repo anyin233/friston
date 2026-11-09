@@ -163,6 +163,13 @@ impl LibraryPage {
         );
     }
 
+    /// Puts the cursor in the search field (⌘F), selecting what is there so typing replaces it.
+    ///
+    /// Params: `window`; `cx`.
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+    }
+
     /// Opens a meeting, optionally at an offset (seek links).
     ///
     /// Params: `id`; `seek_ms`; `cx`.

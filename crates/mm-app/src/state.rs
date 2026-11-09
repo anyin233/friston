@@ -178,6 +178,8 @@ pub enum AppEvent {
     LiveStarted {
         notes: String,
     },
+    /// Show 纪要库 with the cursor in its search field (⌘F).
+    FocusLibrarySearch,
 }
 
 /// A person with their voiceprints.
@@ -1599,6 +1601,7 @@ impl AppState {
         }
         if self.cfg.ui_language != before.ui_language {
             apply_ui_language(self.cfg.effective_ui_language());
+            crate::shortcuts::set_menus(cx);
             // Every window (including the floating captions) re-renders in the new language.
             cx.refresh_windows();
         }
@@ -1657,6 +1660,30 @@ impl AppState {
     }
 
     // ---- live session ------------------------------------------------------------------
+
+    /// Starts recording the way the sidebar's primary button does (⇧⌘R): the calendar
+    /// meeting that is on now (see [`logic::recordable_event`]), otherwise an ad-hoc one.
+    ///
+    /// Params: `cx`.
+    pub fn record_now(&mut self, cx: &mut Context<Self>) {
+        let event = match &self.events {
+            Loadable::Ready(evs) if self.live.is_none() && !self.live_starting => {
+                logic::recordable_event(evs, now())
+            }
+            _ => None,
+        };
+        match event {
+            Some(ev) => self.record_event(ev, cx),
+            None => self.quick_record(String::new(), cx),
+        }
+    }
+
+    /// Asks the workbench to show 纪要库 and focus its search field.
+    ///
+    /// Params: `cx`.
+    pub fn focus_library_search(&mut self, cx: &mut Context<Self>) {
+        cx.emit(AppEvent::FocusLibrarySearch);
+    }
 
     /// Starts an ad-hoc meeting now ("开始记录").
     ///

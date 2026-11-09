@@ -8,6 +8,7 @@ mod logic;
 mod pages;
 mod pipeline;
 mod post_queue;
+mod shortcuts;
 mod state;
 mod status;
 mod ui;
@@ -50,6 +51,10 @@ fn main() {
             let _ = url_tx.send_blocking(u);
         }
     });
+    // Clicking the Dock icon brings back the main window after ⌘W hid it.
+    app.on_reopen(|cx| {
+        shortcuts::show_main_window(cx);
+    });
     app.run(move |cx| {
         gpui_kit::init(cx);
         let state = cx.new(AppState::new);
@@ -66,10 +71,11 @@ fn main() {
             ..TitleBar::window_options()
         };
         let s = state.clone();
-        gpui_kit::open_window(options, cx, move |window, cx| {
+        let (main_window, _) = gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| Workbench::new(s, window, cx))
         })
         .expect("failed to open the Friston window");
+        shortcuts::init(state.clone(), main_window, cx);
         cx.spawn(async move |cx| {
             while let Ok(url) = url_rx.recv().await {
                 state.update(cx, |s, cx| s.open_url(&url, cx));

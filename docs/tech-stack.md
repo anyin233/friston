@@ -25,7 +25,7 @@
 ### 1. GUI：GPUI Kit 0.9（单一依赖）
 - 你指定的 `longbridge/gpui-kit` 已发布到 crates.io，`gpui-kit = "0.9"` 一个依赖就带来 GPUI、gpui-base、gpui-component 和 Lucide 图标；不再需要 git 依赖 Zed 仓库。
 - 需要用到的组件都有：Sidebar、TitleBar、Dock/Resizable、List/Table（虚拟化）、Input（编辑器）、Markdown、Tabs、Dialog、Setting，另有 `speech` feature（本项目不用它做识别）。
-- 浮窗字幕用 GPUI 的第二个无边框、置顶、可穿透窗口实现。
+- 浮窗字幕用 GPUI 的第二个无边框窗口（`WindowKind::PopUp`，即非激活的 `NSPanel`）实现；再通过原生句柄设为跨所有桌面、可浮在全屏应用之上、应用失去焦点时不隐藏（`crates/mm-app/src/floating.rs`）。
 
 ### 2. 推理：Swift 原生引擎，而不是 Rust 内嵌 MLX 或 Python
 考虑过的方案：

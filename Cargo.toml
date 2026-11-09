@@ -23,6 +23,9 @@ mm-service = { path = "crates/mm-service" }
 
 # GUI: GPUI Kit pins the matching GPUI release and re-exports GPUI + gpui-component.
 gpui-kit = "0.9"
+# macOS window tweaks GPUI does not expose (both already in the tree via GPUI).
+objc2 = "0.6"
+raw-window-handle = "0.6"
 
 # Shared infrastructure
 anyhow = "1"

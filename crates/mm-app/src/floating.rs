@@ -1,4 +1,7 @@
 //! Floating caption window: a borderless, always-on-top panel with the last lines.
+//!
+//! On macOS the panel follows the user onto every Space, including other apps' full-screen
+//! Spaces, and never takes focus from the app they are working in.
 
 use gpui_kit::component::{IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -36,7 +39,11 @@ pub fn open(app: Entity<AppState>, cx: &mut App) -> anyhow::Result<AnyWindowHand
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
-        kind: WindowKind::Floating,
+        // `PopUp` is the only kind GPUI creates as a non-activating `NSPanel` that joins all
+        // Spaces as a full-screen auxiliary window; `Floating` stays on the Space it was
+        // opened on and disappears behind full-screen apps. The style mask must be set at
+        // creation: adding `NonactivatingPanel` later does not reach the window server.
+        kind: WindowKind::PopUp,
         focus: false,
         is_movable: true,
         is_resizable: true,
@@ -44,7 +51,14 @@ pub fn open(app: Entity<AppState>, cx: &mut App) -> anyhow::Result<AnyWindowHand
         window_background: WindowBackgroundAppearance::Transparent,
         ..Default::default()
     };
-    let (handle, _) = gpui_kit::open_window(options, cx, |_, cx| {
+    let (handle, _) = gpui_kit::open_window(options, cx, |window, cx| {
+        #[cfg(target_os = "macos")]
+        if let Err(e) = overlay::pin_above_everything(window) {
+            // Captions still work on the current Space; only the cross-Space pinning failed.
+            tracing::warn!("floating captions: couldn't pin the panel above other windows: {e}");
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = window;
         cx.new(|cx| FloatingCaptions::new(app, cx))
     })?;
     Ok(handle)
@@ -168,5 +182,101 @@ impl Render for FloatingCaptions {
                             )
                     }),
             )
+    }
+}
+
+/// AppKit tweaks GPUI does not expose for the caption panel.
+#[cfg(target_os = "macos")]
+mod overlay {
+    use gpui_kit::Window;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    // `NSWindowCollectionBehavior` bits (AppKit, NSWindow.h).
+    const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
+    const MOVE_TO_ACTIVE_SPACE: usize = 1 << 1;
+    const MANAGED: usize = 1 << 2;
+    const STATIONARY: usize = 1 << 4;
+    const PARTICIPATES_IN_CYCLE: usize = 1 << 5;
+    const IGNORES_CYCLE: usize = 1 << 6;
+    const FULL_SCREEN_PRIMARY: usize = 1 << 7;
+    const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
+
+    /// Returns the collection behavior for an overlay that is visible on every Space.
+    ///
+    /// Params: `current` – the behavior GPUI set at creation.
+    /// Returns: `current` with the overlay bits set and the conflicting ones cleared.
+    pub(super) fn overlay_behavior(current: usize) -> usize {
+        // AppKit raises if `CanJoinAllSpaces` is combined with `MoveToActiveSpace`, or
+        // `FullScreenAuxiliary` with `FullScreenPrimary`; `Managed` would let Mission
+        // Control move the panel, and `ParticipatesInCycle` would put it in Cmd-`.
+        let cleared = current
+            & !(MOVE_TO_ACTIVE_SPACE | MANAGED | PARTICIPATES_IN_CYCLE | FULL_SCREEN_PRIMARY);
+        cleared | CAN_JOIN_ALL_SPACES | FULL_SCREEN_AUXILIARY | STATIONARY | IGNORES_CYCLE
+    }
+
+    /// Keeps the caption panel above every window, on every Space and over full-screen apps.
+    ///
+    /// Params: `window` – the GPUI window that hosts the captions (a `PopUp` `NSPanel`).
+    /// Returns: an error when the native window can't be reached.
+    pub(super) fn pin_above_everything(window: &Window) -> anyhow::Result<()> {
+        // `Window` has an inherent `window_handle()` (the GPUI handle), so name the trait.
+        let handle = HasWindowHandle::window_handle(window)
+            .map_err(|e| anyhow::anyhow!("no native handle for the caption window: {e}"))?;
+        let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
+            anyhow::bail!("caption window handle is not AppKit: {:?}", handle.as_raw());
+        };
+        let view: *mut AnyObject = appkit.ns_view.as_ptr().cast();
+        // SAFETY: GPUI calls the build closure on the main thread with a live content view,
+        // and every selector below exists on `NSView` / `NSWindow` / `NSPanel`.
+        unsafe {
+            let ns_window: *mut AnyObject = msg_send![view, window];
+            if ns_window.is_null() {
+                anyhow::bail!("caption view {view:p} is not in a window yet");
+            }
+            let current: usize = msg_send![ns_window, collectionBehavior];
+            let _: () = msg_send![ns_window, setCollectionBehavior: overlay_behavior(current)];
+            // NSPanel hides itself whenever this app deactivates, which is exactly when the
+            // user switches to the meeting app.
+            let _: () = msg_send![ns_window, setHidesOnDeactivate: Bool::NO];
+            // Clicking the close button or dragging must not take key focus away from the
+            // app the user is typing in.
+            let _: () = msg_send![ns_window, setBecomesKeyOnlyIfNeeded: Bool::YES];
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The overlay joins every Space as a full-screen auxiliary and stays out of Cmd-`.
+        #[test]
+        fn overlay_behavior_sets_all_spaces_and_full_screen_bits() {
+            let b = overlay_behavior(0);
+            assert_eq!(b & CAN_JOIN_ALL_SPACES, CAN_JOIN_ALL_SPACES);
+            assert_eq!(b & FULL_SCREEN_AUXILIARY, FULL_SCREEN_AUXILIARY);
+            assert_eq!(b & STATIONARY, STATIONARY);
+            assert_eq!(b & IGNORES_CYCLE, IGNORES_CYCLE);
+        }
+
+        /// Bits AppKit rejects alongside the overlay bits are cleared; unrelated ones survive.
+        #[test]
+        fn overlay_behavior_clears_conflicting_bits() {
+            let unrelated = 1 << 11; // NSWindowCollectionBehaviorAllowsTiling-style extra bit
+            let b = overlay_behavior(
+                MOVE_TO_ACTIVE_SPACE
+                    | MANAGED
+                    | PARTICIPATES_IN_CYCLE
+                    | FULL_SCREEN_PRIMARY
+                    | unrelated,
+            );
+            assert_eq!(
+                b & (MOVE_TO_ACTIVE_SPACE | MANAGED | PARTICIPATES_IN_CYCLE | FULL_SCREEN_PRIMARY),
+                0
+            );
+            assert_eq!(b & unrelated, unrelated);
+        }
     }
 }

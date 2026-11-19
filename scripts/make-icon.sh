@@ -21,4 +21,6 @@ done
 iconutil -c icns "$set_dir" -o "$OUT"
 # GPUI's img() leaves this SVG blank, so the sidebar embeds a PNG (2x of its 20pt slot, rounded up).
 rsvg-convert -w 64 -h 64 "$SVG" -o "$ROOT/crates/mm-app/assets/friston-logo-64.png"
+# README renders a high-DPI PNG reliably on GitHub without CSP SVG restrictions.
+rsvg-convert -w 512 -h 512 "$SVG" -o "$ROOT/crates/mm-app/assets/friston-logo.png"
 echo "$OUT"

@@ -1,10 +1,15 @@
-<p align="center"><img src="crates/mm-app/assets/friston-icon.svg" width="128" alt="Friston 图标"></p>
+<div align="center">
+  <img src="crates/mm-app/assets/friston-logo.png" width="144" alt="Friston Logo">
+  <h1>Friston</h1>
+  <p>macOS 上的原生 AI 会议工作台：录制、实时字幕与说话人识别、自动转写、Obsidian 纪要与全模态语义搜索</p>
+  <p>
+    <a href="https://github.com/anyin233/friston/releases/latest"><img src="https://img.shields.io/github/v/release/anyin233/friston?label=Release" alt="Release"></a>
+    <img src="https://img.shields.io/badge/macOS-15%2B%20Apple%20Silicon-black" alt="macOS 15+ Apple Silicon">
+    <img src="https://img.shields.io/badge/License-Apache--2.0-blue" alt="Apache-2.0">
+  </p>
+</div>
 
-# Friston
-
-> 原名 Meeting Master。首次启动 Friston 时会把旧的数据文件夹、录音文件夹和钥匙串密钥迁移过来；Bundle ID 也换了，需要重新授权麦克风、录屏和日历。详见 `docs/architecture.md`。
-
-macOS 上的图形化会议工作台：录屏、录音、日程、实时字幕与说话人识别、自动转写、会议纪要生成与管理，以及全模态搜索（文字、图片、音频、视频）。笔记和纪要写进你的 Obsidian 库；没有自带 API 密钥时，通过本机 Codex 使用你的 ChatGPT 账号生成纪要。
+macOS 上的图形化会议工作台：录屏、录音、日程、实时字幕与说话人识别、自动转写、会议纪要生成与管理，以及全模态搜索（文字、图片、音频、视频）。笔记和纪要写进你的 Obsidian 库；没有自带 API 密钥时，通过本机 Codex 使用你的 ChatGPT 账号生成纪要；可直接从 [GitHub Releases](https://github.com/anyin233/friston/releases/latest) 下载预编译应用包。
 
 > 当前状态：**v0.1.0 macOS 版功能完整**。录制、实时字幕与说话人、会后精转写（本地 Qwen3-ASR / Codex 一体化 / OpenAI / Gemini）、纪要生成（BYOK / Codex / 本地模型，可选模型）、Obsidian 写回、自动索引和多模态搜索均已接通，六个页面和浮窗字幕可用。尚待真人验证的部分见文末“已知限制”。
 

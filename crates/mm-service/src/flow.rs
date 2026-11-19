@@ -7,12 +7,16 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Local, Utc};
 use mm_core::{
-    AudioOrigin, CalendarEvent, CapturePreset, CaptureStarted, CaptureStopped, FileTranscript,
-    Meeting, MeetingId, MeetingStatus, MeetingVenue, PersonId, PresetVoiceprint, SpeakerLabel,
-    TranscriptSegment,
+    AudioOrigin, CalendarEvent, CapturePreset, CaptureStarted, CaptureStopped, CloudLiveMode,
+    FileTranscript, LiveAsrConfig, Meeting, MeetingId, MeetingStatus, MeetingVenue, PersonId,
+    PresetVoiceprint, SpeakerLabel, TranscriptSegment,
 };
 use mm_i18n::{tr, trf};
-use mm_llm::{Minutes, MinutesInput, TranscriptLine, render_minutes};
+use mm_llm::{
+    AsrMode, AsrProvider, DEFAULT_GEMINI_LIVE_MODEL, DEFAULT_GEMINI_REFINE_MODEL,
+    DEFAULT_OPENAI_LIVE_MODEL, DEFAULT_OPENAI_REFINE_MODEL, Minutes, MinutesInput, TranscriptLine,
+    asr_pricing, byok, render_minutes,
+};
 use mm_store::{SegmentPass, Store};
 use mm_vault::{MeetingNote, replace_managed_block, write_atomic};
 
@@ -211,7 +215,93 @@ pub fn build_preset(
         spatial_spacing_cm: cfg
             .spatial_spacing_cm
             .filter(|cm| cm.is_finite() && *cm > 0.0),
+        live_asr: None,
     })
+}
+
+/// Builds a [`LiveAsrConfig`] from `cfg` and an already-read API key.
+///
+/// Params: `cfg`; `key` – raw secret from Keychain (`None` for local mode or missing key).
+/// Returns: `Some(config)` for cloud streaming / per-utterance HTTP, or `None` for local Qwen3-ASR.
+pub fn build_live_asr_config(cfg: &AppConfig, key: Option<String>) -> Option<LiveAsrConfig> {
+    let api_key = key
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())?;
+    let mode = cfg.live_cloud_mode;
+    let (provider, configured, default, pricing_mode) = match (cfg.live_asr_backend, mode) {
+        (crate::LiveAsrBackend::Local, _) => return None,
+        (crate::LiveAsrBackend::OpenAi, CloudLiveMode::Streaming) => (
+            AsrProvider::OpenAi.as_str(),
+            cfg.live_openai_model.as_deref(),
+            DEFAULT_OPENAI_LIVE_MODEL,
+            AsrMode::Live,
+        ),
+        (crate::LiveAsrBackend::OpenAi, CloudLiveMode::Utterance) => (
+            AsrProvider::OpenAi.as_str(),
+            cfg.live_openai_utterance_model.as_deref(),
+            DEFAULT_OPENAI_REFINE_MODEL,
+            AsrMode::Refine,
+        ),
+        (crate::LiveAsrBackend::Gemini, CloudLiveMode::Streaming) => (
+            AsrProvider::Gemini.as_str(),
+            cfg.live_gemini_model.as_deref(),
+            DEFAULT_GEMINI_LIVE_MODEL,
+            AsrMode::Live,
+        ),
+        (crate::LiveAsrBackend::Gemini, CloudLiveMode::Utterance) => (
+            AsrProvider::Gemini.as_str(),
+            cfg.live_gemini_utterance_model.as_deref(),
+            DEFAULT_GEMINI_REFINE_MODEL,
+            AsrMode::Refine,
+        ),
+    };
+    let model = configured
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(default)
+        .to_string();
+    let _ = asr_pricing::model_spec(
+        AsrProvider::parse(provider).unwrap_or(AsrProvider::OpenAi),
+        pricing_mode,
+        &model,
+    );
+    Some(LiveAsrConfig {
+        provider: provider.to_string(),
+        model,
+        api_key,
+        mode,
+    })
+}
+
+/// Resolves the cloud live-ASR config from Keychain when [`AppConfig::live_asr_backend`] is cloud.
+///
+/// Params: `cfg`.
+/// Returns: `Ok(None)` when local mode is selected, `Ok(Some(..))` when cloud key is present,
+/// or `Err(reason)` in the current UI language when the cloud key is missing or unreadable.
+pub fn resolve_live_asr(cfg: &AppConfig) -> Result<Option<LiveAsrConfig>, String> {
+    let account = match cfg.live_asr_backend {
+        crate::LiveAsrBackend::Local => return Ok(None),
+        crate::LiveAsrBackend::OpenAi => byok::OPENAI_KEY_ACCOUNT,
+        crate::LiveAsrBackend::Gemini => byok::GEMINI_KEY_ACCOUNT,
+    };
+    let key = byok::read_account_key(account).map_err(|e| e.to_string())?;
+    build_live_asr_config(cfg, key)
+        .map(Some)
+        .ok_or_else(|| {
+            match cfg.live_asr_backend {
+        crate::LiveAsrBackend::OpenAi => mm_i18n::tr!(
+            "尚未保存 OpenAI API 密钥，本场实时字幕将使用本地 Qwen3-ASR。",
+            "No OpenAI API key is saved; live captions will use local Qwen3-ASR for this meeting."
+        )
+        .to_string(),
+        crate::LiveAsrBackend::Gemini => mm_i18n::tr!(
+            "尚未保存 Gemini API 密钥，本场实时字幕将使用本地 Qwen3-ASR。",
+            "No Gemini API key is saved; live captions will use local Qwen3-ASR for this meeting."
+        )
+        .to_string(),
+        crate::LiveAsrBackend::Local => String::new(),
+    }
+        })
 }
 
 /// Microphone-only fallback for a preset whose screen/system-audio part needs the
@@ -993,5 +1083,41 @@ mod tests {
             note_images(dir.path(), "要点 ![[s.png]] ![x](/nope.png)").len(),
             1
         );
+    }
+
+    #[test]
+    fn build_live_asr_config_respects_backend_and_model_defaults() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(build_live_asr_config(&cfg, Some("sk-1".into())), None);
+
+        cfg.live_asr_backend = crate::LiveAsrBackend::OpenAi;
+        assert_eq!(build_live_asr_config(&cfg, None), None);
+        assert_eq!(build_live_asr_config(&cfg, Some("   ".into())), None);
+        let oa = build_live_asr_config(&cfg, Some(" sk-1 ".into())).unwrap();
+        assert_eq!(oa.provider, "openai");
+        assert_eq!(oa.model, DEFAULT_OPENAI_LIVE_MODEL);
+        assert_eq!(oa.mode, CloudLiveMode::Streaming);
+        assert_eq!(oa.api_key, "sk-1");
+
+        cfg.live_cloud_mode = CloudLiveMode::Utterance;
+        let oa_utt = build_live_asr_config(&cfg, Some("sk-1".into())).unwrap();
+        assert_eq!(oa_utt.model, DEFAULT_OPENAI_REFINE_MODEL);
+        assert_eq!(oa_utt.mode, CloudLiveMode::Utterance);
+        cfg.live_openai_utterance_model = Some("gpt-4o-mini-transcribe".into());
+        let oa_utt_custom = build_live_asr_config(&cfg, Some("sk-1".into())).unwrap();
+        assert_eq!(oa_utt_custom.model, "gpt-4o-mini-transcribe");
+
+        cfg.live_asr_backend = crate::LiveAsrBackend::Gemini;
+        cfg.live_cloud_mode = CloudLiveMode::Streaming;
+        cfg.live_gemini_model = Some("gemini-3.5-transcribe-live".into());
+        let gm = build_live_asr_config(&cfg, Some("AIza-1".into())).unwrap();
+        assert_eq!(gm.provider, "gemini");
+        assert_eq!(gm.model, "gemini-3.5-transcribe-live");
+        assert_eq!(gm.mode, CloudLiveMode::Streaming);
+
+        cfg.live_cloud_mode = CloudLiveMode::Utterance;
+        let gm_utt = build_live_asr_config(&cfg, Some("AIza-1".into())).unwrap();
+        assert_eq!(gm_utt.model, DEFAULT_GEMINI_REFINE_MODEL);
+        assert_eq!(gm_utt.mode, CloudLiveMode::Utterance);
     }
 }

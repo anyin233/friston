@@ -1,5 +1,6 @@
 //! 说话人: people, their hues and voiceprints (enrolment and clips).
 
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -118,7 +119,15 @@ impl PeoplePage {
                     .gap_3()
                     .items_center()
                     .child(div().size(px(28.)).rounded_full().bg(ui::hue_color(Some(row.hue))))
-                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(row.person.display_name.clone()))
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(
+                                SharedString::from(row.person.display_name.clone())
+                                    .test_text(row.person.display_name.clone()),
+                            ),
+                    )
                     .child(ui::muted(trf!("色相 {}° · 在所有页面都用这个颜色", "Hue {}° · Used for this person on every page", row.hue), cx)),
             )
             .child(
@@ -149,12 +158,12 @@ impl PeoplePage {
                 ui::card(cx)
                     .child(ui::section_title(tr!("从录音截取", "From a recording")))
                     .child(ui::muted(tr!("已有这个人单独说话的录音时，填写文件和时间段即可提取声纹。时间留空表示整段。", "If you have a recording of this person speaking alone, enter the file and time range to extract a voiceprint. Leave the times blank to use the whole file."), cx))
-                    .child(Input::new(&self.clip_path))
+                    .child(Input::new(&self.clip_path).id("clip-path"))
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().flex_1().child(Input::new(&self.clip_start)))
-                            .child(div().flex_1().child(Input::new(&self.clip_end)))
+                            .child(div().flex_1().child(Input::new(&self.clip_start).id("clip-start")))
+                            .child(div().flex_1().child(Input::new(&self.clip_end).id("clip-end")))
                             .child(Button::new("clip").outline().label(tr!("提取声纹", "Extract voiceprint")).on_click(cx.listener(move |this, _, _, cx| this.extract_clip(id, cx)))),
                     ),
             )
@@ -180,7 +189,16 @@ impl PeoplePage {
                             .border_1()
                             .border_color(cx.theme().border)
                             .rounded_md()
-                            .child(v_flex().flex_1().min_w_0().child(div().text_sm().truncate().child(source)).child(ui::muted(
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div().text_sm().truncate().child(
+                                            SharedString::from(source.clone()).test_text(source),
+                                        ),
+                                    )
+                                    .child(ui::muted(
                                 trf!("有效语音 {:.1} 秒 · 模型 {}", "{:.1} s of speech · Model {}", v.speech_ms as f32 / 1000.0, v.model),
                                 cx,
                             )))
@@ -227,6 +245,7 @@ impl Render for PeoplePage {
                         let active = self.selected == Some(id);
                         h_flex()
                             .id(("person", i))
+                            .test_support()
                             .p_2()
                             .gap_2()
                             .rounded_md()
@@ -294,7 +313,11 @@ impl Render for PeoplePage {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().flex_1().child(Input::new(&self.name)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .child(Input::new(&self.name).id("person-name")),
+                            )
                             .child(
                                 Button::new("add-person")
                                     .outline()

@@ -11,9 +11,11 @@ use rusqlite::{Connection, params};
 
 pub mod index;
 pub mod meetings;
+pub mod usage;
 
 pub use index::{IndexStats, NewChunk, PendingChunk, SearchHit, SourceKind};
 pub use meetings::{SegmentPass, new_meeting};
+pub use usage::{AsrUsageRecord, AsrUsageTotals, ProviderUsageSummary};
 
 /// Embedding width stored in `chunk_vec` (EmbeddingGemma 2 native output).
 pub const EMBEDDING_DIMS: usize = 768;
@@ -21,6 +23,10 @@ pub const EMBEDDING_DIMS: usize = 768;
 const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init", include_str!("../migrations/0001_init.sql")),
     ("0002_app", include_str!("../migrations/0002_app.sql")),
+    (
+        "0003_asr_usage",
+        include_str!("../migrations/0003_asr_usage.sql"),
+    ),
 ];
 
 /// Errors raised by the store.

@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use mm_core::{
-    AudioInput, AudioLevels, CalendarEvent, CaptionFinal, CaptionPartial, CapturePreset,
-    CaptureSources, CaptureStarted, CaptureStateEvent, CaptureStopped, ClipRequest, FileTranscript,
-    SpatialCueEvent, SpeakerRelabel, VoiceprintSample,
+    AudioInput, AudioLevels, CalendarEvent, CaptionFinal, CaptionPartial, CaptionUsage,
+    CapturePreset, CaptureSources, CaptureStarted, CaptureStateEvent, CaptureStopped, ClipRequest,
+    FileTranscript, SpatialCueEvent, SpeakerRelabel, VoiceprintSample,
 };
 use mm_engine::methods::{common, embed, meeting};
 use mm_engine::{EngineClient, EngineEvent, RpcError};
@@ -102,6 +102,7 @@ fn rpc(method: &str, e: RpcError) -> ServiceError {
 pub enum MeetingNotice {
     Partial(CaptionPartial),
     Final(CaptionFinal),
+    Usage(CaptionUsage),
     Relabel(SpeakerRelabel),
     Levels(AudioLevels),
     State(CaptureStateEvent),
@@ -121,6 +122,7 @@ pub fn decode_notice(method: &str, params: Value) -> Result<MeetingNotice, Servi
     Ok(match method {
         meeting::N_CAPTION_PARTIAL => MeetingNotice::Partial(decode(method, params)?),
         meeting::N_CAPTION_FINAL => MeetingNotice::Final(decode(method, params)?),
+        meeting::N_CAPTION_USAGE => MeetingNotice::Usage(decode(method, params)?),
         meeting::N_SPEAKER_RELABEL => MeetingNotice::Relabel(decode(method, params)?),
         meeting::N_AUDIO_LEVELS => MeetingNotice::Levels(decode(method, params)?),
         meeting::N_CAPTURE_STATE => MeetingNotice::State(decode(method, params)?),
@@ -187,7 +189,18 @@ impl MeetingEngine {
     pub fn spawn(
         path: &Path,
     ) -> Result<(Self, async_channel::Receiver<EngineEvent>), ServiceError> {
-        let (client, events) = EngineClient::spawn(path, &[])
+        Self::spawn_with_env(path, &[])
+    }
+
+    /// Starts the engine process with additional environment variables (for tests).
+    ///
+    /// Params: `path` – executable; `env` – extra environment key-value pairs.
+    /// Returns: the engine and its event stream.
+    pub fn spawn_with_env(
+        path: &Path,
+        env: &[(&str, &str)],
+    ) -> Result<(Self, async_channel::Receiver<EngineEvent>), ServiceError> {
+        let (client, events) = EngineClient::spawn_with_env(path, &[], env)
             .map_err(|e| ServiceError::Engine(format!("starting {}: {e}", path.display())))?;
         Ok((Self { client }, events))
     }
@@ -340,6 +353,14 @@ impl MeetingEngine {
             None => json!({}),
         };
         self.call(meeting::MODELS_PRELOAD, params)
+    }
+
+    /// Streams an audio file through the live caption pipeline (`caption/simulateFile`).
+    ///
+    /// Params: `params` – JSON payload (`path`, `origin`, `speed`, `language`, optional `liveAsr`).
+    /// Returns: the raw `SimulateFileResult` JSON object.
+    pub fn simulate_file(&self, params: Value) -> Result<Value, ServiceError> {
+        self.call(meeting::CAPTION_SIMULATE_FILE, params)
     }
 
     /// Asks the engine to finish recordings and exit.
@@ -620,6 +641,14 @@ mod tests {
             decode_notice("spatial/summary", json!({})).unwrap(),
             MeetingNotice::Other { .. }
         ));
+        let usage = decode_notice(
+            "caption/usage",
+            json!({"sessionId":"s","provider":"gemini","model":"gemini-3.5-transcribe-live","origin":"system","audioMs":1500,"inputTokens":40,"outputTokens":8}),
+        )
+        .unwrap();
+        assert!(
+            matches!(usage, MeetingNotice::Usage(u) if u.audio_ms == 1500 && u.input_tokens == 40)
+        );
     }
 
     #[test]

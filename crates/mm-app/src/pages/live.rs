@@ -1,5 +1,6 @@
 //! 会议中: capture setup, live captions with speakers, levels and the notes editor.
 
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -231,20 +232,20 @@ impl LivePage {
                     )))
                     .child(status),
             )
-            .children(
-                post.steps
-                    .iter()
-                    .map(|s| div().text_sm().child(format!("· {s}"))),
-            )
+            .children(post.steps.iter().map(|s| {
+                let line: SharedString = format!("· {s}").into();
+                div().text_sm().child(line.clone().test_text(line))
+            }))
             .when_some(waiting, |el, text| match post.stage {
                 PostStage::Running => el.child(ui::loading(text, cx)),
                 _ => el.child(ui::muted(text, cx)),
             })
             .children(post.warnings.iter().map(|w| {
+                let line: SharedString = format!("⚠ {w}").into();
                 div()
                     .text_sm()
                     .text_color(cx.theme().warning)
-                    .child(format!("⚠ {w}"))
+                    .child(line.clone().test_text(line))
             }))
     }
 
@@ -296,9 +297,10 @@ impl LivePage {
             .border_color(cx.theme().border)
             .child(state_tag)
             .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(live.meeting.title.clone()),
+                div().font_weight(FontWeight::SEMIBOLD).child(
+                    SharedString::from(live.meeting.title.clone())
+                        .test_text(live.meeting.title.clone()),
+                ),
             )
             .child(
                 div()
@@ -319,12 +321,13 @@ impl LivePage {
                     .child(ui::meter(&mic, cx.theme().success, cx)),
             )
             .when(self.app.read(cx).cfg.system_audio, |el| {
+                let sys_lbl: SharedString = tr!("系统声音", "System audio").into();
                 el.child(
                     h_flex()
                         .gap_1()
                         .items_center()
                         .text_xs()
-                        .child(tr!("系统声音", "System audio"))
+                        .child(sys_lbl.clone().test_text(sys_lbl))
                         .child(ui::meter(&sys, cx.theme().primary, cx)),
                 )
             })
@@ -430,13 +433,14 @@ impl LivePage {
                                     .child(
                                         div()
                                             .id(("spk", i))
+                                            .test_support()
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(color)
                                             .when(cluster.is_some(), |el| {
                                                 el.cursor_pointer().underline()
                                             })
-                                            .child(name)
+                                            .child(SharedString::from(name.clone()).test_text(name))
                                             .when_some(cluster, |el, c| {
                                                 el.on_click(move |_, window, cx| {
                                                     assign::open(
@@ -451,7 +455,8 @@ impl LivePage {
                                             }),
                                     )
                                     .when(l.origin == AudioOrigin::System, |el| {
-                                        el.child(tr!("远程", "Remote"))
+                                        let remote: SharedString = tr!("远程", "Remote").into();
+                                        el.child(remote.clone().test_text(remote))
                                     })
                                     .when_some(
                                         match &l.speaker {
@@ -466,9 +471,17 @@ impl LivePage {
                                     .when(!l.is_final, |el| el.child(tr!("正在说", "Speaking")))
                                     .child(logic::clock(l.start_ms)),
                             )
-                            .child(div().text_lg().text_color(stage_ink()).child(
-                                ui::caption_text(&l.text, l.stable_byte_len(), stage_dim()),
-                            )),
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .text_color(stage_ink())
+                                    .child(ui::caption_text(
+                                        &l.text,
+                                        l.stable_byte_len(),
+                                        stage_dim(),
+                                    ))
+                                    .test_text(l.text.clone()),
+                            ),
                     )
             })
             .collect();
@@ -490,11 +503,14 @@ impl LivePage {
                             .text_color(stage_ink())
                             .child(tr!("实时字幕", "Live captions")),
                     )
-                    .child(match live.started.microphone_channels {
-                        Some(n) if n >= 2 => {
-                            tr!("说话人：音色 + 方位", "Speakers: voice + direction")
-                        }
-                        _ => tr!("说话人：音色", "Speakers: voice"),
+                    .child({
+                        let mode_lbl: SharedString = match live.started.microphone_channels {
+                            Some(n) if n >= 2 => {
+                                tr!("说话人：音色 + 方位", "Speakers: voice + direction").into()
+                            }
+                            _ => tr!("说话人：音色", "Speakers: voice").into(),
+                        };
+                        mode_lbl.clone().test_text(mode_lbl)
                     }),
             )
             .child(
@@ -505,12 +521,14 @@ impl LivePage {
                     .overflow_y_scroll()
                     .track_scroll(&self.captions_scroll)
                     .when(empty, |el| {
+                        let waiting: SharedString =
+                            tr!("等待有人发言…", "Waiting for someone to speak…").into();
                         el.child(
                             div()
                                 .p_4()
                                 .text_sm()
                                 .text_color(stage_dim())
-                                .child(tr!("等待有人发言…", "Waiting for someone to speak…")),
+                                .child(waiting.clone().test_text(waiting)),
                         )
                     })
                     .children(lines),
@@ -578,10 +596,12 @@ impl LivePage {
             )
             .child(
                 div()
+                    .id("live-notes-box")
+                    .test_support()
                     .flex_1()
                     .min_h_0()
                     .p_3()
-                    .child(Textarea::new(&self.notes).h_full()),
+                    .child(Textarea::new(&self.notes).aria_label("live-notes").h_full()),
             )
             .child(
                 div()
@@ -590,7 +610,7 @@ impl LivePage {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .truncate()
-                    .child(footer),
+                    .child(SharedString::from(footer.clone()).test_text(footer)),
             )
     }
 

@@ -13,8 +13,13 @@ use mm_engine::{EngineClient, EngineEvent};
 use serde_json::{Value, json};
 
 use crate::{
-    LlmError, Minutes, MinutesInput, ModelOption, byok::parse_minutes, instructions,
+    LlmError, Minutes, MinutesInput, ModelOption, OpenAiModelFamily,
+    byok::parse_minutes,
+    codex_refine_developer_instructions, codex_refine_user_prompt, instructions,
     minutes_json_schema,
+    transcript::{
+        AudioTrack, HeardLine, parse_transcript_and_minutes, transcript_and_minutes_schema,
+    },
 };
 
 /// A piece of user input for a Codex turn (subset of the protocol's `UserInput`).
@@ -46,15 +51,20 @@ pub fn initialize_params(version: &str) -> Value {
     json!({"clientInfo": {"name": "meeting-master", "title": "Friston", "version": version}})
 }
 
-/// `thread/start` params for a side-effect-free minutes thread.
+/// `thread/start` params for a side-effect-free Codex thread, optionally rooted at `cwd`.
 ///
-/// Params: `developer_instructions` – system-style guidance for minutes writing; `model` –
-/// a `model/list` id, or `None` for Codex's configured default.
+/// Params: `developer_instructions` – system-style guidance; `model` – a `model/list` id,
+/// or `None` for Codex's configured default; `cwd` – optional read-only working root (e.g.
+/// the recording folder so Codex can inspect local audio files).
 /// Returns: params that keep the thread ephemeral, read-only and approval-free.
-pub fn thread_start_params(developer_instructions: &str, model: Option<&str>) -> Value {
+pub fn thread_start_params_in(
+    developer_instructions: &str,
+    model: Option<&str>,
+    cwd: Option<&Path>,
+) -> Value {
     let mut params = json!({
         "ephemeral": true,
-        // Minutes generation never needs to touch the filesystem or run commands.
+        // Never modify the workspace or prompt interactively for approvals.
         "sandbox": "read-only",
         "approvalPolicy": "never",
         "developerInstructions": developer_instructions,
@@ -63,7 +73,19 @@ pub fn thread_start_params(developer_instructions: &str, model: Option<&str>) ->
     if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
         params["model"] = json!(m);
     }
+    if let Some(dir) = cwd {
+        params["cwd"] = json!(dir.display().to_string());
+    }
     params
+}
+
+/// `thread/start` params for a side-effect-free minutes thread.
+///
+/// Params: `developer_instructions` – system-style guidance for minutes writing; `model` –
+/// a `model/list` id, or `None` for Codex's configured default.
+/// Returns: params that keep the thread ephemeral, read-only and approval-free.
+pub fn thread_start_params(developer_instructions: &str, model: Option<&str>) -> Value {
+    thread_start_params_in(developer_instructions, model, None)
 }
 
 /// `model/list` params for one page.
@@ -284,6 +306,63 @@ fn collect_turn(
     }
 }
 
+/// Longest common ancestor directory across the parent directories of `tracks`.
+///
+/// Params: `tracks` – audio track paths.
+/// Returns: the shared directory, or `None` when `tracks` is empty or has no common non-empty parent.
+pub fn common_parent_dir(tracks: &[AudioTrack]) -> Option<PathBuf> {
+    let parents: Vec<&Path> = tracks
+        .iter()
+        .filter_map(|t| t.path.parent().filter(|p| !p.as_os_str().is_empty()))
+        .collect();
+    let first = (*parents.first()?).to_path_buf();
+    let mut common = first;
+    for p in &parents[1..] {
+        while !p.starts_with(&common) {
+            if !common.pop() {
+                return None;
+            }
+        }
+    }
+    (!common.as_os_str().is_empty()).then_some(common)
+}
+
+/// Runs a single ephemeral, read-only Codex turn and returns its final agent message text.
+fn run_turn(
+    codex: &Path,
+    developer_instructions: &str,
+    model: Option<&str>,
+    cwd: Option<&Path>,
+    inputs: &[CodexInput],
+    output_schema: &Value,
+    timeout: Duration,
+) -> Result<String, LlmError> {
+    let deadline = Instant::now() + timeout;
+    let server = AppServer::start(codex)?;
+    let thread = server.call(
+        "thread/start",
+        thread_start_params_in(developer_instructions, model, cwd),
+    )?;
+    let thread_id = thread["thread"]["id"]
+        .as_str()
+        .ok_or_else(|| LlmError::Codex(format!("thread/start returned no thread id: {thread}")))?
+        .to_string();
+    server.call(
+        "turn/start",
+        turn_start_params(&thread_id, inputs, output_schema),
+    )?;
+    let client = server.client.clone();
+    collect_turn(&server.events, &thread_id, deadline, &|id, method| {
+        // The thread is read-only with approvalPolicy=never, so any request is unexpected: decline it.
+        tracing::warn!("declining unexpected codex request {method}");
+        if let Err(e) =
+            client.respond_error(id, -32601, "meeting-master does not handle this request")
+        {
+            tracing::warn!("{e}");
+        }
+    })
+}
+
 /// Generates minutes through the user's signed-in Codex (ChatGPT account).
 ///
 /// Params: `codex` – executable; `input` – meeting material; `model` – `model/list` id, or
@@ -295,33 +374,57 @@ pub fn generate(
     model: Option<&str>,
     timeout: Duration,
 ) -> Result<Minutes, LlmError> {
-    let deadline = Instant::now() + timeout;
-    let server = AppServer::start(codex)?;
-    let thread = server.call(
-        "thread/start",
-        thread_start_params(&instructions(input.language.as_deref()), model),
-    )?;
-    let thread_id = thread["thread"]["id"]
-        .as_str()
-        .ok_or_else(|| LlmError::Codex(format!("thread/start returned no thread id: {thread}")))?
-        .to_string();
     let mut inputs = vec![CodexInput::Text(input.render())];
     inputs.extend(input.images.iter().cloned().map(CodexInput::LocalImage));
-    server.call(
-        "turn/start",
-        turn_start_params(&thread_id, &inputs, &minutes_json_schema()),
+    let text = run_turn(
+        codex,
+        &instructions(input.language.as_deref()),
+        model,
+        None,
+        &inputs,
+        &minutes_json_schema(),
+        timeout,
     )?;
-    let client = server.client.clone();
-    let text = collect_turn(&server.events, &thread_id, deadline, &|id, method| {
-        // The thread is read-only with approvalPolicy=never, so any request is unexpected: decline it.
-        tracing::warn!("declining unexpected codex request {method}");
-        if let Err(e) =
-            client.respond_error(id, -32601, "meeting-master does not handle this request")
-        {
-            tracing::warn!("{e}");
-        }
-    })?;
     parse_minutes(&text)
+}
+
+/// Transcribes audio recordings, separates speakers, and writes meeting minutes in a single
+/// Codex turn by giving Codex direct read-only access to the recording file paths.
+///
+/// Params: `codex` – executable; `tracks` – recording files on disk; `context` – title/names/terms
+/// spelling hint; `caption_language` – spoken transcript language hint (`None` auto-detects);
+/// `input` – metadata, user notes, attached images, and minutes language (its live transcript is
+/// ignored); `model` – `model/list` id or `None` for Codex's default; `timeout` – overall limit.
+/// Returns: `(heard_lines, minutes_result)`.
+pub fn transcribe_and_summarize(
+    codex: &Path,
+    tracks: &[AudioTrack],
+    context: Option<&str>,
+    caption_language: Option<&str>,
+    input: &MinutesInput,
+    model: Option<&str>,
+    timeout: Duration,
+) -> Result<(Vec<HeardLine>, Result<Minutes, LlmError>), LlmError> {
+    if tracks.is_empty() {
+        return Err(LlmError::Codex("no audio tracks provided".into()));
+    }
+    let cwd = common_parent_dir(tracks);
+    let family = OpenAiModelFamily::from_model(model);
+    let dev =
+        codex_refine_developer_instructions(family, caption_language, input.language.as_deref());
+    let user = codex_refine_user_prompt(tracks, context, caption_language, input);
+    let mut inputs = vec![CodexInput::Text(user)];
+    inputs.extend(input.images.iter().cloned().map(CodexInput::LocalImage));
+    let text = run_turn(
+        codex,
+        &dev,
+        model,
+        cwd.as_deref(),
+        &inputs,
+        &transcript_and_minutes_schema(),
+        timeout,
+    )?;
+    parse_transcript_and_minutes(&text)
 }
 
 #[cfg(test)]
@@ -438,6 +541,10 @@ mod tests {
         let with_model = thread_start_params("Write minutes.", Some("gpt-6.1-terra"));
         assert_eq!(with_model["model"], "gpt-6.1-terra");
         check("ThreadStartParams", &with_model);
+        let with_cwd =
+            thread_start_params_in("Transcribe.", Some("gpt-6.2-sol"), Some(Path::new("/rec")));
+        assert_eq!(with_cwd["cwd"], "/rec");
+        check("ThreadStartParams", &with_cwd);
         assert!(thread_start_params("w", Some(" ")).get("model").is_none());
         check("ModelListParams", &model_list_params(Some("c1")));
         for key in ["model", "displayName", "isDefault", "hidden", "id"] {
@@ -456,6 +563,12 @@ mod tests {
             &json!({"type": "object"}),
         );
         check("TurnStartParams", &turn);
+        let refine_turn = turn_start_params(
+            "thr_2",
+            &[CodexInput::Text("p".into())],
+            &transcript_and_minutes_schema(),
+        );
+        check("TurnStartParams", &refine_turn);
         let input_types: Vec<String> = defs["UserInput"]["oneOf"]
             .as_array()
             .unwrap()
@@ -469,5 +582,41 @@ mod tests {
         for item in turn["input"].as_array().unwrap() {
             assert!(input_types.contains(&item["type"].as_str().unwrap().to_string()));
         }
+    }
+
+    #[test]
+    fn common_parent_dir_handles_same_mixed_and_empty_tracks() {
+        use mm_core::AudioOrigin;
+
+        assert_eq!(common_parent_dir(&[]), None);
+        let same = [
+            AudioTrack {
+                origin: AudioOrigin::Microphone,
+                path: PathBuf::from("/Users/me/Movies/Friston/s1/microphone.caf"),
+            },
+            AudioTrack {
+                origin: AudioOrigin::System,
+                path: PathBuf::from("/Users/me/Movies/Friston/s1/system.caf"),
+            },
+        ];
+        assert_eq!(
+            common_parent_dir(&same),
+            Some(PathBuf::from("/Users/me/Movies/Friston/s1"))
+        );
+
+        let mixed = [
+            AudioTrack {
+                origin: AudioOrigin::Microphone,
+                path: PathBuf::from("/Users/me/Movies/Friston/s1/mic.caf"),
+            },
+            AudioTrack {
+                origin: AudioOrigin::System,
+                path: PathBuf::from("/Users/me/Movies/Friston/s2/sys.caf"),
+            },
+        ];
+        assert_eq!(
+            common_parent_dir(&mixed),
+            Some(PathBuf::from("/Users/me/Movies/Friston"))
+        );
     }
 }

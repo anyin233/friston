@@ -22,6 +22,7 @@ public enum Methods {
 
         public static let nCaptionPartial = "caption/partial"
         public static let nCaptionFinal = "caption/final"
+        public static let nCaptionUsage = "caption/usage"
         public static let nSpeakerRelabel = "speaker/relabel"
         public static let nSpatialCue = "spatial/cue"
         public static let nAudioLevels = "audio/levels"

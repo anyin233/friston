@@ -10,12 +10,16 @@ use std::sync::{Arc, Mutex};
 
 use mm_core::{AudioOrigin, CaptureFiles, CaptureStarted, CaptureStopped, FileTranscript, Meeting};
 use mm_i18n::{tr, trf};
-use mm_llm::{LlmError, MinutesBackend, ProviderChoice, antigravity, byok, codex};
+use mm_llm::{
+    AsrMode, AsrProvider, AudioTrack, DEFAULT_GEMINI_REFINE_MODEL, DEFAULT_OPENAI_REFINE_MODEL,
+    GeminiTranscribeOptions, LlmError, MinutesBackend, OpenAiTranscribeOptions, ProviderChoice,
+    asr_pricing, byok, codex, gemini_asr, openai_asr,
+};
 use mm_service::engines::{
     EmbedEngine, MEETINGD, MeetingEngine, RefineRequest, RefineWorker, locate_engine,
 };
 use mm_service::{AppConfig, RefineBackend, external, flow};
-use mm_store::Store;
+use mm_store::{AsrUsageRecord, Store};
 
 use crate::logic::{self, provider_config, provider_label};
 use crate::writer::{LiveWriter, lock};
@@ -126,7 +130,6 @@ fn unavailable_reason(b: MinutesBackend) -> &'static str {
         MinutesBackend::Auto => "",
         MinutesBackend::ApiKey => tr!("没有保存 API 密钥", "no API key is saved"),
         MinutesBackend::Codex => tr!("Codex 未安装或未登录", "Codex isn’t installed or signed in"),
-        MinutesBackend::Antigravity => tr!("没有找到 agy", "agy wasn’t found"),
     }
 }
 
@@ -150,12 +153,8 @@ pub fn generate_minutes(ctx: &MinutesCtx, meeting: &mut Meeting) -> Result<Minut
         _ if ctx.cfg.use_codex || backend == MinutesBackend::Codex => detect_codex().usable_path(),
         _ => None,
     };
-    let agy = (backend == MinutesBackend::Antigravity)
-        .then(antigravity::find_agy)
-        .flatten()
-        .map(|p| p.display().to_string());
     let local = local_model(ctx);
-    let plan = mm_llm::plan_providers(&provider_config(&ctx.cfg, key_present, codex, agy, local))
+    let plan = mm_llm::plan_providers(&provider_config(&ctx.cfg, key_present, codex, local))
         .map_err(|_| {
             tr!(
                 "没有可用的纪要生成方式：请在设置中添加 API 密钥、运行 codex login 登录 ChatGPT，或加载本地纪要模型。",
@@ -387,18 +386,40 @@ pub fn process_meeting(
     } = stopped;
     let cfg = &minutes.cfg;
     let mut minutes_done = false;
-    // Antigravity first when chosen; any failure there falls through to the local pass.
+    // Unified Codex or cloud ASR refine pass when chosen; any failure falls through to local refine.
     let mut refined = false;
-    if cfg.refine_after_meeting && cfg.refine_backend == RefineBackend::Antigravity {
-        match antigravity_pass(minutes, &mut meeting, &files, progress, &mut warnings) {
-            Ok(wrote_minutes) => {
-                refined = true;
-                minutes_done = wrote_minutes;
+    if cfg.refine_after_meeting {
+        match cfg.refine_backend {
+            RefineBackend::Local => {}
+            RefineBackend::Codex => {
+                match codex_pass(minutes, &mut meeting, &files, progress, &mut warnings) {
+                    Ok(wrote_minutes) => {
+                        refined = true;
+                        minutes_done = wrote_minutes;
+                    }
+                    Err(e) => warnings.push(trf!(
+                        "Codex 一体化精转写失败，改用本地精转写：{e}",
+                        "Codex refine and minutes failed, so the local refine ran instead: {e}"
+                    )),
+                }
             }
-            Err(e) => warnings.push(trf!(
-                "Antigravity 精转写失败，改用本地精转写：{e}",
-                "Antigravity refine failed, so the local refine ran instead: {e}"
-            )),
+            RefineBackend::OpenAi | RefineBackend::Gemini => {
+                match cloud_refine_pass(
+                    minutes,
+                    &meeting,
+                    &files,
+                    cfg.refine_backend,
+                    progress,
+                    &mut warnings,
+                ) {
+                    Ok(()) => refined = true,
+                    Err(e) => warnings.push(trf!(
+                        "{} 精转写失败，改用本地精转写：{e}",
+                        "{} refine failed, so the local refine ran instead: {e}",
+                        logic::refine_backend_label(cfg.refine_backend),
+                    )),
+                }
+            }
         }
     }
     if cfg.refine_after_meeting && !refined {
@@ -539,169 +560,132 @@ fn refine(
     }
 }
 
-/// Removes a scratch folder when dropped, so every exit path cleans up the converted audio.
-struct ScratchDir(PathBuf);
+/// Longest wait for one unified Codex refine + minutes turn.
+const CODEX_REFINE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_dir_all(&self.0)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!("removing {}: {e}", self.0.display());
-        }
-    }
+/// Whether post-meeting processing writes minutes inside the unified Codex refine pass.
+///
+/// Params: `cfg`.
+/// Returns: `true` when post-meeting refine uses Codex and automatic minutes are enabled.
+pub fn uses_codex_unified_pass(cfg: &AppConfig) -> bool {
+    cfg.refine_after_meeting && cfg.refine_backend == RefineBackend::Codex && cfg.auto_minutes
 }
 
-/// Longest wait for one agy run (one audio part, or the minutes); agy retries 500s itself.
-const AGY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
-
-/// Whether the Antigravity refine should also write the minutes in the same agy run.
-///
-/// That happens only when the minutes would go to the same CLI and model anyway, and the
-/// recording fits in one part: longer recordings are heard part by part, and minutes need
-/// the whole meeting, so they are written afterwards from the joined transcript.
-///
-/// Params: `cfg`; `parts` – number of audio parts the recording was cut into.
-/// Returns: `true` for one combined run.
-pub fn merges_minutes_into_refine(cfg: &AppConfig, parts: usize) -> bool {
-    cfg.auto_minutes
-        && cfg.minutes_backend == MinutesBackend::Antigravity
-        && cfg.antigravity_minutes_model == cfg.antigravity_model
-        && parts == 1
-}
-
-/// Post-meeting pass through the Antigravity CLI: Gemini hears the recordings and the
-/// result replaces the transcript. When [`merges_minutes_into_refine`] holds, the same run
-/// also writes the minutes; otherwise the caller writes them with the configured provider.
+/// Unified post-meeting pass through the local Codex CLI: Codex receives the audio file
+/// paths directly in a read-only thread, transcribes and separates speakers, and (when
+/// `auto_minutes` is enabled) writes structured meeting minutes in the same turn.
 ///
 /// Params: `ctx`; `meeting` – status updated when minutes are written; `files`; `progress`;
-/// `warnings` – gets non-fatal problems (unusable combined minutes keep the new transcript).
-/// Returns: whether minutes were written, or why the transcript step failed (the caller then
-/// runs the local pass).
-fn antigravity_pass(
+/// `warnings` – receives non-fatal issues (unusable minutes still keep the refined transcript).
+/// Returns: whether minutes were written, or why the pass failed (caller falls back to local).
+fn codex_pass(
     ctx: &MinutesCtx,
     meeting: &mut Meeting,
     files: &CaptureFiles,
     progress: &dyn Fn(String),
     warnings: &mut Vec<String>,
 ) -> Result<bool, String> {
-    let agy = antigravity::find_agy()
-        .ok_or(tr!(
-            "没有找到 Antigravity CLI（agy）。安装 Antigravity 后在终端运行一次 agy 并登录。",
-            "Antigravity CLI (agy) not found. Install Antigravity, then run agy once in Terminal and sign in."
-        ))?;
-    let model = ctx.cfg.antigravity_model.as_str();
-    let label = antigravity::model_label(model);
-    let recordings: Vec<(AudioOrigin, PathBuf)> = [
+    let codex_path = ctx
+        .codex
+        .as_ref()
+        .and_then(CodexStatus::usable_path)
+        .or_else(|| detect_codex().usable_path())
+        .ok_or_else(|| {
+            tr!(
+                "没有找到已登录的 Codex CLI。请先安装 Codex 并在终端运行 codex login。",
+                "Signed-in Codex CLI not found. Install Codex and run codex login in Terminal."
+            )
+            .to_string()
+        })?;
+
+    let mut tracks = Vec::new();
+    for (origin, path) in [
         (AudioOrigin::Microphone, &files.microphone),
         (AudioOrigin::System, &files.system_audio),
-    ]
-    .into_iter()
-    .filter_map(|(o, p)| p.clone().map(|p| (o, p)))
-    .collect();
-    if recordings.is_empty() {
+    ] {
+        let Some(p) = path else { continue };
+        if p.is_file() {
+            tracks.push(AudioTrack {
+                origin,
+                path: p.clone(),
+            });
+        } else {
+            warnings.push(trf!(
+                "找不到录音文件：{}",
+                "Recording file not found: {}",
+                p.display()
+            ));
+        }
+    }
+    if tracks.is_empty() {
         return Err(tr!("这场会议没有录音文件", "This meeting has no recordings").into());
     }
-    progress(tr!("正在准备录音…", "Preparing recordings…").into());
-    let work = ScratchDir(std::env::temp_dir().join(format!("friston-agy-{}", meeting.id)));
-    let chunks = external::prepare_recordings(&recordings, &work.0)
-        .map_err(|e| trf!("准备录音失败：{e}", "Couldn’t prepare the recordings: {e}"))?;
-    if chunks.is_empty() {
-        return Err(tr!("录音里没有声音", "The recordings are silent").into());
-    }
+
     let context = match lock(&ctx.store)
         .and_then(|s| flow::refine_context_for(&ctx.cfg, &s, meeting).map_err(|e| e.to_string()))
     {
         Ok(c) => c,
         Err(e) => {
             warnings.push(trf!(
-                "读取参会人和笔记失败，识别时不带提示词：{e}",
-                "Couldn’t read attendees and notes, so recognition runs without hints: {e}"
+                "读取参会人和笔记失败，转写时不带提示词：{e}",
+                "Couldn’t read attendees and notes, so transcription runs without hints: {e}"
             ));
             None
         }
     };
-    // Title, attendees and notes for a combined run; without them it only transcribes.
-    let minutes_input = if merges_minutes_into_refine(&ctx.cfg, chunks.len()) {
-        match lock(&ctx.store)
-            .and_then(|s| flow::minutes_input(&ctx.cfg, &s, meeting).map_err(|e| e.to_string()))
-        {
-            Ok(input) => Some(input),
-            Err(e) => {
-                warnings.push(trf!(
-                    "整理纪要素材失败，纪要改为在转写后单独生成：{e}",
-                    "Couldn’t gather material for the minutes, so they’ll be written after the transcript: {e}"
-                ));
-                None
+
+    let minutes_input = match lock(&ctx.store)
+        .and_then(|s| flow::minutes_input(&ctx.cfg, &s, meeting).map_err(|e| e.to_string()))
+    {
+        Ok(input) => input,
+        Err(e) => {
+            warnings.push(trf!(
+                "整理纪要素材失败，仅使用基础会议信息：{e}",
+                "Couldn’t gather full minutes material; using basic meeting metadata: {e}"
+            ));
+            mm_llm::MinutesInput {
+                title: meeting.title.clone(),
+                when: meeting
+                    .starts_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string(),
+                language: Some(ctx.cfg.minutes_language.clone()),
+                ..Default::default()
             }
         }
-    } else {
-        None
     };
+
     let live = lock(&ctx.store)?.transcript(meeting.id).map_err(|e| {
         trf!(
             "读取实时转写失败：{e}",
             "Couldn’t read the live transcript: {e}"
         )
     })?;
+
+    let model = ctx.cfg.codex_refine_model.as_deref();
+    let label = match model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => format!("Codex · {m}"),
+        None => "Codex".to_string(),
+    };
+    progress(trf!(
+        "正在用 {label} 转写录音并生成纪要…",
+        "Transcribing and writing minutes with {label}…"
+    ));
+
     let language = ctx.cfg.caption_language.clone();
-    let mut segments = Vec::new();
-    let mut combined_minutes = None;
-    for (i, chunk) in chunks.iter().enumerate() {
-        progress(match (&minutes_input, chunks.len()) {
-            (Some(_), _) => trf!(
-                "正在用 {label} 识别录音并生成纪要…",
-                "Transcribing and writing minutes with {label}…"
-            ),
-            (None, 1) => trf!("正在用 {label} 识别录音…", "Transcribing with {label}…"),
-            (None, n) => trf!(
-                "正在用 {label} 识别录音（第 {}/{} 段）…",
-                "Transcribing with {label} (part {} of {})…",
-                i + 1,
-                n
-            ),
-        });
-        let heard = match &minutes_input {
-            Some(input) => antigravity::transcribe_with_minutes(
-                &agy,
-                &chunk.dir,
-                &chunk.tracks,
-                context.as_deref(),
-                language.as_deref(),
-                input,
-                model,
-                AGY_TIMEOUT,
-            )
-            .map(|(heard, minutes)| {
-                combined_minutes = Some(minutes);
-                heard
-            }),
-            None => antigravity::transcribe(
-                &agy,
-                &chunk.dir,
-                &chunk.tracks,
-                context.as_deref(),
-                language.as_deref(),
-                model,
-                AGY_TIMEOUT,
-            ),
-        }
-        .map_err(|e| trf!("第 {} 段：{e}", "Part {}: {e}", i + 1))?;
-        if heard.interrupted.is_some() {
-            warnings.push(trf!(
-                "{label} 识别第 {} 段时被中断，这一段的转写可能不完整",
-                "{label} was interrupted on part {}; its transcript may be incomplete",
-                i + 1
-            ));
-        }
-        segments.extend(external::heard_to_segments(
-            meeting.id,
-            chunk.offset_ms,
-            &heard.lines,
-            &live,
-            language.clone(),
-        ));
-    }
+    let (heard, combined_minutes) = codex::transcribe_and_summarize(
+        Path::new(&codex_path),
+        &tracks,
+        context.as_deref(),
+        language.as_deref(),
+        &minutes_input,
+        model,
+        CODEX_REFINE_TIMEOUT,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut segments = external::heard_to_segments(meeting.id, 0, &heard, &live, language);
     if segments.is_empty() {
         return Err(trf!(
             "{label} 没有识别出任何语句",
@@ -709,24 +693,29 @@ fn antigravity_pass(
         ));
     }
     segments.sort_by_key(|s| (s.start_ms, s.end_ms));
+
     {
         let mut store = lock(&ctx.store)?;
         flow::store_final_transcript(&mut store, meeting.id, &segments)
             .and_then(|_| flow::sync_transcript(&ctx.cfg, &mut store, meeting))
             .map_err(|e| trf!("保存识别结果失败：{e}", "Couldn’t save the transcript: {e}"))?;
     }
-    let Some(minutes) = combined_minutes else {
+
+    if !ctx.cfg.auto_minutes {
         return Ok(false);
-    };
-    let written = minutes.map_err(|e| e.to_string()).and_then(|minutes| {
-        flow::apply_minutes(&ctx.cfg, &mut *lock(&ctx.store)?, meeting, &minutes)
-            .map_err(|e| trf!("写入纪要失败：{e}", "Couldn’t save the minutes: {e}"))
-    });
+    }
+
+    let written = combined_minutes
+        .map_err(|e| e.to_string())
+        .and_then(|minutes| {
+            flow::apply_minutes(&ctx.cfg, &mut *lock(&ctx.store)?, meeting, &minutes)
+                .map_err(|e| trf!("写入纪要失败：{e}", "Couldn’t save the minutes: {e}"))
+        });
     match written {
         Ok(()) => {
             progress(trf!(
-                "纪要已由{label}（Antigravity）生成并写入笔记",
-                "Minutes written by {label} (Antigravity) and saved to the note"
+                "纪要已由 {label} 一并生成并写入笔记",
+                "Minutes written by {label} and saved to the note"
             ));
             Ok(true)
         }
@@ -738,6 +727,227 @@ fn antigravity_pass(
             Ok(false)
         }
     }
+}
+
+/// Transcribes recorded files through OpenAI or Google Gemini speech APIs, records local
+/// usage/spend in SQLite, maps speakers onto the live pass, and writes the final transcript.
+///
+/// Params: `ctx`; `meeting`; `files`; `backend` – `OpenAi` or `Gemini`; `progress`;
+/// `warnings` – appended to on non-fatal issues.
+/// Returns: `Ok(())` once the refined transcript is saved (or recordings had only silence).
+fn cloud_refine_pass(
+    ctx: &MinutesCtx,
+    meeting: &Meeting,
+    files: &CaptureFiles,
+    backend: RefineBackend,
+    progress: &dyn Fn(String),
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let (provider, account, configured_model, default_model) = match backend {
+        RefineBackend::OpenAi => (
+            AsrProvider::OpenAi,
+            byok::OPENAI_KEY_ACCOUNT,
+            ctx.cfg.refine_openai_model.as_deref(),
+            DEFAULT_OPENAI_REFINE_MODEL,
+        ),
+        RefineBackend::Gemini => (
+            AsrProvider::Gemini,
+            byok::GEMINI_KEY_ACCOUNT,
+            ctx.cfg.refine_gemini_model.as_deref(),
+            DEFAULT_GEMINI_REFINE_MODEL,
+        ),
+        RefineBackend::Local | RefineBackend::Codex => {
+            return Err("not a cloud refine backend".into());
+        }
+    };
+    let model = configured_model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(default_model)
+        .to_string();
+    let label = format!("{} · {model}", logic::refine_backend_label(backend));
+
+    let api_key = byok::read_account_key(account)
+        .map_err(|e| trf!("读取 API 密钥失败：{e}", "Couldn’t read the API key: {e}"))?
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| match provider {
+            AsrProvider::OpenAi => tr!(
+                "尚未保存 OpenAI API 密钥，请在设置里填写。",
+                "No OpenAI API key is saved. Add one in Settings."
+            )
+            .to_string(),
+            AsrProvider::Gemini => tr!(
+                "尚未保存 Gemini API 密钥，请在设置里填写。",
+                "No Gemini API key is saved. Add one in Settings."
+            )
+            .to_string(),
+        })?;
+
+    let mut tracks = Vec::new();
+    for (origin, path) in [
+        (AudioOrigin::Microphone, &files.microphone),
+        (AudioOrigin::System, &files.system_audio),
+    ] {
+        let Some(p) = path else { continue };
+        if p.is_file() {
+            tracks.push((origin, p.clone()));
+        } else {
+            warnings.push(trf!(
+                "找不到录音文件：{}",
+                "Recording file not found: {}",
+                p.display()
+            ));
+        }
+    }
+    if tracks.is_empty() {
+        return Err(tr!("这场会议没有录音文件", "This meeting has no recordings").into());
+    }
+
+    let context = match lock(&ctx.store)
+        .and_then(|s| flow::refine_context_for(&ctx.cfg, &s, meeting).map_err(|e| e.to_string()))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(trf!(
+                "读取参会人和笔记失败，转写时不带提示词：{e}",
+                "Couldn’t read attendees and notes, so transcription runs without hints: {e}"
+            ));
+            None
+        }
+    };
+    let live = lock(&ctx.store)?.transcript(meeting.id).map_err(|e| {
+        trf!(
+            "读取实时转写失败：{e}",
+            "Couldn’t read the live transcript: {e}"
+        )
+    })?;
+
+    progress(trf!(
+        "正在预处理 {label} 音频分片…",
+        "Preparing audio chunks for {label}…"
+    ));
+    let work = tempfile::tempdir().map_err(|e| format!("creating temp dir: {e}"))?;
+    let chunks =
+        if provider == AsrProvider::OpenAi && !asr_pricing::openai_model_has_timestamps(&model) {
+            external::prepare_utterance_chunks(&tracks, work.path(), external::DEFAULT_UTTERANCE_MS)
+        } else {
+            external::prepare_track_chunks(&tracks, work.path(), external::CHUNK_MS)
+        }
+        .map_err(|e| e.to_string())?;
+
+    if chunks.is_empty() {
+        warnings.push(
+            tr!(
+                "录音里没有检测到有效语音，已保留实时转写。",
+                "No active speech found in the recordings; keeping the live transcript."
+            )
+            .into(),
+        );
+        return Ok(());
+    }
+
+    let language = ctx.cfg.caption_language.clone();
+    let mut all_lines = Vec::new();
+    let mut total_audio_ms = 0_u64;
+    let mut total_in_tokens = 0_u64;
+    let mut total_out_tokens = 0_u64;
+    let mut chunk_err: Option<String> = None;
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        progress(trf!(
+            "正在用 {label} 精转写（第 {}/{} 段）…",
+            "Refining with {label} (chunk {}/{})…",
+            idx + 1,
+            chunks.len()
+        ));
+        let res = match provider {
+            AsrProvider::OpenAi => openai_asr::transcribe_file(
+                &api_key,
+                chunk.origin,
+                &chunk.path,
+                chunk.offset_ms,
+                chunk.duration_ms,
+                &OpenAiTranscribeOptions {
+                    model: model.clone(),
+                    language: language.clone(),
+                    prompt: context.clone(),
+                },
+            ),
+            AsrProvider::Gemini => gemini_asr::transcribe_file(
+                &api_key,
+                chunk.origin,
+                &chunk.path,
+                chunk.offset_ms,
+                chunk.duration_ms,
+                &GeminiTranscribeOptions {
+                    model: model.clone(),
+                    language: language.clone(),
+                    context: context.clone(),
+                },
+            ),
+        };
+        match res {
+            Ok(out) => {
+                total_audio_ms = total_audio_ms.saturating_add(out.audio_ms);
+                total_in_tokens = total_in_tokens.saturating_add(out.input_tokens);
+                total_out_tokens = total_out_tokens.saturating_add(out.output_tokens);
+                all_lines.extend(out.lines);
+            }
+            Err(e) => {
+                chunk_err = Some(e.to_string());
+                break;
+            }
+        }
+    }
+
+    if total_audio_ms > 0 || total_in_tokens > 0 || total_out_tokens > 0 {
+        let cost_usd = asr_pricing::estimate_cost_usd(
+            provider,
+            AsrMode::Refine,
+            &model,
+            total_audio_ms,
+            total_in_tokens,
+            total_out_tokens,
+        );
+        let rec = AsrUsageRecord {
+            recorded_at: chrono::Utc::now(),
+            meeting_id: Some(meeting.id),
+            provider: provider.as_str().to_string(),
+            mode: AsrMode::Refine.as_str().to_string(),
+            model: model.clone(),
+            audio_ms: total_audio_ms,
+            input_tokens: total_in_tokens,
+            output_tokens: total_out_tokens,
+            cost_usd,
+        };
+        if let Err(e) =
+            lock(&ctx.store).and_then(|s| s.record_asr_usage(&rec).map_err(|e| e.to_string()))
+        {
+            warnings.push(trf!(
+                "记录云端转写用量失败：{e}",
+                "Couldn’t record cloud ASR usage: {e}"
+            ));
+        }
+    }
+
+    if let Some(err) = chunk_err {
+        return Err(err);
+    }
+
+    let mut segments = external::heard_to_segments(meeting.id, 0, &all_lines, &live, language);
+    if segments.is_empty() {
+        return Err(trf!(
+            "{label} 没有识别出任何语句",
+            "{label} didn’t recognize any speech"
+        ));
+    }
+    segments.sort_by_key(|s| (s.start_ms, s.end_ms));
+
+    let mut store = lock(&ctx.store)?;
+    flow::store_final_transcript(&mut store, meeting.id, &segments)
+        .and_then(|_| flow::sync_transcript(&ctx.cfg, &mut store, meeting))
+        .map_err(|e| trf!("保存识别结果失败：{e}", "Couldn’t save the transcript: {e}"))?;
+    Ok(())
 }
 
 /// Transcribes one file; when a custom refine model fails, retries with the engine default
@@ -780,29 +990,25 @@ mod tests {
     }
 
     #[test]
-    fn refine_writes_minutes_only_for_same_model_and_one_part() {
+    fn codex_unified_pass_requires_refine_codex_and_auto_minutes() {
         let mut cfg = AppConfig {
-            refine_backend: RefineBackend::Antigravity,
-            minutes_backend: MinutesBackend::Antigravity,
+            refine_backend: RefineBackend::Codex,
+            refine_after_meeting: true,
+            auto_minutes: true,
             ..Default::default()
         };
-        assert_eq!(cfg.antigravity_minutes_model, cfg.antigravity_model);
-        assert!(merges_minutes_into_refine(&cfg, 1));
-        assert!(!merges_minutes_into_refine(&cfg, 2), "long meetings split");
-        cfg.antigravity_minutes_model = "claude-opus-5-5-high".into();
-        assert!(
-            !merges_minutes_into_refine(&cfg, 1),
-            "another model writes them later"
-        );
-        cfg.antigravity_minutes_model = cfg.antigravity_model.clone();
-        cfg.minutes_backend = MinutesBackend::Codex;
-        assert!(
-            !merges_minutes_into_refine(&cfg, 1),
-            "another provider writes them later"
-        );
-        cfg.minutes_backend = MinutesBackend::Antigravity;
+        assert!(uses_codex_unified_pass(&cfg));
+
         cfg.auto_minutes = false;
-        assert!(!merges_minutes_into_refine(&cfg, 1));
+        assert!(!uses_codex_unified_pass(&cfg));
+
+        cfg.auto_minutes = true;
+        cfg.refine_after_meeting = false;
+        assert!(!uses_codex_unified_pass(&cfg));
+
+        cfg.refine_after_meeting = true;
+        cfg.refine_backend = RefineBackend::Local;
+        assert!(!uses_codex_unified_pass(&cfg));
     }
 
     #[test]

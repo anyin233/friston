@@ -82,6 +82,32 @@ public struct CaptionFinalEvent: Codable, Sendable, Equatable {
     }
 }
 
+/// `caption/usage` payload: cloud live-streaming ASR usage emitted per finalized utterance.
+public struct CaptionUsageEvent: Codable, Sendable, Equatable {
+    public var sessionId: String
+    public var provider: String
+    public var model: String
+    public var origin: AudioOrigin
+    public var audioMs: Int
+    public var inputTokens: Int
+    public var outputTokens: Int
+    public var mode: CloudLiveMode?
+
+    /// Creates the payload.
+    public init(sessionId: String, provider: String, model: String, origin: AudioOrigin,
+                audioMs: Int, inputTokens: Int = 0, outputTokens: Int = 0,
+                mode: CloudLiveMode? = nil) {
+        self.sessionId = sessionId
+        self.provider = provider
+        self.model = model
+        self.origin = origin
+        self.audioMs = audioMs
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.mode = mode
+    }
+}
+
 /// `spatial/cue` payload: where one final utterance came from, sent right after its `caption/final`.
 ///
 /// Wire keys are camelCase and must match `mm_core::SpatialCueEvent`. Positions are relative to

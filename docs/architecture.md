@@ -9,7 +9,7 @@
 │  ├─ mm-index    自动索引：分块 → 差异比对 → 防抖 → 媒体切窗                 │
 │  ├─ mm-store    SQLite + sqlite-vec（向量）+ FTS5（关键词）               │
 │  ├─ mm-vault    Obsidian：发现库、渲染笔记、受管区块、obsidian:// URI       │
-│  ├─ mm-llm      纪要：BYOK / Codex app-server / Antigravity / 本地 MLX   │
+│  ├─ mm-llm      纪要与云端/Codex 转写：BYOK / Codex / 本地 MLX / ASR 费率账单 │
 │  ├─ mm-service  无界面服务层：设置、引擎调用、字幕状态、会议流程、后台索引     │
 │  ├─ mm-core     领域模型                                               │
 │  └─ mm-i18n     界面语言（简体中文 / English）与 tr!/trf! 宏              │
@@ -18,7 +18,7 @@
 │  mm-meetingd (Swift)               mm-embedd (Swift)                  │
 │  ScreenCaptureKit 窗口录制          EmbeddingGemma 2 (MLX, GPU)          │
 │  麦克风 / 系统声音 / process tap     文字·图片·音频·视频 → 768 维           │
-│  Qwen3-ASR 流式 (MLX)               按需加载、可卸载                      │
+│  Qwen3-ASR 流式 (MLX) / 云端实时流   按需加载、可卸载                      │
 │  Sortformer + WeSpeaker (Core ML)   本地 LLM（离线纪要，JSON Schema 约束） │
 │  GCC-PHAT 方位 + 说话人融合                                              │
 │  EventKit 日程                                                         │
@@ -30,9 +30,9 @@
 
 ## 一场会议的数据流
 
-1. **会前**：`calendar/events` 拉取日程，识别会议链接；为会议创建 Obsidian 笔记（frontmatter、参会者 `[[双链]]`、空的受管区块）。
+1. **会前**：`calendar/events` 拉取日程，识别会议链接；为会议创建 Obsidian 笔记（frontmatter、参会者 `[[双链]]`、空的受管区块）。若选择云端实时字幕（OpenAI Realtime / Google Gemini Live），开始记录前由 `flow::resolve_live_asr` 从 macOS 钥匙串读取对应密钥并写入预设 `live_asr`。
 2. **开始记录**：`capture/start` 按预设启动：ScreenCaptureKit 只录指定窗口；麦克风（多声道时保留原始声道用于 GCC-PHAT）；系统声音。音视频由引擎直接写入 `~/Movies/Friston/`，不经过 IPC。
-3. **实时字幕**：引擎推送 `caption/partial`（易变）和 `caption/final`（定稿，带说话人标签、流来源、方位），以及会话中途的 `speaker/relabel`（例如用户把“说话人 4”命名为赵磊）。GPUI 同时更新主窗口的字幕区和浮窗字幕。
+3. **实时字幕**：引擎推送 `caption/partial`（易变）和 `caption/final`（定稿，带说话人标签、流来源、方位），以及会话中途的 `speaker/relabel`（例如用户把“说话人 4”命名为赵磊）。切换到 **OpenAI 实时流** 或 **Google Gemini 实时流**（`LiveAsrBackend`）时，`mm-meetingd` 的 `CloudLiveTranscriber` 仍先经过本机 Silero VAD 断句与门控，并保留 WeSpeaker 声纹、Sortformer 轮次与 GCC-PHAT 方位线索，仅将语音片段发往云端 WebSocket 并推送 `caption/usage`；连续失败 3 次或缺少密钥时自动回退到本地 Qwen3-ASR。GPUI 同时更新主窗口的字幕区和浮窗字幕。
 4. **边开会边记笔记**：笔记编辑器即时保存到 Obsidian 文件；`⌘↩` 插入当前时间戳（链接回转写），截图直接嵌入笔记。
 5. **自动索引**（全程无需操作）：
    - 信号来源：编辑器按键、Obsidian 库的 FSEvents（用户在 Obsidian 里改的也算）、新的定稿字幕、录音和录屏文件的增长。
@@ -44,7 +44,8 @@
    - 每个向量都带模型戳 `embeddinggemma-2@768/p1`；换模型或改了提示词时，后台自动重建索引。
 6. **结束**：会后精转写和全局说话人聚类 → `mm-llm` 选择提供方生成结构化纪要（JSON Schema 约束）→ 写入笔记的 `minutes` / `actions` 受管区块 → 纪要本身也进入索引。
    - 会后整理分两段：**停止**（`capture/stop`、标记状态、写入实时转写，几秒钟）占用录制器，期间不能开始新的记录；**整理**（精转写 → 纪要）进入会后队列（`mm-app` 的 `post_queue`），一次只跑一场，后面的按停止顺序排队。所以上一场还在精转时就可以开始录下一场。排队的任务在开始运行时才读取设置，等待期间改过的设置会生效。本地精转不用录制中的引擎，而是为每场会议单独启动一个 `mm-meetingd`（`RefineWorker`），跑完即关闭、释放模型内存：同一进程里所有 MLX 调用都要排 `MLXGate`，文件级说话人分离会一次占住整段录音的时间，放在录制引擎里会让新会议的实时字幕停顿。队列只在内存里，退出 App 时未完成的会议停在“整理中”。
-   - 设置里“精转方式”选 **Antigravity · Gemini** 时，会后精转写改走外部工具：录音转成 16 kHz 单声道 AAC，按 15 分钟切段，静音的音轨不发送；Antigravity CLI（`agy -p`）让 Gemini 3.8 Flash 直接听录音并输出带时间戳的逐句 JSON，说话人身份按时间重叠沿用实时分离的结果（同一个人色相不变）。如果纪要也选了 Antigravity、模型和精转相同、且录音只有一段（15 分钟内），同一次 `agy` 调用同时输出转写和纪要（schema 为 `{transcript, minutes}`）；否则精转写完成后再按纪要设置单独写纪要（长录音逐段识别，纪要需要整场内容，只能放在最后）。精转失败回退到本地 Qwen3-ASR；一并生成的纪要不可用时改为单独生成。
+   - 设置里“精转方式”选 **Codex 一体化** 时，会后转写与纪要合并为同一次本机 Codex 调用：通过 `codex app-server` 启动临时只读线程（`ephemeral: true`、`sandbox: "read-only"`、`approvalPolicy: "never"`、`cwd` 指向录音目录），直接将录音文件路径、会议元数据与按 OpenAI 官方 Prompting Guide（按模型代际区分 `GPT-6` / `GPT-5` / `o` 系列 / `GPT-4` 策略与 XML 分隔块）构造的提示词传入，并用 `outputSchema` 约束一次性输出 `{transcript, minutes}`。Codex 自行调用本机可用的音视频工具读取与转写音频、区分说话人并生成纪要；`external::heard_to_segments` 按时间重叠沿用实时分离的说话人身份（未匹配到的说话人按音轨分配独立的新集群编号，不全部混为未知）。若启用了自动纪要则同时写回笔记并标记完成；一体化路线失败时自动回退到本地 Qwen3-ASR 精转与独立纪要生成。
+   - 选 **OpenAI 转写**（`RefineBackend::OpenAi`）或 **Google Gemini**（`RefineBackend::Gemini`）时，`mm-service::external`（`prepare_track_chunks` / `prepare_utterance_chunks`）先用 `/usr/bin/afconvert` 转为 16 kHz PCM16 WAV 并按静音边界或时长切片，再由 `mm-llm` 的 `openai_asr` / `gemini_asr` 调用对应云端接口，结合 `external::heard_to_segments` 映射本地说话人；云端密钥各自保存在 macOS 钥匙串（服务 `Friston`，账户 `openai`、`gemini` 与可选的 `openai-admin`），与纪要 BYOK 解耦。每次云端实时与会后转写的时长、token 与按官方单价估算的花费记入 SQLite `asr_usage` 表，并在设置页汇总本月与历史累计（OpenAI 还可选配 Admin Key 从 `/v1/organization/costs` 拉取官方月账单）。云端精转失败时同样自动回退到本地 Qwen3-ASR。
 7. **检索**：用户的问题先转成 `search_query` 向量，再与 FTS5 的 trigram 结果融合（RRF）。结果可能是转写、笔记、截图、录音窗口或录屏窗口，点击后跳到对应的时间点。
 
 ## 服务层（`mm-service`）
@@ -58,10 +59,10 @@
 | `live` | 字幕板（易变/定稿/撤回/改标）与说话人目录（名字和色相：同一个人在所有界面同一色相） |
 | `flow` | 一场会议的各步：建笔记 → 录制预设（含已登记声纹）→ 定稿入库并写入笔记 `transcript` 区块 → 会后精转写合并 → 纪要写入 `minutes` / `actions` 区块 |
 | `hub` | 从 Hugging Face（或镜像）下载模型：按提交固定版本、逐文件写 `.part` 后改名、断点续传、可取消，写到 `<数据文件夹>/models/<作者>--<模型>/`；下载完成后写 `.mm-download-complete` 标记；`find_local_snapshot` 按标记或 Hugging Face 缓存（`HF_HUB_CACHE`/`HF_HOME`/`~/.cache/huggingface/hub`）找已有副本，启动时没配嵌入模型就先找、找不到再下载（`auto_download_embedding`，默认开）；令牌存钥匙串（服务 `Friston`，账户 `huggingface`），没有时用 `HF_TOKEN` |
-| `external` | 外部语音模型精转写的纯逻辑：`.caf` → 分段 AAC（`afconvert`，静音检测 −70 dBFS）、读写 16 位 WAV、把模型听到的句子映射回本场会议的说话人；调用 `agy` 的部分在 `mm_llm::antigravity` |
+| `external` | 外部语音/Agent 模型精转写的纯逻辑：读写 16 位 WAV、把模型输出的带时间戳句子按时间重叠与标签投票映射回本场会议的说话人（未匹配者按音轨分配新集群） |
 | `indexer` | 后台线程：Obsidian 库 FSEvents → 防抖 → 增量分块 → 按模型戳补嵌入；会议进行时减小批量，把 GPU 让给字幕 |
 
-纪要提供方由设置“纪要生成方式”决定（`mm_llm::plan_providers`）：“自动”按 BYOK → Codex → 本地 MLX 的顺序选择；指定 API 密钥 / Codex / Antigravity 时先用指定的一项，它用不了或失败时改用自动顺序（不会重试刚失败的那一项），会后报告和通知里会说明。Codex 的模型通过 `thread/start.model` 传入（不选则用 Codex 默认），Antigravity 用 `agy --model`；两者的模型列表分别来自 `model/list` 和 `agy models`。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。
+纪要提供方由设置“纪要生成方式”决定（`mm_llm::plan_providers`）：“自动”按 BYOK → Codex → 本地 MLX 的顺序选择；指定 API 密钥 / Codex 时先用指定的一项，它用不了或失败时改用自动顺序（不会重试刚失败的那一项），会后报告和通知里会说明。Codex 的模型通过 `thread/start.model` 传入（不选则用 Codex 默认），模型列表来自 `model/list`。本地模型跑在 `mm-embedd` 里（同一个 `mlx-swift-lm` 版本），用 `MLXGuidedGeneration` 把输出约束为纪要 JSON Schema，并加空白抑制，避免小模型无限输出空白。
 
 纪要里的时间戳链接形如 `friston://open?meeting=<id>&t=<毫秒>`。App 同时注册 `friston` 和旧的 `meeting-master`，因为更名前写进笔记的链接仍用旧 scheme。
 

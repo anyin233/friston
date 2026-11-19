@@ -7,11 +7,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Utc};
-use mm_core::{CalendarEvent, MeetingStatus, SpeakerLabel};
+use mm_core::{CalendarEvent, CloudLiveMode, MeetingStatus, SpeakerLabel};
 use mm_i18n::{tr, trf};
-use mm_llm::{ByokProvider, Minutes, MinutesBackend, ModelOption, ProviderChoice, ProviderConfig};
-use mm_service::AppConfig;
+use mm_llm::{
+    AsrMode, AsrProvider, ByokProvider, DEFAULT_GEMINI_LIVE_MODEL, DEFAULT_GEMINI_REFINE_MODEL,
+    DEFAULT_OPENAI_LIVE_MODEL, DEFAULT_OPENAI_REFINE_MODEL, Minutes, MinutesBackend, ModelOption,
+    ProviderChoice, ProviderConfig, asr_pricing,
+};
 use mm_service::live::CaptionLine;
+use mm_service::{AppConfig, LiveAsrBackend, RefineBackend};
 
 /// Formats an offset as `mm:ss` (or `h:mm:ss`), matching transcript links.
 ///
@@ -310,13 +314,12 @@ pub fn modality_label(m: &str) -> &'static str {
 /// Builds the provider policy input from settings and the detected environment.
 ///
 /// Params: `cfg`; `key_present` – Keychain has the BYOK key; `codex` – signed-in codex path;
-/// `agy` – Antigravity CLI path; `local_model` – loaded local LLM folder.
+/// `local_model` – loaded local LLM folder.
 /// Returns: the provider config.
 pub fn provider_config(
     cfg: &AppConfig,
     key_present: bool,
     codex: Option<String>,
-    agy: Option<String>,
     local_model: Option<String>,
 ) -> ProviderConfig {
     ProviderConfig {
@@ -326,8 +329,6 @@ pub fn provider_config(
         codex_signed_in: codex,
         codex_in_auto: cfg.use_codex,
         codex_model: cfg.codex_model.clone(),
-        agy,
-        antigravity_model: cfg.antigravity_minutes_model.clone(),
         local_model,
     }
 }
@@ -350,10 +351,6 @@ pub fn provider_label(choice: &ProviderChoice) -> String {
         }
         ProviderChoice::Codex { model: Some(m), .. } => {
             trf!("Codex（ChatGPT · {m}）", "Codex (ChatGPT · {m})")
-        }
-        ProviderChoice::Antigravity { model, .. } => {
-            let label = mm_llm::antigravity::model_label(model);
-            trf!("Antigravity（{label}）", "Antigravity ({label})")
         }
         ProviderChoice::LocalMlx { .. } => tr!("本地模型", "Local model").to_string(),
     }
@@ -406,7 +403,181 @@ pub fn minutes_backend_label(b: MinutesBackend) -> &'static str {
         MinutesBackend::Auto => tr!("自动", "Automatic"),
         MinutesBackend::ApiKey => tr!("API 密钥", "API key"),
         MinutesBackend::Codex => "Codex",
-        MinutesBackend::Antigravity => "Antigravity",
+    }
+}
+
+/// Names a live caption ASR backend in settings and status lights.
+///
+/// Params: `b`.
+/// Returns: localized label.
+pub fn live_asr_backend_label(b: LiveAsrBackend) -> &'static str {
+    match b {
+        LiveAsrBackend::Local => tr!("本地 Qwen3-ASR", "Local Qwen3-ASR"),
+        LiveAsrBackend::OpenAi => "OpenAI",
+        LiveAsrBackend::Gemini => "Google Gemini",
+    }
+}
+
+/// Names a cloud live upload strategy in settings and status lights.
+///
+/// Params: `mode`.
+/// Returns: localized label.
+pub fn cloud_live_mode_label(mode: CloudLiveMode) -> &'static str {
+    match mode {
+        CloudLiveMode::Streaming => tr!("实时流式（VAD 按需）", "Realtime stream (VAD-gated)"),
+        CloudLiveMode::Utterance => tr!("按句上传（省流低成本）", "Per-utterance (low cost)"),
+    }
+}
+
+/// Names a post-meeting refine backend in settings and notices.
+///
+/// Params: `b`.
+/// Returns: localized label.
+pub fn refine_backend_label(b: RefineBackend) -> &'static str {
+    match b {
+        RefineBackend::Local => tr!("本地 Qwen3-ASR", "Local Qwen3-ASR"),
+        RefineBackend::Codex => tr!("Codex 一体化", "Codex (transcribe + minutes)"),
+        RefineBackend::OpenAi => tr!("OpenAI 转写", "OpenAI Audio"),
+        RefineBackend::Gemini => "Google Gemini",
+    }
+}
+
+/// Effective live ASR model identifier for cloud backends (falling back to the mode-matched default).
+///
+/// Params: `cfg`.
+/// Returns: model id string (empty for `Local`).
+pub fn effective_live_model(cfg: &AppConfig) -> String {
+    match (cfg.live_asr_backend, cfg.live_cloud_mode) {
+        (LiveAsrBackend::Local, _) => String::new(),
+        (LiveAsrBackend::OpenAi, CloudLiveMode::Streaming) => cfg
+            .live_openai_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_OPENAI_LIVE_MODEL)
+            .to_string(),
+        (LiveAsrBackend::OpenAi, CloudLiveMode::Utterance) => cfg
+            .live_openai_utterance_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_OPENAI_REFINE_MODEL)
+            .to_string(),
+        (LiveAsrBackend::Gemini, CloudLiveMode::Streaming) => cfg
+            .live_gemini_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GEMINI_LIVE_MODEL)
+            .to_string(),
+        (LiveAsrBackend::Gemini, CloudLiveMode::Utterance) => cfg
+            .live_gemini_utterance_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GEMINI_REFINE_MODEL)
+            .to_string(),
+    }
+}
+
+/// Effective post-meeting cloud refine model identifier (falling back to the default).
+///
+/// Params: `cfg`.
+/// Returns: model id string (empty for `Local` / `Codex`).
+pub fn effective_refine_model(cfg: &AppConfig) -> String {
+    match cfg.refine_backend {
+        RefineBackend::OpenAi => cfg
+            .refine_openai_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_OPENAI_REFINE_MODEL)
+            .to_string(),
+        RefineBackend::Gemini => cfg
+            .refine_gemini_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GEMINI_REFINE_MODEL)
+            .to_string(),
+        RefineBackend::Local | RefineBackend::Codex => String::new(),
+    }
+}
+
+/// Start of `now`'s local calendar month converted to UTC.
+///
+/// Params: `now` – current local timestamp.
+/// Returns: UTC instant corresponding to local `YYYY-MM-01 00:00:00`.
+pub fn local_month_start_utc(now: DateTime<Local>) -> DateTime<Utc> {
+    let first_day = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).expect("day 1 exists");
+    let naive = first_day
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight exists on day 1");
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .unwrap_or(now)
+        .with_timezone(&Utc)
+}
+
+/// Formats a USD amount (`$0.0045` for sub-cent unit prices, `$1.23` otherwise).
+///
+/// Params: `usd`.
+/// Returns: formatted currency string.
+pub fn format_usd(usd: f64) -> String {
+    if !usd.is_finite() || usd <= 0.0 {
+        return "$0.00".to_string();
+    }
+    if usd < 0.05 {
+        format!("${usd:.4}")
+    } else {
+        format!("${usd:.2}")
+    }
+}
+
+/// Formats processed audio duration in minutes / hours in the UI language.
+///
+/// Params: `audio_ms`.
+/// Returns: e.g. `12 分钟` / `2 小时 15 分钟` or `12 min` / `2 h 15 min`.
+pub fn format_duration_minutes(audio_ms: u64) -> String {
+    let total_secs = audio_ms / 1000;
+    if total_secs == 0 {
+        return tr!("0 分钟", "0 min").to_string();
+    }
+    if total_secs < 60 {
+        return trf!("< 1 分钟", "< 1 min");
+    }
+    let total_mins = (audio_ms + 30_000) / 60_000;
+    if total_mins < 60 {
+        trf!("{total_mins} 分钟", "{total_mins} min")
+    } else {
+        let h = total_mins / 60;
+        let m = total_mins % 60;
+        trf!("{h} 小时 {m} 分钟", "{h} h {m} min")
+    }
+}
+
+/// Localized pricing reference string (`$0.0045/分钟 · 每 $100 约可转写 370 小时`).
+///
+/// Params: `provider`; `mode`; `model`.
+/// Returns: formatted rate hint.
+pub fn model_rate_hint(provider: AsrProvider, mode: AsrMode, model: &str) -> String {
+    let clean = model.trim();
+    if clean.is_empty() || asr_pricing::known_model_spec(provider, mode, clean).is_some() {
+        let spec = asr_pricing::model_spec(provider, mode, clean);
+        let rate = format_usd(spec.usd_per_minute);
+        let hours_per_100 =
+            (asr_pricing::minutes_for_usd(provider, mode, clean, 100.0) / 60.0).round() as u64;
+        trf!(
+            "{rate}/分钟 · 每 $100 约可转写 {hours_per_100} 小时",
+            "{rate}/min · ~{hours_per_100} h per $100"
+        )
+    } else {
+        let rate = format_usd(asr_pricing::model_spec(provider, mode, clean).usd_per_minute);
+        trf!(
+            "未收录该模型单价（估算按默认参考价 {rate}/分钟）",
+            "Model pricing not listed (estimated at default {rate}/min)"
+        )
     }
 }
 
@@ -981,21 +1152,15 @@ mod tests {
     #[test]
     fn provider_config_respects_switches() {
         let mut cfg = AppConfig::default();
-        let p = provider_config(&cfg, true, Some("/bin/codex".into()), None, None);
+        let p = provider_config(&cfg, true, Some("/bin/codex".into()), None);
         assert!(!p.byok_key_present, "no provider configured");
         assert_eq!(p.codex_signed_in.as_deref(), Some("/bin/codex"));
         assert!(p.codex_in_auto);
         cfg.use_codex = false;
         cfg.byok = byok_from_form("anthropic", "claude-opus-5-5", "");
-        cfg.minutes_backend = MinutesBackend::Antigravity;
-        cfg.antigravity_minutes_model = "claude-opus-5-5-high".into();
-        let p = provider_config(
-            &cfg,
-            true,
-            Some("/bin/codex".into()),
-            Some("/bin/agy".into()),
-            Some("/m".into()),
-        );
+        cfg.minutes_backend = MinutesBackend::Codex;
+        cfg.codex_model = Some("gpt-6.2-sol".into());
+        let p = provider_config(&cfg, true, Some("/bin/codex".into()), Some("/m".into()));
         assert!(p.byok_key_present);
         // The switch only keeps Codex out of the automatic chain; an explicit pick still works.
         assert!(!p.codex_in_auto);
@@ -1003,7 +1168,10 @@ mod tests {
         assert_eq!(p.local_model.as_deref(), Some("/m"));
         assert!(matches!(
             mm_llm::select_provider(&p),
-            Ok(ProviderChoice::Antigravity { ref model, .. }) if model == "claude-opus-5-5-high"
+            Ok(ProviderChoice::Codex {
+                model: Some(ref m),
+                ..
+            }) if m == "gpt-6.2-sol"
         ));
     }
 
@@ -1011,17 +1179,18 @@ mod tests {
     fn model_choices_keep_the_saved_model_and_filter() {
         let listed = vec![
             ModelOption {
-                id: "gemini-3.8-flash-medium".into(),
-                label: "Gemini 3.8 Flash (Medium)".into(),
+                id: "gpt-6.2-sol".into(),
+                label: "GPT-6.2-Sol".into(),
                 is_default: true,
             },
             ModelOption {
-                id: "claude-opus-5-5-high".into(),
-                label: "Claude Opus 5.5 (High)".into(),
+                id: "gpt-6.1-terra".into(),
+                label: "GPT-6.1 Terra".into(),
                 is_default: false,
             },
         ];
         let all = |_: &str| true;
+        let only_6_2 = |id: &str| id.starts_with("gpt-6.2");
         let ids = |v: Vec<(String, String)>| v.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
         assert_eq!(
             ids(model_choices(
@@ -1031,22 +1200,17 @@ mod tests {
                 "gone-model",
                 Some("Default")
             )),
-            [
-                "",
-                "gemini-3.8-flash-medium",
-                "claude-opus-5-5-high",
-                "gone-model"
-            ]
+            ["", "gpt-6.2-sol", "gpt-6.1-terra", "gone-model"]
         );
         assert_eq!(
             ids(model_choices(
                 Some(&listed),
                 &[],
-                mm_llm::antigravity::refine_capable,
-                "gemini-3.8-flash-medium",
+                only_6_2,
+                "gpt-6.2-sol",
                 None
             )),
-            ["gemini-3.8-flash-medium"]
+            ["gpt-6.2-sol"]
         );
         // Before the CLI answers, the built-in list stands in.
         assert_eq!(
@@ -1067,11 +1231,6 @@ mod tests {
                 provider_label(&codex(Some("gpt-6-luna"))),
                 "Codex (ChatGPT · gpt-6-luna)"
             );
-            let agy = ProviderChoice::Antigravity {
-                agy_path: "/a".into(),
-                model: "gemini-3.8-flash-medium".into(),
-            };
-            assert_eq!(provider_label(&agy), "Antigravity (Gemini 3.8 Flash)");
             assert_eq!(minutes_backend_label(MinutesBackend::Auto), "Automatic");
         });
     }
@@ -1336,5 +1495,75 @@ mod english_tests {
         });
         assert!(privacy_settings_url("Calendar access: denied").ends_with("Privacy_Calendars"));
         assert!(privacy_settings_url("Microphone permission: x").ends_with("Privacy_Microphone"));
+    }
+
+    #[test]
+    fn spend_formatting_month_start_and_rate_hints_work_in_both_languages() {
+        let now = Local.with_ymd_and_hms(2026, 11, 19, 16, 30, 0).unwrap();
+        let start_utc = local_month_start_utc(now);
+        assert_eq!(start_utc.with_timezone(&Local).day(), 1);
+        assert_eq!(start_utc.with_timezone(&Local).month(), 11);
+
+        assert_eq!(format_usd(0.0), "$0.00");
+        assert_eq!(format_usd(0.0045), "$0.0045");
+        assert_eq!(format_usd(12.345), "$12.35");
+
+        assert_eq!(format_duration_minutes(0), "0 分钟");
+        assert_eq!(format_duration_minutes(15_000), "< 1 分钟");
+        assert_eq!(format_duration_minutes(12 * 60_000), "12 分钟");
+        assert_eq!(format_duration_minutes(135 * 60_000), "2 小时 15 分钟");
+        let hint_zh = model_rate_hint(AsrProvider::OpenAi, AsrMode::Refine, "gpt-transcribe");
+        assert!(
+            hint_zh.contains("$0.0045/分钟") && hint_zh.contains("370 小时"),
+            "{hint_zh}"
+        );
+        let snap_zh = model_rate_hint(
+            AsrProvider::OpenAi,
+            AsrMode::Refine,
+            "gpt-4o-mini-transcribe-2025-12-15",
+        );
+        assert!(snap_zh.contains("$0.0030/分钟"), "{snap_zh}");
+        let custom_zh = model_rate_hint(AsrProvider::OpenAi, AsrMode::Refine, "gpt-9-transcribe");
+        assert!(custom_zh.contains("未收录该模型单价"), "{custom_zh}");
+
+        with_lang(Lang::En, || {
+            assert_eq!(format_duration_minutes(135 * 60_000), "2 h 15 min");
+            let hint_en = model_rate_hint(
+                AsrProvider::Gemini,
+                AsrMode::Live,
+                "gemini-3.5-transcribe-live",
+            );
+            assert!(
+                hint_en.contains("$0.0090/min") && hint_en.contains("185 h per $100"),
+                "{hint_en}"
+            );
+            let custom_en =
+                model_rate_hint(AsrProvider::OpenAi, AsrMode::Refine, "gpt-9-transcribe");
+            assert!(
+                custom_en.contains("Model pricing not listed"),
+                "{custom_en}"
+            );
+            assert_eq!(live_asr_backend_label(LiveAsrBackend::OpenAi), "OpenAI");
+            assert_eq!(
+                cloud_live_mode_label(CloudLiveMode::Streaming),
+                "Realtime stream (VAD-gated)"
+            );
+            assert_eq!(
+                cloud_live_mode_label(CloudLiveMode::Utterance),
+                "Per-utterance (low cost)"
+            );
+            assert_eq!(refine_backend_label(RefineBackend::Gemini), "Google Gemini");
+        });
+
+        let mut cfg = AppConfig {
+            live_asr_backend: LiveAsrBackend::OpenAi,
+            live_cloud_mode: CloudLiveMode::Streaming,
+            ..Default::default()
+        };
+        assert_eq!(effective_live_model(&cfg), DEFAULT_OPENAI_LIVE_MODEL);
+        cfg.live_cloud_mode = CloudLiveMode::Utterance;
+        assert_eq!(effective_live_model(&cfg), DEFAULT_OPENAI_REFINE_MODEL);
+        cfg.live_openai_utterance_model = Some("gpt-4o-mini-transcribe".into());
+        assert_eq!(effective_live_model(&cfg), "gpt-4o-mini-transcribe");
     }
 }

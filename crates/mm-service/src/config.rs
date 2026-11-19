@@ -47,20 +47,33 @@ pub struct AppConfig {
     pub minutes_backend: MinutesBackend,
     /// Codex model for minutes (`model/list` id); `None` keeps Codex's default.
     pub codex_model: Option<String>,
-    /// `agy --model` id for minutes through Antigravity. When it equals `antigravity_model`
-    /// and the Antigravity refine runs, one agy run does both jobs.
-    pub antigravity_minutes_model: String,
+    /// Who does live captions: local Qwen3-ASR in `mm-meetingd`, or OpenAI / Gemini cloud ASR.
+    pub live_asr_backend: LiveAsrBackend,
+    /// Upload strategy when [`Self::live_asr_backend`] uses OpenAI / Gemini:
+    /// VAD-gated realtime WebSocket (`streaming`, default) vs per-utterance HTTP (`utterance`).
+    pub live_cloud_mode: mm_core::CloudLiveMode,
+    /// OpenAI model id for [`LiveAsrBackend::OpenAi`] streaming mode; `None` uses `gpt-live-transcribe`.
+    pub live_openai_model: Option<String>,
+    /// Gemini model id for [`LiveAsrBackend::Gemini`] streaming mode; `None` uses `gemini-3.5-transcribe-live`.
+    pub live_gemini_model: Option<String>,
+    /// OpenAI model id for [`LiveAsrBackend::OpenAi`] per-utterance mode; `None` uses `gpt-transcribe`.
+    pub live_openai_utterance_model: Option<String>,
+    /// Gemini model id for [`LiveAsrBackend::Gemini`] per-utterance mode; `None` uses `gemini-3.5-transcribe`.
+    pub live_gemini_utterance_model: Option<String>,
     /// Re-transcribe recordings after the meeting with the larger model.
     pub refine_after_meeting: bool,
     /// Qwen3-ASR checkpoint for the post-meeting pass (Hugging Face repo id or absolute
     /// folder); `None` uses the engine default, Qwen3-ASR 1.7B 8bit. Live captions keep their
     /// own fast model, so a stronger refine model costs nothing during the meeting.
     pub refine_asr_model: Option<String>,
-    /// Who does the post-meeting pass: the local Qwen3-ASR engine, or Gemini through the
-    /// Antigravity CLI.
+    /// Who does the post-meeting pass: the local Qwen3-ASR engine, local Codex CLI, or OpenAI / Gemini API.
     pub refine_backend: RefineBackend,
-    /// `agy --model` id for [`RefineBackend::Antigravity`] (must hear audio).
-    pub antigravity_model: String,
+    /// Codex model for [`RefineBackend::Codex`] (`model/list` id); `None` keeps Codex's default.
+    pub codex_refine_model: Option<String>,
+    /// OpenAI model id for [`RefineBackend::OpenAi`]; `None` uses `gpt-transcribe`.
+    pub refine_openai_model: Option<String>,
+    /// Gemini model id for [`RefineBackend::Gemini`]; `None` uses `gemini-3.5-transcribe`.
+    pub refine_gemini_model: Option<String>,
     /// Generate minutes automatically when a meeting ends.
     pub auto_minutes: bool,
     /// Show the always-on-top caption window during meetings.
@@ -104,11 +117,18 @@ impl Default for AppConfig {
             use_codex: true,
             minutes_backend: MinutesBackend::Auto,
             codex_model: None,
-            antigravity_minutes_model: mm_llm::antigravity::DEFAULT_MODEL.into(),
+            live_asr_backend: LiveAsrBackend::Local,
+            live_cloud_mode: mm_core::CloudLiveMode::Streaming,
+            live_openai_model: None,
+            live_gemini_model: None,
+            live_openai_utterance_model: None,
+            live_gemini_utterance_model: None,
             refine_after_meeting: true,
             refine_asr_model: None,
             refine_backend: RefineBackend::Local,
-            antigravity_model: mm_llm::antigravity::DEFAULT_MODEL.into(),
+            codex_refine_model: None,
+            refine_openai_model: None,
+            refine_gemini_model: None,
             auto_minutes: true,
             floating_captions: true,
             minutes_language: "zh".into(),
@@ -119,6 +139,20 @@ impl Default for AppConfig {
     }
 }
 
+/// Engine for live real-time captions during a meeting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveAsrBackend {
+    /// Qwen3-ASR 1.7B 4bit in `mm-meetingd` (plus optional Zipformer draft).
+    #[default]
+    Local,
+    /// OpenAI Realtime Transcription WebSocket API (`gpt-live-transcribe`, …).
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Google Gemini Live Transcription WebSocket API (`gemini-3.5-transcribe-live`).
+    Gemini,
+}
+
 /// Engine for the post-meeting re-transcription.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,8 +160,16 @@ pub enum RefineBackend {
     /// Qwen3-ASR in `mm-meetingd`.
     #[default]
     Local,
-    /// Gemini hears the recordings via `agy`. Falls back to [`RefineBackend::Local`] when it fails.
-    Antigravity,
+    /// Local Codex CLI handles transcription, speaker diarization and minutes in one pass.
+    /// Falls back to [`RefineBackend::Local`] when it fails.
+    Codex,
+    /// OpenAI `/v1/audio/transcriptions` API (`gpt-transcribe`, `gpt-4o-transcribe-diarize`, …).
+    /// Falls back to [`RefineBackend::Local`] when it fails.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Google Gemini transcription API (`gemini-3.5-transcribe`, `gemini-3.8-flash`, …).
+    /// Falls back to [`RefineBackend::Local`] when it fails.
+    Gemini,
 }
 
 /// Folder name used for the app's data and recordings.
@@ -189,23 +231,21 @@ impl AppConfig {
         }
     }
 
-    /// Parses `config.json` text, carrying older settings forward.
-    ///
-    /// Before `minutes_backend` existed, the Antigravity refine also wrote the minutes; a
-    /// config from then keeps that behaviour by picking Antigravity for minutes too.
+    /// Parses `config.json` text, migrating removed backend picks safely to defaults.
     ///
     /// Params: `text` – file contents.
     /// Returns: the config.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
-        let raw: serde_json::Value = serde_json::from_str(text)?;
-        let legacy_antigravity =
-            raw.get("minutes_backend").is_none() && raw["refine_backend"] == "antigravity";
-        let mut cfg: Self = serde_json::from_value(raw)?;
-        if legacy_antigravity {
-            cfg.minutes_backend = MinutesBackend::Antigravity;
-            cfg.antigravity_minutes_model = cfg.antigravity_model.clone();
+        let mut raw: serde_json::Value = serde_json::from_str(text)?;
+        if let Some(obj) = raw.as_object_mut() {
+            if obj.get("refine_backend").and_then(|v| v.as_str()) == Some("antigravity") {
+                obj.remove("refine_backend");
+            }
+            if obj.get("minutes_backend").and_then(|v| v.as_str()) == Some("antigravity") {
+                obj.remove("minutes_backend");
+            }
         }
-        Ok(cfg)
+        serde_json::from_value(raw)
     }
 
     /// Writes `config.json` atomically.
@@ -306,23 +346,38 @@ mod tests {
         });
         cfg.minutes_backend = MinutesBackend::Codex;
         cfg.codex_model = Some("gpt-6.1-terra".into());
+        cfg.live_asr_backend = LiveAsrBackend::OpenAi;
+        cfg.live_cloud_mode = mm_core::CloudLiveMode::Utterance;
+        cfg.live_openai_model = Some("gpt-live-transcribe".into());
+        cfg.live_gemini_model = Some("gemini-3.5-transcribe-live".into());
+        cfg.live_openai_utterance_model = Some("gpt-4o-mini-transcribe".into());
+        cfg.live_gemini_utterance_model = Some("gemini-3.8-flash".into());
+        cfg.refine_backend = RefineBackend::Gemini;
+        cfg.codex_refine_model = Some("gpt-6.2-sol".into());
+        cfg.refine_openai_model = Some("gpt-transcribe".into());
+        cfg.refine_gemini_model = Some("gemini-3.5-transcribe".into());
         cfg.save(dir.path()).unwrap();
         assert_eq!(AppConfig::load(dir.path()).unwrap(), cfg);
     }
 
     #[test]
-    fn legacy_antigravity_refine_keeps_writing_minutes() {
-        let old = r#"{"refine_backend":"antigravity","antigravity_model":"gemini-3.8-flash-high"}"#;
-        let cfg = AppConfig::parse(old).unwrap();
-        assert_eq!(cfg.minutes_backend, MinutesBackend::Antigravity);
-        assert_eq!(cfg.antigravity_minutes_model, "gemini-3.8-flash-high");
+    fn partial_configs_default_new_asr_fields() {
+        let cfg = AppConfig::parse(r#"{"refine_backend": "openai"}"#).unwrap();
+        assert_eq!(cfg.refine_backend, RefineBackend::OpenAi);
+        assert_eq!(cfg.live_asr_backend, LiveAsrBackend::Local);
+        assert_eq!(cfg.live_cloud_mode, mm_core::CloudLiveMode::Streaming);
+        assert_eq!(cfg.live_openai_model, None);
+        assert_eq!(cfg.live_openai_utterance_model, None);
+        assert_eq!(cfg.live_gemini_utterance_model, None);
+        assert_eq!(cfg.refine_gemini_model, None);
+    }
 
-        // Once the key exists, the user's own pick wins.
-        let new = r#"{"refine_backend":"antigravity","minutes_backend":"auto"}"#;
-        assert_eq!(
-            AppConfig::parse(new).unwrap().minutes_backend,
-            MinutesBackend::Auto
-        );
+    #[test]
+    fn legacy_antigravity_config_falls_back_to_defaults() {
+        let old = r#"{"refine_backend":"antigravity","minutes_backend":"antigravity","antigravity_model":"gemini-3.8-flash-high","antigravity_minutes_model":"claude-opus-5-5-high"}"#;
+        let cfg = AppConfig::parse(old).unwrap();
+        assert_eq!(cfg.refine_backend, RefineBackend::Local);
+        assert_eq!(cfg.minutes_backend, MinutesBackend::Auto);
         assert_eq!(AppConfig::parse("{}").unwrap(), AppConfig::default());
     }
 

@@ -9,6 +9,43 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Upload strategy for cloud live captions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudLiveMode {
+    /// VAD + RMS gated WebSocket streaming (lowest latency partials).
+    #[default]
+    Streaming,
+    /// Local Silero VAD + optional CPU draft, uploading completed utterances via HTTP.
+    Utterance,
+}
+
+/// Cloud live-streaming ASR configuration handed to `mm-meetingd` at `capture/start`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveAsrConfig {
+    /// Cloud provider id: `"openai"` or `"gemini"`.
+    pub provider: String,
+    /// Model id on that provider.
+    pub model: String,
+    /// API key read from Keychain right before `capture/start` (never serialized to disk).
+    pub api_key: String,
+    /// Upload strategy (`streaming` or `utterance`); defaults to `streaming` when omitted.
+    #[serde(default)]
+    pub mode: CloudLiveMode,
+}
+
+impl std::fmt::Debug for LiveAsrConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveAsrConfig")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("mode", &self.mode)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
+}
+
 /// What one recording session should capture (`capture/start` params).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,6 +88,9 @@ pub struct CapturePreset {
     /// `azimuthDeg`. `None` means unknown geometry (relative positions only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spatial_spacing_cm: Option<f64>,
+    /// Optional cloud live-streaming ASR override; `None` uses the local Qwen3-ASR engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_asr: Option<LiveAsrConfig>,
 }
 
 /// Files of one session; one per source so ASR can keep stream origin apart.
@@ -176,5 +216,38 @@ mod tests {
         )
         .expect("decode audio/levels");
         assert_eq!(levels.source, LevelSource::Microphone);
+    }
+
+    #[test]
+    fn live_asr_config_round_trips_and_redacts_debug() {
+        let preset = CapturePreset {
+            system_audio: true,
+            live_asr: Some(LiveAsrConfig {
+                provider: "openai".into(),
+                model: "gpt-live-transcribe".into(),
+                api_key: "sk-secret-123".into(),
+                mode: CloudLiveMode::Utterance,
+            }),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&preset).expect("encode preset");
+        assert_eq!(encoded["liveAsr"]["provider"], "openai");
+        assert_eq!(encoded["liveAsr"]["model"], "gpt-live-transcribe");
+        assert_eq!(encoded["liveAsr"]["mode"], "utterance");
+        assert_eq!(encoded["liveAsr"]["apiKey"], "sk-secret-123");
+        let decoded: CapturePreset = serde_json::from_value(encoded).expect("decode preset");
+        assert_eq!(decoded, preset);
+
+        // Omitted `mode` deserializes cleanly to `CloudLiveMode::Streaming`.
+        let legacy: LiveAsrConfig = serde_json::from_str(
+            r#"{"provider":"gemini","model":"gemini-3.5-transcribe-live","apiKey":"AIza-x"}"#,
+        )
+        .expect("decode legacy liveAsr");
+        assert_eq!(legacy.mode, CloudLiveMode::Streaming);
+
+        let debug = format!("{:?}", preset.live_asr.unwrap());
+        assert!(!debug.contains("sk-secret-123"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("Utterance"));
     }
 }

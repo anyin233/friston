@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use gpui_kit::base::TestTextExt as _;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -11,8 +13,12 @@ use gpui_kit::component::{ActiveTheme as _, IconName, IndexPath, Sizable as _, h
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use mm_i18n::{tr, trf};
-use mm_llm::{MinutesBackend, antigravity};
-use mm_service::{AppConfig, RefineBackend};
+use mm_llm::{
+    AsrMode, AsrModelList, AsrProvider, DEFAULT_GEMINI_LIVE_MODEL, DEFAULT_GEMINI_REFINE_MODEL,
+    DEFAULT_OPENAI_LIVE_MODEL, DEFAULT_OPENAI_REFINE_MODEL, MinutesBackend, asr_pricing, byok,
+};
+use mm_service::{AppConfig, CloudLiveMode, LiveAsrBackend, RefineBackend};
+use mm_store::ProviderUsageSummary;
 
 use crate::logic;
 use crate::state::{AppState, Loadable, NoticeKind};
@@ -33,6 +39,12 @@ enum Field {
     LlmDir,
     Spacing,
     RefineModel,
+    LiveOpenAiModel,
+    LiveGeminiModel,
+    LiveOpenAiUtteranceModel,
+    LiveGeminiUtteranceModel,
+    RefineOpenAiModel,
+    RefineGeminiModel,
 }
 
 /// The 设置 page.
@@ -45,12 +57,21 @@ pub struct SettingsPage {
     model: Entity<InputState>,
     base_url: Entity<InputState>,
     api_key: Entity<InputState>,
+    asr_openai_key: Entity<InputState>,
+    asr_openai_admin_key: Entity<InputState>,
+    asr_gemini_key: Entity<InputState>,
     embed_dir: Entity<InputState>,
     embed_url: Entity<InputState>,
     hf_token: Entity<InputState>,
     llm_dir: Entity<InputState>,
     spacing: Entity<InputState>,
     refine_model: Entity<InputState>,
+    live_openai_model: Entity<InputState>,
+    live_gemini_model: Entity<InputState>,
+    live_openai_utterance_model: Entity<InputState>,
+    live_gemini_utterance_model: Entity<InputState>,
+    refine_openai_model: Entity<InputState>,
+    refine_gemini_model: Entity<InputState>,
     mics: Entity<SelectState<Vec<Choice>>>,
     mic_sig: Vec<String>,
     /// Window to record with the next meeting (moved here from the 会议中 page).
@@ -61,34 +82,108 @@ pub struct SettingsPage {
     /// BYOK kind chosen in the form (may differ from config until a model is typed).
     byok_kind: &'static str,
     /// Model pickers, in [`ModelPicker`] order.
-    model_sels: [Entity<SelectState<Vec<Choice>>>; 3],
+    model_sels: [Entity<SelectState<Vec<Choice>>>; 2],
     /// Items, selection and language last pushed into each picker.
-    model_sigs: [Vec<String>; 3],
+    model_sigs: [Vec<String>; 2],
+    /// Cloud transcription model pickers, in [`AsrModelPicker`] order.
+    asr_sels: [Entity<SelectState<Vec<Choice>>>; 6],
+    /// Items, selection and language last pushed into each cloud ASR picker.
+    asr_sigs: [Vec<String>; 6],
 }
 
-/// The three model pickers on this page.
+/// The Codex model pickers on this page.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ModelPicker {
     /// Codex model for minutes.
-    Codex = 0,
-    /// Antigravity model for minutes.
-    AgyMinutes = 1,
-    /// Antigravity model for the post-meeting refine (must hear audio).
-    AgyRefine = 2,
+    CodexMinutes = 0,
+    /// Codex model for the unified post-meeting refine + minutes pass.
+    CodexRefine = 1,
 }
 
 impl ModelPicker {
-    const ALL: [ModelPicker; 3] = [Self::Codex, Self::AgyMinutes, Self::AgyRefine];
+    const ALL: [ModelPicker; 2] = [Self::CodexMinutes, Self::CodexRefine];
 
     /// Stores a picked model id in the config.
     ///
-    /// Params: `cfg`; `id` – `""` means the CLI's default (Codex only).
+    /// Params: `cfg`; `id` – `""` means Codex's default model.
     fn store(self, cfg: &mut AppConfig, id: String) {
+        let picked = Some(id).filter(|m| !m.is_empty());
         match self {
-            Self::Codex => cfg.codex_model = Some(id).filter(|m| !m.is_empty()),
-            Self::AgyMinutes if !id.is_empty() => cfg.antigravity_minutes_model = id,
-            Self::AgyRefine if !id.is_empty() => cfg.antigravity_model = id,
-            _ => {}
+            Self::CodexMinutes => cfg.codex_model = picked,
+            Self::CodexRefine => cfg.codex_refine_model = picked,
+        }
+    }
+}
+
+/// The cloud transcription model pickers on this page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AsrModelPicker {
+    LiveOpenAi = 0,
+    LiveGemini = 1,
+    LiveOpenAiUtterance = 2,
+    LiveGeminiUtterance = 3,
+    RefineOpenAi = 4,
+    RefineGemini = 5,
+}
+
+impl AsrModelPicker {
+    const ALL: [AsrModelPicker; 6] = [
+        Self::LiveOpenAi,
+        Self::LiveGemini,
+        Self::LiveOpenAiUtterance,
+        Self::LiveGeminiUtterance,
+        Self::RefineOpenAi,
+        Self::RefineGemini,
+    ];
+
+    fn meta(self) -> (AsrProvider, AsrMode) {
+        match self {
+            Self::LiveOpenAi => (AsrProvider::OpenAi, AsrMode::Live),
+            Self::LiveGemini => (AsrProvider::Gemini, AsrMode::Live),
+            Self::LiveOpenAiUtterance | Self::RefineOpenAi => {
+                (AsrProvider::OpenAi, AsrMode::Refine)
+            }
+            Self::LiveGeminiUtterance | Self::RefineGemini => {
+                (AsrProvider::Gemini, AsrMode::Refine)
+            }
+        }
+    }
+
+    fn saved(self, cfg: &AppConfig) -> String {
+        match self {
+            Self::LiveOpenAi => cfg.live_openai_model.clone().unwrap_or_default(),
+            Self::LiveGemini => cfg.live_gemini_model.clone().unwrap_or_default(),
+            Self::LiveOpenAiUtterance => {
+                cfg.live_openai_utterance_model.clone().unwrap_or_default()
+            }
+            Self::LiveGeminiUtterance => {
+                cfg.live_gemini_utterance_model.clone().unwrap_or_default()
+            }
+            Self::RefineOpenAi => cfg.refine_openai_model.clone().unwrap_or_default(),
+            Self::RefineGemini => cfg.refine_gemini_model.clone().unwrap_or_default(),
+        }
+    }
+
+    fn store(self, cfg: &mut AppConfig, id: String) {
+        let picked = Some(id).filter(|m| !m.is_empty());
+        match self {
+            Self::LiveOpenAi => cfg.live_openai_model = picked,
+            Self::LiveGemini => cfg.live_gemini_model = picked,
+            Self::LiveOpenAiUtterance => cfg.live_openai_utterance_model = picked,
+            Self::LiveGeminiUtterance => cfg.live_gemini_utterance_model = picked,
+            Self::RefineOpenAi => cfg.refine_openai_model = picked,
+            Self::RefineGemini => cfg.refine_gemini_model = picked,
+        }
+    }
+
+    fn input(self, page: &SettingsPage) -> &Entity<InputState> {
+        match self {
+            Self::LiveOpenAi => &page.live_openai_model,
+            Self::LiveGemini => &page.live_gemini_model,
+            Self::LiveOpenAiUtterance => &page.live_openai_utterance_model,
+            Self::LiveGeminiUtterance => &page.live_gemini_utterance_model,
+            Self::RefineOpenAi => &page.refine_openai_model,
+            Self::RefineGemini => &page.refine_gemini_model,
         }
     }
 }
@@ -243,6 +338,51 @@ impl SettingsPage {
             window,
             cx,
         );
+        let live_openai_model = mk(
+            cfg.live_openai_model.clone().unwrap_or_default(),
+            || DEFAULT_OPENAI_LIVE_MODEL,
+            &mut placeholders,
+            window,
+            cx,
+        );
+        let live_gemini_model = mk(
+            cfg.live_gemini_model.clone().unwrap_or_default(),
+            || DEFAULT_GEMINI_LIVE_MODEL,
+            &mut placeholders,
+            window,
+            cx,
+        );
+        let live_openai_utterance_model = mk(
+            cfg.live_openai_utterance_model.clone().unwrap_or_default(),
+            || DEFAULT_OPENAI_REFINE_MODEL,
+            &mut placeholders,
+            window,
+            cx,
+        );
+        let live_gemini_utterance_model = mk(
+            cfg.live_gemini_utterance_model.clone().unwrap_or_default(),
+            || DEFAULT_GEMINI_REFINE_MODEL,
+            &mut placeholders,
+            window,
+            cx,
+        );
+        let refine_openai_model = mk(
+            cfg.refine_openai_model.clone().unwrap_or_default(),
+            || DEFAULT_OPENAI_REFINE_MODEL,
+            &mut placeholders,
+            window,
+            cx,
+        );
+        let refine_gemini_model = mk(
+            cfg.refine_gemini_model.clone().unwrap_or_default(),
+            || DEFAULT_GEMINI_REFINE_MODEL,
+            &mut placeholders,
+            window,
+            cx,
+        );
+        let asr_openai_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let asr_openai_admin_key = cx.new(|cx| InputState::new(window, cx).masked(true));
+        let asr_gemini_key = cx.new(|cx| InputState::new(window, cx).masked(true));
         let mics = cx.new(|cx| {
             SelectState::new(
                 vec![Choice::new(
@@ -279,6 +419,26 @@ impl SettingsPage {
             })
             .detach();
         }
+        let asr_sels = AsrModelPicker::ALL
+            .map(|_| cx.new(|cx| SelectState::new(Vec::<Choice>::new(), None, window, cx)));
+        for (sel, picker) in asr_sels.iter().zip(AsrModelPicker::ALL) {
+            cx.subscribe_in(
+                sel,
+                window,
+                move |this, _, ev: &SelectEvent<Vec<Choice>>, window, cx| {
+                    let SelectEvent::Confirm(Some(id)) = ev else {
+                        return;
+                    };
+                    let id = id.clone();
+                    let inp = picker.input(this).clone();
+                    let val_for_input = id.clone();
+                    inp.update(cx, |s, cx| s.set_value(val_for_input, window, cx));
+                    this.app
+                        .update(cx, |a, cx| a.update_config(cx, |c| picker.store(c, id)));
+                },
+            )
+            .detach();
+        }
         // Model lists come from the CLIs; ask once the page exists (never inside its creation,
         // which may run while the app state is being updated).
         let app_for_lists = app.clone();
@@ -297,6 +457,18 @@ impl SettingsPage {
             (&llm_dir, Field::LlmDir),
             (&spacing, Field::Spacing),
             (&refine_model, Field::RefineModel),
+            (&live_openai_model, Field::LiveOpenAiModel),
+            (&live_gemini_model, Field::LiveGeminiModel),
+            (
+                &live_openai_utterance_model,
+                Field::LiveOpenAiUtteranceModel,
+            ),
+            (
+                &live_gemini_utterance_model,
+                Field::LiveGeminiUtteranceModel,
+            ),
+            (&refine_openai_model, Field::RefineOpenAiModel),
+            (&refine_gemini_model, Field::RefineGeminiModel),
         ] {
             cx.subscribe(input, move |this, state, ev: &InputEvent, cx| {
                 if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -335,6 +507,24 @@ impl SettingsPage {
                 "Paste an API key. It won’t be shown again after saving."
             )
         });
+        placeholders.input(&asr_openai_key, || {
+            tr!(
+                "粘贴 OpenAI API 密钥（sk-…），保存后不会再显示",
+                "Paste OpenAI API key (sk-…). Hidden after saving."
+            )
+        });
+        placeholders.input(&asr_openai_admin_key, || {
+            tr!(
+                "粘贴 OpenAI Admin 密钥（sk-admin-…，可选）",
+                "Paste OpenAI Admin key (sk-admin-…, optional)"
+            )
+        });
+        placeholders.input(&asr_gemini_key, || {
+            tr!(
+                "粘贴 Google Gemini API 密钥（AIza…），保存后不会再显示",
+                "Paste Google Gemini API key (AIza…). Hidden after saving."
+            )
+        });
         placeholders.input(&hf_token, || {
             tr!(
                 "粘贴 Hugging Face 令牌（hf_…），保存后不会再显示",
@@ -350,12 +540,21 @@ impl SettingsPage {
             model,
             base_url,
             api_key,
+            asr_openai_key,
+            asr_openai_admin_key,
+            asr_gemini_key,
             embed_dir,
             embed_url,
             hf_token,
             llm_dir,
             spacing,
             refine_model,
+            live_openai_model,
+            live_gemini_model,
+            live_openai_utterance_model,
+            live_gemini_utterance_model,
+            refine_openai_model,
+            refine_gemini_model,
             mics,
             mic_sig: vec![],
             windows,
@@ -364,75 +563,102 @@ impl SettingsPage {
             byok_kind: kind,
             model_sels,
             model_sigs: Default::default(),
+            asr_sels,
+            asr_sigs: Default::default(),
         }
     }
 
-    /// Keeps the model pickers in step with the CLIs' model lists and the config.
-    ///
-    /// Params: `window`; `cx`.
-    fn sync_model_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let app = self.app.read(cx);
-        let cfg = &app.cfg;
-        let agy_fallback = antigravity::models();
-        let all = |_: &str| true;
-        let codex_saved = cfg.codex_model.clone().unwrap_or_default();
-        let lists = [
-            (
-                logic::model_choices(
-                    app.codex_models.ready().map(Vec::as_slice),
-                    &[],
-                    all,
-                    &codex_saved,
-                    Some(tr!("Codex 默认模型", "Codex default model")),
-                ),
-                codex_saved.clone(),
-            ),
-            (
-                logic::model_choices(
-                    app.agy_models.ready().map(Vec::as_slice),
-                    &agy_fallback,
-                    all,
-                    &cfg.antigravity_minutes_model,
-                    None,
-                ),
-                cfg.antigravity_minutes_model.clone(),
-            ),
-            (
-                logic::model_choices(
-                    app.agy_models.ready().map(Vec::as_slice),
-                    &agy_fallback,
-                    antigravity::refine_capable,
-                    &cfg.antigravity_model,
-                    None,
-                ),
-                cfg.antigravity_model.clone(),
-            ),
-        ];
-        let lang = mm_i18n::current().code().to_string();
+    /// Applies `(items, selected)` choices to `sels` whenever their rendered signature changes.
+    fn apply_picker_lists<const N: usize>(
+        sels: &[Entity<SelectState<Vec<Choice>>>; N],
+        sigs: &mut [Vec<String>; N],
+        lists: [(Vec<(String, String)>, String); N],
+        lang: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         for (i, (items, selected)) in lists.into_iter().enumerate() {
             // Labels are part of the signature: the language switch relabels the default entry.
             let sig: Vec<String> = items
                 .iter()
                 .flat_map(|(id, l)| [id.clone(), l.clone()])
-                .chain([selected.clone(), lang.clone()])
+                .chain([selected.clone(), lang.to_string()])
                 .collect();
-            if sig == self.model_sigs[i] {
+            if sig == sigs[i] {
                 continue;
             }
-            self.model_sigs[i] = sig;
+            sigs[i] = sig;
             let choices: Vec<Choice> = items
                 .into_iter()
                 .map(|(id, l)| Choice::new(id, l))
                 .collect();
-            self.model_sels[i].update(cx, |s, cx| {
+            sels[i].update(cx, |s, cx| {
                 s.set_items(choices, window, cx);
                 s.set_selected_value(&selected, window, cx);
             });
         }
+    }
+
+    /// Keeps the model pickers in step with Codex / cloud ASR model lists and the config.
+    ///
+    /// Params: `window`; `cx`.
+    fn sync_model_pickers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let lang = mm_i18n::current().code().to_string();
+        let (codex_lists, asr_lists) = {
+            let app = self.app.read(cx);
+            let cfg = &app.cfg;
+            let all = |_: &str| true;
+            let listed = app.codex_models.ready().map(Vec::as_slice);
+            let default_label = Some(tr!("Codex 默认模型", "Codex default model"));
+            let codex_minutes_saved = cfg.codex_model.clone().unwrap_or_default();
+            let codex_refine_saved = cfg.codex_refine_model.clone().unwrap_or_default();
+            let codex_lists = [
+                (
+                    logic::model_choices(listed, &[], all, &codex_minutes_saved, default_label),
+                    codex_minutes_saved,
+                ),
+                (
+                    logic::model_choices(listed, &[], all, &codex_refine_saved, default_label),
+                    codex_refine_saved,
+                ),
+            ];
+            let asr_lists = AsrModelPicker::ALL.map(|picker| {
+                let (provider, mode) = picker.meta();
+                let provider_models = match provider {
+                    AsrProvider::OpenAi => app.openai_asr_models.ready(),
+                    AsrProvider::Gemini => app.gemini_asr_models.ready(),
+                };
+                let listed = provider_models.map(|m| m.for_mode(mode));
+                let default_id = asr_pricing::default_model(provider, mode);
+                let default_label = trf!("默认（{default_id}）", "Default ({default_id})");
+                let selected = picker.saved(cfg);
+                (
+                    logic::model_choices(listed, &[], all, &selected, Some(&default_label)),
+                    selected,
+                )
+            });
+            (codex_lists, asr_lists)
+        };
+        Self::apply_picker_lists(
+            &self.model_sels,
+            &mut self.model_sigs,
+            codex_lists,
+            &lang,
+            window,
+            cx,
+        );
+        Self::apply_picker_lists(
+            &self.asr_sels,
+            &mut self.asr_sigs,
+            asr_lists,
+            &lang,
+            window,
+            cx,
+        );
         cx.notify();
     }
 
-    /// A model picker with a button that asks the CLI for its list again.
+    /// A model picker with a button that asks Codex for its list again.
     ///
     /// Params: `picker`; `list` – the CLI's list state, for the status line; `cx`.
     /// Returns: the picker element.
@@ -472,14 +698,46 @@ impl SettingsPage {
                             .icon(IconName::RefreshCw)
                             .label(tr!("刷新列表", "Refresh list"))
                             .on_click(move |_, _, cx| {
-                                app.update(cx, |a, cx| match picker {
-                                    ModelPicker::Codex => a.refresh_codex_models(cx),
-                                    _ => a.refresh_agy_models(cx),
-                                })
+                                app.update(cx, |a, cx| a.refresh_codex_models(cx))
                             }),
                     ),
             )
             .when_some(note, |el, n| el.child(ui::muted(n, cx)))
+    }
+
+    /// Human-readable Codex CLI sign-in status line shared by the refine and minutes sections.
+    ///
+    /// Params: `app`.
+    /// Returns: localized status line.
+    fn codex_status_line(app: &AppState) -> String {
+        match &app.codex {
+            Loadable::Ready(c) => match (&c.path, c.signed_in) {
+                (None, _) => tr!(
+                    "未安装 Codex CLI。安装后可用 ChatGPT 账号处理录音与纪要。",
+                    "Codex CLI isn’t installed. Install it to use your ChatGPT account."
+                )
+                .to_string(),
+                (Some(p), true) => trf!(
+                    "Codex 已登录{}（{}）",
+                    "Codex signed in{} ({})",
+                    c.label
+                        .as_deref()
+                        .map(|l| trf!("：{l}", ": {l}"))
+                        .unwrap_or_default(),
+                    p.display()
+                ),
+                (Some(_), false) => trf!(
+                    "Codex 未登录。在终端运行 codex login 后点“重新检测”。{}",
+                    "Codex isn’t signed in. Run codex login in Terminal, then click Check again.{}",
+                    c.error
+                        .as_deref()
+                        .map(|e| trf!("（{e}）", " ({e})"))
+                        .unwrap_or_default()
+                ),
+            },
+            Loadable::Failed(e) => e.message.clone(),
+            _ => tr!("正在检测 Codex…", "Checking Codex…").to_string(),
+        }
     }
 
     /// Shows a model folder set elsewhere (a finished download) in the folder field.
@@ -625,6 +883,30 @@ impl SettingsPage {
                 let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
                 a.update_config(cx, |c| c.refine_asr_model = model);
             }
+            Field::LiveOpenAiModel => {
+                let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                a.update_config(cx, |c| c.live_openai_model = model);
+            }
+            Field::LiveGeminiModel => {
+                let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                a.update_config(cx, |c| c.live_gemini_model = model);
+            }
+            Field::LiveOpenAiUtteranceModel => {
+                let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                a.update_config(cx, |c| c.live_openai_utterance_model = model);
+            }
+            Field::LiveGeminiUtteranceModel => {
+                let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                a.update_config(cx, |c| c.live_gemini_utterance_model = model);
+            }
+            Field::RefineOpenAiModel => {
+                let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                a.update_config(cx, |c| c.refine_openai_model = model);
+            }
+            Field::RefineGeminiModel => {
+                let model = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+                a.update_config(cx, |c| c.refine_gemini_model = model);
+            }
             Field::Spacing => match logic::parse_spacing_cm(&value) {
                 Ok(cm) => a.update_config(cx, |c| c.spatial_spacing_cm = cm),
                 Err(msg) => a.notify(NoticeKind::Warning, msg, cx),
@@ -634,6 +916,7 @@ impl SettingsPage {
 
     /// A labelled row.
     fn row(label: &str, hint: Option<String>, control: impl IntoElement, cx: &App) -> Div {
+        let label_text: SharedString = label.to_string().into();
         h_flex()
             .gap_4()
             .items_start()
@@ -642,7 +925,11 @@ impl SettingsPage {
                 v_flex()
                     .w(px(220.))
                     .flex_none()
-                    .child(div().text_sm().child(label.to_string()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(label_text.clone().test_text(label_text)),
+                    )
                     .when_some(hint, |el, h| {
                         el.child(
                             div()
@@ -682,6 +969,7 @@ impl SettingsPage {
         on_pick: impl Fn(&mut AppState, T, &mut Context<AppState>) + Clone + 'static,
     ) -> Div {
         h_flex()
+            .flex_wrap()
             .gap_1()
             .children(options.into_iter().enumerate().map(|(i, (v, label))| {
                 let app = self.app.clone();
@@ -738,7 +1026,7 @@ impl SettingsPage {
                 ),
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.vault)))
+                    .child(div().flex_1().child(Input::new(&self.vault).id("settings-vault")))
                     .child(
                         Button::new("discover")
                             .outline()
@@ -780,7 +1068,7 @@ impl SettingsPage {
             .child(Self::row(
                 tr!("会议笔记文件夹", "Meeting notes folder"),
                 Some(tr!("库里的相对路径", "Path relative to the vault").into()),
-                Input::new(&self.folder),
+                Input::new(&self.folder).id("settings-folder"),
                 cx,
             ))
             .child(ui::muted(
@@ -799,12 +1087,29 @@ impl SettingsPage {
     /// Capture and caption section.
     fn capture(&self, cfg: &AppConfig, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = cfg.caption_language.clone();
-        let recording = {
+        let (
+            recording,
+            codex_line,
+            codex_models,
+            openai_key_present,
+            gemini_key_present,
+            openai_asr_models,
+            gemini_asr_models,
+        ) = {
             let app = self.app.read(cx);
-            app.live.is_some() || app.live_starting
+            (
+                app.live.is_some() || app.live_starting,
+                Self::codex_status_line(app),
+                app.codex_models.clone(),
+                app.openai_key_present,
+                app.gemini_key_present,
+                app.openai_asr_models.clone(),
+                app.gemini_asr_models.clone(),
+            )
         };
         let a_mics = self.app.clone();
         let a_src = self.app.clone();
+        let a_codex = self.app.clone();
         ui::card(cx)
             .child(ui::section_title(tr!("录制与字幕", "Recording and captions")))
             .when(recording, |el| {
@@ -937,6 +1242,122 @@ impl SettingsPage {
                 cx,
             ))
             .child(Self::row(
+                tr!("实时字幕方式", "Live captions with"),
+                Some(tr!(
+                    "本地：Qwen3-ASR 1.7B 在本机运行。OpenAI / Gemini：通过云端转写（可选低延迟 VAD 门控实时流，或本地草稿 + 断句按需上传），仍在本机做 VAD 断句、声纹、方位与说话人区分；断网或缺少密钥时自动回退到本地 Qwen3-ASR。",
+                    "Local: Qwen3-ASR 1.7B runs on this Mac. OpenAI / Gemini: cloud transcription with either VAD-gated realtime streaming or low-cost per-utterance HTTP upload, keeping local VAD, voiceprints, spatial cues, and diarization; falls back to local Qwen3-ASR if offline or unconfigured."
+                ).into()),
+                self.segmented(
+                    "live-asr-backend",
+                    vec![
+                        (LiveAsrBackend::Local, logic::live_asr_backend_label(LiveAsrBackend::Local)),
+                        (LiveAsrBackend::OpenAi, logic::live_asr_backend_label(LiveAsrBackend::OpenAi)),
+                        (LiveAsrBackend::Gemini, logic::live_asr_backend_label(LiveAsrBackend::Gemini)),
+                    ],
+                    cfg.live_asr_backend,
+                    |a, v, cx| {
+                        a.update_config(cx, |c| c.live_asr_backend = v);
+                        if matches!(v, LiveAsrBackend::OpenAi | LiveAsrBackend::Gemini) {
+                            a.ensure_model_lists(cx);
+                        }
+                    },
+                ),
+                cx,
+            ))
+            .when(cfg.live_asr_backend != LiveAsrBackend::Local, |el| {
+                el.child(Self::row(
+                    tr!("云端上传策略", "Cloud upload mode"),
+                    Some(tr!(
+                        "实时流式：保持按需 WebSocket，本地 Silero VAD + RMS 门控跳过静音与短噪点，空闲自动断开，延迟最低。按句上传：本地 Silero VAD 断句（中文可配本机 CPU Zipformer 即时草稿），仅在每句话结束时通过 REST 上传，费用低约 4–6 倍且无常驻长连接。",
+                        "Realtime stream: VAD + RMS gated WebSocket with lazy connect and idle auto-close for lowest-latency partials. Per-utterance: local Silero VAD (+ CPU Chinese Zipformer draft) uploads only completed speech via REST (~4–6x lower cost, no persistent WebSockets)."
+                    ).into()),
+                    self.segmented(
+                        "live-cloud-mode",
+                        vec![
+                            (
+                                CloudLiveMode::Streaming,
+                                logic::cloud_live_mode_label(CloudLiveMode::Streaming),
+                            ),
+                            (
+                                CloudLiveMode::Utterance,
+                                logic::cloud_live_mode_label(CloudLiveMode::Utterance),
+                            ),
+                        ],
+                        cfg.live_cloud_mode,
+                        |a, v, cx| a.update_config(cx, |c| c.live_cloud_mode = v),
+                    ),
+                    cx,
+                ))
+            })
+            .when(
+                cfg.live_asr_backend == LiveAsrBackend::OpenAi
+                    && cfg.live_cloud_mode == CloudLiveMode::Streaming,
+                |el| {
+                    el.child(self.cloud_asr_model_row(
+                        AsrModelPicker::LiveOpenAi,
+                        AsrProvider::OpenAi,
+                        AsrMode::Live,
+                        logic::effective_live_model(cfg),
+                        openai_key_present,
+                        &openai_asr_models,
+                        "live-openai",
+                        &self.live_openai_model,
+                        cx,
+                    ))
+                },
+            )
+            .when(
+                cfg.live_asr_backend == LiveAsrBackend::OpenAi
+                    && cfg.live_cloud_mode == CloudLiveMode::Utterance,
+                |el| {
+                    el.child(self.cloud_asr_model_row(
+                        AsrModelPicker::LiveOpenAiUtterance,
+                        AsrProvider::OpenAi,
+                        AsrMode::Refine,
+                        logic::effective_live_model(cfg),
+                        openai_key_present,
+                        &openai_asr_models,
+                        "live-openai",
+                        &self.live_openai_utterance_model,
+                        cx,
+                    ))
+                },
+            )
+            .when(
+                cfg.live_asr_backend == LiveAsrBackend::Gemini
+                    && cfg.live_cloud_mode == CloudLiveMode::Streaming,
+                |el| {
+                    el.child(self.cloud_asr_model_row(
+                        AsrModelPicker::LiveGemini,
+                        AsrProvider::Gemini,
+                        AsrMode::Live,
+                        logic::effective_live_model(cfg),
+                        gemini_key_present,
+                        &gemini_asr_models,
+                        "live-gemini",
+                        &self.live_gemini_model,
+                        cx,
+                    ))
+                },
+            )
+            .when(
+                cfg.live_asr_backend == LiveAsrBackend::Gemini
+                    && cfg.live_cloud_mode == CloudLiveMode::Utterance,
+                |el| {
+                    el.child(self.cloud_asr_model_row(
+                        AsrModelPicker::LiveGeminiUtterance,
+                        AsrProvider::Gemini,
+                        AsrMode::Refine,
+                        logic::effective_live_model(cfg),
+                        gemini_key_present,
+                        &gemini_asr_models,
+                        "live-gemini",
+                        &self.live_gemini_utterance_model,
+                        cx,
+                    ))
+                },
+            )
+            .child(Self::row(
                 "",
                 None,
                 self.switch(
@@ -953,17 +1374,24 @@ impl SettingsPage {
             .child(Self::row(
                 tr!("精转方式", "Refine with"),
                 Some(tr!(
-                    "本地：Qwen3-ASR 在本机重新转写。Antigravity：Gemini 直接听录音；录音会上传到 Google，失败时自动改用本地。纪要也选 Antigravity 且模型相同时，15 分钟内的会议一次完成转写和纪要。",
-                    "Local: Qwen3-ASR re-transcribes on this Mac. Antigravity: Gemini listens to the recording; the recording is uploaded to Google, and the app falls back to local if it fails. If minutes also use Antigravity with the same model, meetings up to 15 minutes get the transcript and minutes in one run."
+                    "本地：Qwen3-ASR 在本机重新转写。Codex 一体化：直接把录音路径交给本机 Codex，在一次运行里完成转写、区分说话人和制作会议纪要。OpenAI / Gemini：分段上传音频到云端转写；任何云端或 Codex 路线失败时都自动回退到本地精转。",
+                    "Local: Qwen3-ASR re-transcribes on this Mac. Codex (transcribe + minutes): passes recordings to local Codex in one pass. OpenAI / Gemini: uploads speech chunks to cloud APIs; any cloud or Codex failure falls back to local Qwen3-ASR."
                 ).into()),
                 self.segmented(
                     "refine-backend",
                     vec![
-                        (RefineBackend::Local, tr!("本地 Qwen3-ASR", "Local Qwen3-ASR")),
-                        (RefineBackend::Antigravity, "Antigravity · Gemini"),
+                        (RefineBackend::Local, logic::refine_backend_label(RefineBackend::Local)),
+                        (RefineBackend::Codex, logic::refine_backend_label(RefineBackend::Codex)),
+                        (RefineBackend::OpenAi, logic::refine_backend_label(RefineBackend::OpenAi)),
+                        (RefineBackend::Gemini, logic::refine_backend_label(RefineBackend::Gemini)),
                     ],
                     cfg.refine_backend,
-                    |a, v, cx| a.update_config(cx, |c| c.refine_backend = v),
+                    |a, v, cx| {
+                        a.update_config(cx, |c| c.refine_backend = v);
+                        if matches!(v, RefineBackend::OpenAi | RefineBackend::Gemini) {
+                            a.ensure_model_lists(cx);
+                        }
+                    },
                 ),
                 cx,
             ))
@@ -971,72 +1399,551 @@ impl SettingsPage {
                 el.child(Self::row(
                     tr!("精转模型", "Refine model"),
                     Some(tr!(
-                        "实时字幕固定用快速模型。这里可以填更大的 Qwen3-ASR 模型：Hugging Face 仓库名或本地文件夹，名字里要带 0.6B 或 1.7B。留空用默认。",
-                        "Live captions always use the fast model. Enter a larger Qwen3-ASR model here: a Hugging Face repo or a local folder whose name contains 0.6B or 1.7B. Leave blank for the default."
+                        "本地精转可填更大的 Qwen3-ASR 模型：Hugging Face 仓库名或本地文件夹，名字里要带 0.6B 或 1.7B。留空用默认。",
+                        "Enter a larger local Qwen3-ASR model: a Hugging Face repo or local folder containing 0.6B or 1.7B. Leave blank for the default."
                     ).into()),
-                    Input::new(&self.refine_model).small(),
+                    Input::new(&self.refine_model)
+                        .id("settings-refine-model")
+                        .small(),
                     cx,
                 ))
             })
-            .when(cfg.refine_backend == RefineBackend::Antigravity, |el| {
-                let agy_line = match antigravity::find_agy() {
-                    Some(p) => trf!(
-                        "已找到 agy（{}）。第一次使用前，在终端运行一次 agy 并用 Google 账号登录。",
-                        "Found agy ({}). Before first use, run agy once in Terminal and sign in with your Google account.",
-                        p.display()
-                    ),
-                    None => tr!(
-                        "没有找到 agy。安装 Antigravity CLI 后再选这一项，否则会改用本地精转。",
-                        "agy not found. Install the Antigravity CLI before choosing this; otherwise the app refines locally."
-                    )
-                    .to_string(),
-                };
-                let picker = self.model_picker(
-                    ModelPicker::AgyRefine,
-                    &self.app.read(cx).agy_models.clone(),
+            .when(cfg.refine_backend == RefineBackend::OpenAi, |el| {
+                el.child(self.cloud_asr_model_row(
+                    AsrModelPicker::RefineOpenAi,
+                    AsrProvider::OpenAi,
+                    AsrMode::Refine,
+                    logic::effective_refine_model(cfg),
+                    openai_key_present,
+                    &openai_asr_models,
+                    "refine-openai",
+                    &self.refine_openai_model,
                     cx,
-                );
+                ))
+            })
+            .when(cfg.refine_backend == RefineBackend::Gemini, |el| {
+                el.child(self.cloud_asr_model_row(
+                    AsrModelPicker::RefineGemini,
+                    AsrProvider::Gemini,
+                    AsrMode::Refine,
+                    logic::effective_refine_model(cfg),
+                    gemini_key_present,
+                    &gemini_asr_models,
+                    "refine-gemini",
+                    &self.refine_gemini_model,
+                    cx,
+                ))
+            })
+            .when(cfg.refine_backend == RefineBackend::Codex, |el| {
+                let picker = self.model_picker(ModelPicker::CodexRefine, &codex_models, cx);
                 el.child(Self::row(
-                    tr!("Gemini 模型", "Gemini model"),
-                    Some(agy_line),
-                    picker,
+                    tr!("Codex 精转模型", "Codex refine model"),
+                    Some(tr!(
+                        "向 Codex 传入音频路径，由它自主调用转写工具、区分说话人并生成会议纪要。",
+                        "Gives Codex the recording path to transcribe, separate speakers, and write minutes."
+                    ).into()),
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(ui::muted(codex_line, cx))
+                                .child(
+                                    Button::new("codex-refine-refresh")
+                                        .small()
+                                        .outline()
+                                        .icon(IconName::RefreshCw)
+                                        .label(tr!("重新检测", "Check again"))
+                                        .on_click(move |_, _, cx| {
+                                            a_codex.update(cx, |a, cx| a.refresh_codex(cx))
+                                        }),
+                                ),
+                        )
+                        .child(picker),
                     cx,
                 ))
             })
+    }
+
+    /// Cloud transcription model picker row (dynamic Select + refresh + editable field + rate hint).
+    #[allow(clippy::too_many_arguments)]
+    fn cloud_asr_model_row(
+        &self,
+        picker: AsrModelPicker,
+        provider: AsrProvider,
+        mode: AsrMode,
+        active_model: String,
+        key_present: bool,
+        models_state: &Loadable<AsrModelList>,
+        prefix: &'static str,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let is_live_utterance = matches!(
+            picker,
+            AsrModelPicker::LiveOpenAiUtterance | AsrModelPicker::LiveGeminiUtterance
+        );
+        let label = match picker {
+            AsrModelPicker::LiveOpenAi
+            | AsrModelPicker::LiveGemini
+            | AsrModelPicker::LiveOpenAiUtterance
+            | AsrModelPicker::LiveGeminiUtterance => tr!("实时字幕模型", "Live caption model"),
+            AsrModelPicker::RefineOpenAi | AsrModelPicker::RefineGemini => {
+                tr!("精转模型", "Refine model")
+            }
+        };
+        let hint = if is_live_utterance {
+            match provider {
+                AsrProvider::OpenAi => tr!(
+                    "通过 OpenAI 转写接口按完成语句上传（16 kHz WAV），中文可选本机 CPU Zipformer 即时草稿；失败时自动回退到本地 Qwen3-ASR。",
+                    "Uploads completed speech utterances as 16 kHz WAV via OpenAI audio transcriptions, with optional local CPU Zipformer draft for Mandarin; falls back locally on error."
+                ),
+                AsrProvider::Gemini => tr!(
+                    "通过 Gemini REST 接口按完成语句上传（16 kHz WAV），中文可选本机 CPU Zipformer 即时草稿；失败时自动回退到本地 Qwen3-ASR。",
+                    "Uploads completed speech utterances as 16 kHz WAV via Gemini REST, with optional local CPU Zipformer draft for Mandarin; falls back locally on error."
+                ),
+            }
+        } else {
+            match (provider, mode) {
+                (AsrProvider::OpenAi, AsrMode::Live) => tr!(
+                    "通过 OpenAI Realtime 转写（24 kHz PCM16），本地 VAD + RMS 门控按需连接并跳过尾音静音；失败时自动回退到本地 Qwen3-ASR。",
+                    "Uses OpenAI Realtime transcription (24 kHz PCM16) with local VAD + RMS gating, lazy connect, and trailing-silence freeze; falls back locally on error."
+                ),
+                (AsrProvider::Gemini, AsrMode::Live) => tr!(
+                    "通过 Gemini Live API 实时转写（16 kHz PCM16），本地 VAD + RMS 门控按需连接并跳过尾音静音；失败时自动回退到本地 Qwen3-ASR。",
+                    "Uses Gemini Live API transcription (16 kHz PCM16) with local VAD + RMS gating, lazy connect, and trailing-silence freeze; falls back locally on error."
+                ),
+                (_, AsrMode::Refine) => tr!(
+                    "会后按录音切片上传转写；失败时自动回退到本地 Qwen3-ASR。配置密钥后自动拉取可用模型列表，也可点刷新或手动输入模型 ID。",
+                    "Fetches available models automatically once an API key is saved; refresh anytime or enter any compatible model ID. Falls back locally on error."
+                ),
+            }
+        };
+        let rate_hint = logic::model_rate_hint(provider, mode, &active_model);
+        let provider_name = match provider {
+            AsrProvider::OpenAi => "OpenAI",
+            AsrProvider::Gemini => "Google Gemini",
+        };
+        let (list_status_text, list_status_warn): (SharedString, bool) = if !key_present {
+            let msg = match provider {
+                AsrProvider::OpenAi => tr!(
+                    "尚未保存 OpenAI API 密钥：在下方保存后会自动拉取可用模型列表，也可先手动输入模型 ID。",
+                    "No OpenAI API key saved yet: add one below to auto-fetch available models, or enter a model ID manually."
+                ),
+                AsrProvider::Gemini => tr!(
+                    "尚未保存 Gemini API 密钥：在下方保存后会自动拉取可用模型列表，也可先手动输入模型 ID。",
+                    "No Gemini API key saved yet: add one below to auto-fetch available models, or enter a model ID manually."
+                ),
+            };
+            (msg.into(), true)
+        } else {
+            match models_state {
+                Loadable::Loading => (
+                    match provider {
+                        AsrProvider::OpenAi => tr!(
+                            "正在从 OpenAI 拉取可用模型列表…",
+                            "Fetching available models from OpenAI…"
+                        ),
+                        AsrProvider::Gemini => tr!(
+                            "正在从 Google Gemini 拉取可用模型列表…",
+                            "Fetching available models from Google Gemini…"
+                        ),
+                    }
+                    .into(),
+                    false,
+                ),
+                Loadable::Ready(list) => {
+                    let count = list.for_mode(mode).len();
+                    if count > 0 {
+                        (
+                            trf!(
+                                "已从 {provider_name} 拉取 {count} 个可用模型",
+                                "Loaded {count} models from {provider_name}"
+                            )
+                            .into(),
+                            false,
+                        )
+                    } else {
+                        (
+                            trf!(
+                                "未在 {provider_name} 账号中匹配到可用转写模型，可在上方手动输入模型 ID。",
+                                "No matching transcription models found in your {provider_name} account; enter a model ID manually above."
+                            )
+                            .into(),
+                            true,
+                        )
+                    }
+                }
+                Loadable::Failed(e) => (
+                    trf!(
+                        "拉取模型列表失败：{}。可点“刷新列表”重试，或在上方手动输入模型 ID。",
+                        "Couldn’t fetch model list: {}. Click Refresh list to retry, or enter a model ID above.",
+                        e.message
+                    )
+                    .into(),
+                    true,
+                ),
+                Loadable::Idle => (
+                    tr!(
+                        "点“刷新列表”从服务商拉取可用模型，或手动输入模型 ID。",
+                        "Click Refresh list to fetch models from the provider, or enter a model ID."
+                    )
+                    .into(),
+                    false,
+                ),
+            }
+        };
+        let app = self.app.clone();
+        let loading = matches!(models_state, Loadable::Loading);
+        Self::row(
+            label,
+            Some(hint.into()),
+            v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("{prefix}-select")))
+                                .test_support()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Select::new(&self.asr_sels[picker as usize]).small()),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("{prefix}-refresh")))
+                                .small()
+                                .outline()
+                                .icon(IconName::RefreshCw)
+                                .disabled(!key_present || loading)
+                                .label(tr!("刷新列表", "Refresh list"))
+                                .on_click(move |_, _, cx| {
+                                    app.update(cx, |a, cx| a.refresh_asr_models(provider, cx))
+                                }),
+                        ),
+                )
+                .child(
+                    Input::new(input)
+                        .id(SharedString::from(format!("{prefix}-input")))
+                        .small(),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(if list_status_warn {
+                            cx.theme().warning
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(list_status_text.clone().test_text(list_status_text)),
+                )
+                .child(ui::muted(rate_hint, cx)),
+            cx,
+        )
+    }
+
+    /// Keychain input + Save/Delete buttons + status line for one cloud ASR account.
+    fn asr_key_control(
+        &self,
+        id_prefix: &'static str,
+        input: &Entity<InputState>,
+        account: &'static str,
+        status_line: String,
+        cx: &App,
+    ) -> Div {
+        let app_save = self.app.clone();
+        let app_del = self.app.clone();
+        let in_save = input.clone();
+        let in_del = input.clone();
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(input).mask_toggle()))
+                    .child(
+                        Button::new(SharedString::from(format!("{id_prefix}-save")))
+                            .outline()
+                            .label(tr!("保存密钥", "Save key"))
+                            .on_click(move |_, window, cx| {
+                                let k = in_save.read(cx).value().trim().to_string();
+                                if k.is_empty() {
+                                    return;
+                                }
+                                app_save.update(cx, |a, cx| a.write_asr_key(account, Some(k), cx));
+                                in_save.update(cx, |s, cx| s.set_value("", window, cx));
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{id_prefix}-del")))
+                            .ghost()
+                            .label(tr!("删除密钥", "Delete key"))
+                            .on_click(move |_, window, cx| {
+                                in_del.update(cx, |s, cx| s.set_value("", window, cx));
+                                app_del.update(cx, |a, cx| a.write_asr_key(account, None, cx));
+                            }),
+                    ),
+            )
+            .child(ui::muted(status_line, cx))
+    }
+
+    /// One provider's local cumulative spend summary (this calendar month + all-time total).
+    fn asr_spend_row(
+        &self,
+        id_prefix: &'static str,
+        title: &'static str,
+        provider_id: &'static str,
+        summary: ProviderUsageSummary,
+        cx: &App,
+    ) -> Div {
+        let month_dur = logic::format_duration_minutes(summary.month.audio_ms);
+        let month_usd = logic::format_usd(summary.month.cost_usd);
+        let month_calls = summary.month.calls;
+        let total_dur = logic::format_duration_minutes(summary.total.audio_ms);
+        let total_usd = logic::format_usd(summary.total.cost_usd);
+        let total_calls = summary.total.calls;
+        let app = self.app.clone();
+        h_flex()
+            .gap_3()
+            .items_center()
+            .child(
+                v_flex()
+                    .flex_1()
+                    .gap(px(2.))
+                    .child(div().text_sm().child(SharedString::from(title).test_text(title)))
+                    .child(ui::muted(
+                        trf!(
+                            "本月：{month_dur} · 约 {month_usd}（{month_calls} 次）    累计：{total_dur} · 约 {total_usd}（{total_calls} 次）",
+                            "This month: {month_dur} · ~{month_usd} ({month_calls} calls)    All-time: {total_dur} · ~{total_usd} ({total_calls} calls)"
+                        ),
+                        cx,
+                    )),
+            )
+            .child(
+                Button::new(SharedString::from(format!("{id_prefix}-reset")))
+                    .small()
+                    .ghost()
+                    .label(tr!("重置", "Reset"))
+                    .on_click(move |_, _, cx| {
+                        app.update(cx, |a, cx| a.clear_asr_usage(Some(provider_id), cx));
+                    }),
+            )
+    }
+
+    /// Cloud ASR Keychain keys, local spend accumulator, and optional OpenAI org spend sync.
+    fn cloud_asr(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (
+            openai_key_present,
+            gemini_key_present,
+            openai_admin_key_present,
+            openai_asr_models,
+            gemini_asr_models,
+            openai_usage,
+            gemini_usage,
+            openai_org_costs,
+        ) = {
+            let app = self.app.read(cx);
+            (
+                app.openai_key_present,
+                app.gemini_key_present,
+                app.openai_admin_key_present,
+                app.openai_asr_models.clone(),
+                app.gemini_asr_models.clone(),
+                app.openai_usage,
+                app.gemini_usage,
+                app.openai_org_costs.clone(),
+            )
+        };
+        let key_status = |present: bool| {
+            if present {
+                tr!(
+                    "钥匙串里已有密钥（不会显示）。",
+                    "A key is saved in Keychain (hidden)."
+                )
+                .to_string()
+            } else {
+                tr!("还没有保存密钥。", "No key saved yet.").to_string()
+            }
+        };
+        let asr_key_status = |present: bool, models: &Loadable<AsrModelList>| {
+            if !present {
+                return tr!("还没有保存密钥。", "No key saved yet.").to_string();
+            }
+            let base = key_status(true);
+            let suffix = match models {
+                Loadable::Idle => String::new(),
+                Loadable::Loading => tr!(
+                    " · 正在拉取可用转写模型…",
+                    " · Fetching transcription models…"
+                )
+                .to_string(),
+                Loadable::Ready(list) => {
+                    let live_n = list.live.len();
+                    let refine_n = list.refine.len();
+                    trf!(
+                        " · 已拉取 {live_n} 个实时 / {refine_n} 个精转模型",
+                        " · Loaded {live_n} live / {refine_n} refine models"
+                    )
+                }
+                Loadable::Failed(_) => {
+                    tr!(" · 拉取模型列表失败", " · Failed to fetch models").to_string()
+                }
+            };
+            format!("{base}{suffix}")
+        };
+        let org_costs_line = match &openai_org_costs {
+            Loadable::Idle => {
+                if openai_admin_key_present {
+                    tr!(
+                        "已保存 Admin 密钥，点击右侧“同步本月组织花费”向 OpenAI 官方拉取实时账单。",
+                        "Admin key saved. Click “Sync org spend” to fetch this month’s OpenAI billing total."
+                    )
+                    .to_string()
+                } else {
+                    tr!(
+                        "可选：仅用于查询 OpenAI 组织账单（/v1/organization/costs）；普通转写只需上方的 OpenAI API 密钥。",
+                        "Optional: only used to query OpenAI org billing (/v1/organization/costs); standard transcription only needs the OpenAI API key above."
+                    )
+                    .to_string()
+                }
+            }
+            Loadable::Loading => tr!(
+                "正在查询 OpenAI 本月组织花费…",
+                "Querying OpenAI org spend…"
+            )
+            .to_string(),
+            Loadable::Ready(r) => trf!(
+                "OpenAI 组织本月已出账：{}（含各 API 项目）",
+                "OpenAI org billed this month: {} (across API projects)",
+                logic::format_usd(r.total_usd)
+            ),
+            Loadable::Failed(e) => trf!("查询失败：{}", "Sync failed: {}", e.message),
+        };
+        let syncing_costs = matches!(openai_org_costs, Loadable::Loading);
+        let a_costs = self.app.clone();
+
+        ui::card(cx)
+            .child(ui::section_title(tr!(
+                "云端转写密钥与花费累计",
+                "Cloud transcription keys & spend"
+            )))
+            .child(Self::row(
+                "OpenAI API Key",
+                Some(
+                    tr!(
+                        "独立保存在 macOS 钥匙串；若纪要也使用 OpenAI 则自动共用。",
+                        "Stored in the macOS Keychain independently of Minutes (shared if Minutes also uses OpenAI)."
+                    )
+                    .into(),
+                ),
+                self.asr_key_control(
+                    "asr-openai-key",
+                    &self.asr_openai_key,
+                    byok::OPENAI_KEY_ACCOUNT,
+                    asr_key_status(openai_key_present, &openai_asr_models),
+                    cx,
+                ),
+                cx,
+            ))
+            .child(Self::row(
+                tr!("OpenAI Admin 密钥（可选）", "OpenAI Admin key (optional)"),
+                Some(
+                    tr!(
+                        "仅组织 Admin 密钥（sk-admin-…）可调用 OpenAI Costs API。",
+                        "Only an Organization Admin key (sk-admin-…) can query the OpenAI Costs API."
+                    )
+                    .into(),
+                ),
+                v_flex()
+                    .gap_2()
+                    .child(self.asr_key_control(
+                        "asr-openai-admin-key",
+                        &self.asr_openai_admin_key,
+                        byok::OPENAI_ADMIN_KEY_ACCOUNT,
+                        key_status(openai_admin_key_present),
+                        cx,
+                    ))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new("sync-openai-costs")
+                                    .small()
+                                    .outline()
+                                    .icon(IconName::RefreshCw)
+                                    .disabled(syncing_costs)
+                                    .label(tr!("同步本月组织花费", "Sync org spend"))
+                                    .on_click(move |_, _, cx| {
+                                        a_costs.update(cx, |a, cx| a.sync_openai_costs(cx));
+                                    }),
+                            )
+                            .child(div().flex_1().child(ui::muted(org_costs_line, cx))),
+                    ),
+                cx,
+            ))
+            .child(Self::row(
+                "Google Gemini API Key",
+                Some(
+                    tr!(
+                        "独立保存在 macOS 钥匙串；可与上方的 Claude / OpenAI 纪要同时使用。",
+                        "Stored in the macOS Keychain independently; works alongside Claude or OpenAI minutes."
+                    )
+                    .into(),
+                ),
+                self.asr_key_control(
+                    "asr-gemini-key",
+                    &self.asr_gemini_key,
+                    byok::GEMINI_KEY_ACCOUNT,
+                    asr_key_status(gemini_key_present, &gemini_asr_models),
+                    cx,
+                ),
+                cx,
+            ))
+            .child(Self::row(
+                tr!("本机转写花费累计", "Local transcription spend"),
+                Some(
+                    tr!(
+                        "按本机实际送往云端的音频时长、token 与模型官方单价估算累计，不做手动预算倒推。",
+                        "Accumulated locally from sent audio duration, tokens, and model rates."
+                    )
+                    .into(),
+                ),
+                v_flex()
+                    .gap_3()
+                    .child(self.asr_spend_row(
+                        "spend-openai",
+                        "OpenAI",
+                        AsrProvider::OpenAi.as_str(),
+                        openai_usage,
+                        cx,
+                    ))
+                    .child(self.asr_spend_row(
+                        "spend-gemini",
+                        "Google Gemini",
+                        AsrProvider::Gemini.as_str(),
+                        gemini_usage,
+                        cx,
+                    ))
+                    .child(ui::muted(
+                        tr!(
+                            "说明：Google Gemini Developer API 不提供余额/账单查询接口，因此仅统计本机累计用量与参考费率；OpenAI 若有权限可在上方通过 Admin 密钥同步官方月账单。",
+                            "Note: Google’s Gemini Developer API provides no balance or billing endpoint, so Gemini shows local cumulative usage and rate estimates; OpenAI supports official org spend sync with an optional Admin key."
+                        ),
+                        cx,
+                    )),
+                cx,
+            ))
     }
 
     /// Minutes provider section: the backend pick, then the settings of the backends it may use.
     fn minutes(&self, cfg: &AppConfig, cx: &mut Context<Self>) -> impl IntoElement {
         let backend = cfg.minutes_backend;
         let app = self.app.read(cx);
-        let codex_line = match &app.codex {
-            Loadable::Ready(c) => match (&c.path, c.signed_in) {
-                (None, _) => tr!(
-                    "未安装 Codex CLI。安装后可用 ChatGPT 账号生成纪要。",
-                    "Codex CLI isn’t installed. Install it to generate minutes with your ChatGPT account."
-                )
-                .to_string(),
-                (Some(p), true) => trf!(
-                    "Codex 已登录{}（{}）",
-                    "Codex signed in{} ({})",
-                    c.label
-                        .as_deref()
-                        .map(|l| trf!("：{l}", ": {l}"))
-                        .unwrap_or_default(),
-                    p.display()
-                ),
-                (Some(_), false) => trf!(
-                    "Codex 未登录。在终端运行 codex login 后点“重新检测”。{}",
-                    "Codex isn’t signed in. Run codex login in Terminal, then click Check again.{}",
-                    c.error
-                        .as_deref()
-                        .map(|e| trf!("（{e}）", " ({e})"))
-                        .unwrap_or_default()
-                ),
-            },
-            Loadable::Failed(e) => e.message.clone(),
-            _ => tr!("正在检测 Codex…", "Checking Codex…").to_string(),
-        };
+        let codex_line = Self::codex_status_line(app);
         let key_line = if cfg.byok.is_none() {
             tr!(
                 "选择提供方并填写模型后可以保存密钥。",
@@ -1051,34 +1958,12 @@ impl SettingsPage {
             tr!("还没有保存密钥。", "No key saved yet.")
         };
         let codex_models = app.codex_models.clone();
-        let agy_models = app.agy_models.clone();
-        let agy_line = match antigravity::find_agy() {
-            Some(p) => trf!(
-                "已找到 agy（{}）。第一次使用前，在终端运行一次 agy 并登录。",
-                "Found agy ({}). Before first use, run agy once in Terminal and sign in.",
-                p.display()
-            ),
-            None => tr!(
-                "没有找到 agy。安装 Antigravity CLI 后再选这一项，否则会改用自动顺序。",
-                "agy not found. Install the Antigravity CLI before choosing this; otherwise the automatic order is used."
-            )
-            .to_string(),
-        };
-        // How the refine pass and the minutes share agy (see `merges_minutes_into_refine`).
-        let agy_refine_note = (cfg.refine_after_meeting
-            && cfg.refine_backend == RefineBackend::Antigravity)
+        let unified_codex_note = (cfg.refine_after_meeting && cfg.refine_backend == RefineBackend::Codex)
             .then(|| {
-                if cfg.antigravity_minutes_model == cfg.antigravity_model {
-                    tr!(
-                        "和精转用同一个模型：15 分钟内的会议一次完成转写和纪要，更长的会议转写后再写纪要。",
-                        "Same model as the refine: meetings up to 15 minutes get the transcript and minutes in one run; longer ones get minutes after the transcript."
-                    )
-                } else {
-                    tr!(
-                        "和精转模型不同：精转写完成后再用这个模型写纪要。",
-                        "Different from the refine model: this model writes the minutes after the refine."
-                    )
-                }
+                tr!(
+                    "已开启 Codex 一体化精转：会后将在精转写阶段一并生成纪要；这里的设置用于手动重新生成纪要或回退。",
+                    "Codex unified refine is active: post-meeting minutes are generated during the refine pass; this setting is used for manual regeneration or fallback."
+                )
             });
         let current_kind = self.byok_kind;
         let a1 = self.app.clone();
@@ -1089,7 +1974,7 @@ impl SettingsPage {
 
         let codex_row =
             matches!(backend, MinutesBackend::Auto | MinutesBackend::Codex).then(|| {
-                let picker = self.model_picker(ModelPicker::Codex, &codex_models, cx);
+                let picker = self.model_picker(ModelPicker::CodexMinutes, &codex_models, cx);
                 Self::row(
                 tr!("Codex（ChatGPT 账号）", "Codex (ChatGPT account)"),
                 Some(
@@ -1133,26 +2018,6 @@ impl SettingsPage {
             )
             });
 
-        let agy_row = (backend == MinutesBackend::Antigravity).then(|| {
-            let picker = self.model_picker(ModelPicker::AgyMinutes, &agy_models, cx);
-            Self::row(
-                tr!("Antigravity 模型", "Antigravity model"),
-                Some(
-                    tr!(
-                        "通过 agy 写纪要，可选 Gemini、Claude 等模型；转写文字会发送给 Google。",
-                        "Writes minutes through agy with Gemini, Claude or another model; the transcript text is sent to Google."
-                    )
-                    .into(),
-                ),
-                v_flex()
-                    .gap_2()
-                    .child(picker)
-                    .child(ui::muted(agy_line, cx))
-                    .when_some(agy_refine_note, |el, n| el.child(ui::muted(n, cx))),
-                cx,
-            )
-        });
-
         let key_row = matches!(backend, MinutesBackend::Auto | MinutesBackend::ApiKey).then(|| {
             Self::row(
                 tr!("API 密钥", "API key"),
@@ -1186,9 +2051,9 @@ impl SettingsPage {
                             )),
                     )
                     .when(!current_kind.is_empty(), |el| {
-                        el.child(Input::new(&self.model))
+                        el.child(Input::new(&self.model).id("settings-byok-model"))
                             .when(current_kind == "openai_compatible", |el| {
-                                el.child(Input::new(&self.base_url))
+                                el.child(Input::new(&self.base_url).id("settings-byok-base"))
                             })
                             .child(
                                 h_flex()
@@ -1271,23 +2136,24 @@ impl SettingsPage {
                     )
                     .into(),
                 ),
-                self.segmented(
-                    "min-backend",
-                    [
-                        MinutesBackend::Auto,
-                        MinutesBackend::ApiKey,
-                        MinutesBackend::Codex,
-                        MinutesBackend::Antigravity,
-                    ]
-                    .map(|b| (b, logic::minutes_backend_label(b)))
-                    .to_vec(),
-                    backend,
-                    |a, v, cx| a.update_config(cx, |c| c.minutes_backend = v),
-                ),
+                v_flex()
+                    .gap_1()
+                    .child(self.segmented(
+                        "min-backend",
+                        [
+                            MinutesBackend::Auto,
+                            MinutesBackend::ApiKey,
+                            MinutesBackend::Codex,
+                        ]
+                        .map(|b| (b, logic::minutes_backend_label(b)))
+                        .to_vec(),
+                        backend,
+                        |a, v, cx| a.update_config(cx, |c| c.minutes_backend = v),
+                    ))
+                    .when_some(unified_codex_note, |el, n| el.child(ui::muted(n, cx))),
                 cx,
             ))
             .children(codex_row)
-            .children(agy_row)
             .children(key_row)
     }
 
@@ -1697,6 +2563,7 @@ impl Render for SettingsPage {
         let cfg = self.app.read(cx).cfg.clone();
         v_flex()
             .id("settings-scroll")
+            .test_support()
             .size_full()
             .p_6()
             .gap_4()
@@ -1713,6 +2580,7 @@ impl Render for SettingsPage {
             .child(self.permissions(cx))
             .child(self.obsidian(&cfg, cx))
             .child(self.capture(&cfg, cx))
+            .child(self.cloud_asr(cx))
             .child(self.minutes(&cfg, cx))
             .child(self.models(cx))
     }

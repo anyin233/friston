@@ -4,6 +4,8 @@ mod assign;
 #[cfg(test)]
 mod e2e;
 mod floating;
+#[cfg(test)]
+mod gui_tests;
 mod logic;
 mod pages;
 mod pipeline;

@@ -1,9 +1,41 @@
+@preconcurrency import AudioCommon
 import AVFoundation
 import EngineKit
 import Foundation
 import MeetingCore
 @preconcurrency import Qwen3ASR
 @preconcurrency import SpeechVAD
+
+/// Wraps `SileroVADModel.makeIndependentStream()` so every 32 ms chunk reports its speech
+/// probability and RMS amplitude without running Silero inference a second time.
+private final class SpeechProbabilitySpyVAD: StreamingVADProvider {
+    private let inner: any StreamingVADProvider
+    private let onChunk: (_ endSample: Int, _ prob: Float, _ rms: Float) -> Void
+    private var samplesFed = 0
+
+    var inputSampleRate: Int { inner.inputSampleRate }
+    var chunkSize: Int { inner.chunkSize }
+
+    init(
+        inner: any StreamingVADProvider,
+        onChunk: @escaping (_ endSample: Int, _ prob: Float, _ rms: Float) -> Void
+    ) {
+        self.inner = inner
+        self.onChunk = onChunk
+    }
+
+    func processChunk(_ samples: [Float]) -> Float {
+        let prob = inner.processChunk(samples)
+        samplesFed += samples.count
+        onChunk(samplesFed, prob, CloudUploadGate.rms(samples))
+        return prob
+    }
+
+    func resetState() {
+        samplesFed = 0
+        inner.resetState()
+    }
+}
 
 /// Audio handed from a capture thread to the caption loop, at the device rate.
 ///
@@ -83,7 +115,7 @@ final class CaptionInbox: @unchecked Sendable {
 
 /// Models the caption loop uses, loaded together so a stream never runs half-equipped.
 struct LiveModels: @unchecked Sendable {
-    let asr: Qwen3ASRModel
+    var asr: Qwen3ASRModel?
     let vad: SileroVADModel
     /// `nil` when the embedding model failed to load: captions continue with `unknown` speakers.
     let speaker: WeSpeakerModel?
@@ -125,10 +157,75 @@ final class CaptionStream: @unchecked Sendable {
     private var partialSpeakers: [Int: SpeakerLabel] = [:]
     /// Draft decoding of the utterance in progress.
     private var draft: (id: Int, stream: DraftStream, fedUntil: Int, text: String)?
-    /// Utterances that showed a draft, so their final retires it even when Qwen3-ASR hears nothing.
+    /// Latest non-empty draft text per utterance, preserved until finalized as an offline backup.
+    private var lastDraftText: [Int: String] = [:]
+    /// Utterances that showed a draft, so their final retires it even when ASR hears nothing.
     private var drafted: Set<Int> = []
+    /// Local VAD + RMS cloud upload gate and metered sample counter.
+    private var cloudGate = CloudUploadGate()
+    /// Peak per-32 ms RMS observed while each utterance was active in VAD.
+    private var utterancePeakRMS: [Int: Float] = [:]
+    /// RMS of the most recently processed 32 ms VAD chunk (seeds newly started utterances).
+    private var lastChunkRMS: Float = 0
     /// Audio fed to the draft before the VAD's onset, like ``slice(_:_:)``'s pre-roll.
     static let draftPreRoll = rate / 10
+
+    /// Action requested by ``takeCloudStreamingAction()``.
+    enum CloudStreamAction {
+        case idle
+        case abort(id: Int)
+        case upload(id: Int, start: Int, end: Int, startMs: Int, samples: [Float])
+    }
+
+    /// Result of closing cloud accounting for one finalized utterance in ``finalizeCloudUtterance(id:start:end:)``.
+    enum CloudFinalAudio {
+        case skip
+        case commit(tailAudio: [Float], fullAudio: [Float], uploadedAudioMs: Int, wasOpened: Bool)
+    }
+
+    /// Whether any VAD utterance or Sortformer hold is still pending on this stream.
+    var hasPendingCloudWork: Bool { !held.isEmpty || segmenter.activeID != nil }
+
+    /// Latest non-empty Zipformer draft text captured for `id`, if any.
+    func draftText(for id: Int) -> String { lastDraftText[id] ?? "" }
+
+    /// Extracts incremental VAD-gated 16 kHz audio for cloud streaming, or aborts an orphaned blip.
+    func takeCloudStreamingAction() -> CloudStreamAction {
+        let heldIds = Set(held.compactMap { action -> Int? in
+            if case .final(let id, _, _, _) = action { return id } else { return nil }
+        })
+        let step = cloudGate.nextStreamingStep(
+            activeId: segmenter.activeID,
+            activeStart: segmenter.activeStart,
+            processed: processed,
+            audioBase: audioBase,
+            heldFinalIds: heldIds
+        )
+        switch step {
+        case .idle:
+            return .idle
+        case .abort(let id):
+            return .abort(id: id)
+        case .upload(let id, let range, _):
+            guard let start = segmenter.activeStart else { return .idle }
+            return .upload(id: id, start: start, end: range.upperBound, startMs: ms(start), samples: exactSlice(range))
+        }
+    }
+
+    /// Closes cloud accounting for a finalized utterance, filtering sub-floor noise and computing
+    /// exact uploaded duration (`uploadedAudioMs`) excluding un-uploaded trailing silence.
+    func finalizeCloudUtterance(id: Int, start: Int, end: Int) -> CloudFinalAudio {
+        let fullAudio = slice(start, end)
+        let peakRMS = max(utterancePeakRMS[id] ?? 0, CloudUploadGate.rms(fullAudio))
+        switch cloudGate.finalize(id: id, start: start, end: end, audioBase: audioBase, maxRMS: peakRMS) {
+        case .skip:
+            return .skip
+        case .commit(let tailRange, let totalSamples, let wasOpened):
+            let tailAudio = tailRange.map { exactSlice($0) } ?? []
+            let uploadedMs = Int((Double(max(0, totalSamples)) / Double(Self.rate) * 1000).rounded())
+            return .commit(tailAudio: tailAudio, fullAudio: fullAudio, uploadedAudioMs: uploadedMs, wasOpened: wasOpened)
+        }
+    }
     /// Draft or Qwen3-ASR partials; set by the captioner once models are loaded.
     var draftPolicy = DraftPolicy(mode: .auto)
     /// Decode timings for the end-of-session log line.
@@ -202,7 +299,17 @@ final class CaptionStream: @unchecked Sendable {
         }
         if vad == nil {
             // Silero VAD is a stateful LSTM: each stream needs its own state over shared weights.
-            vad = StreamingVADProcessor(model: models.vad.makeIndependentStream(), config: Self.vadConfig)
+            vad = StreamingVADProcessor(
+                provider: SpeechProbabilitySpyVAD(inner: models.vad.makeIndependentStream()) { [weak self] endSample, prob, rms in
+                    guard let self else { return }
+                    self.lastChunkRMS = rms
+                    self.cloudGate.observeVADChunk(endSample: endSample, speechProb: prob, rms: rms)
+                    if let id = self.segmenter.activeID {
+                        self.utterancePeakRMS[id] = max(self.utterancePeakRMS[id] ?? 0, rms)
+                    }
+                },
+                config: Self.vadConfig
+            )
         }
         ingestStereo(batch)
         let samples = resampler.process(batch.mono)
@@ -216,6 +323,9 @@ final class CaptionStream: @unchecked Sendable {
                 switch event {
                 case .speechStarted(let time):
                     actions += segmenter.speechStarted(atSample: Int(time * Float(Self.rate)))
+                    if let id = segmenter.activeID {
+                        utterancePeakRMS[id] = max(utterancePeakRMS[id] ?? 0, lastChunkRMS)
+                    }
                 case .speechEnded(let segment):
                     actions += segmenter.speechEnded(endSample: Int(segment.endTime * Float(Self.rate)))
                 }
@@ -252,7 +362,9 @@ final class CaptionStream: @unchecked Sendable {
         let text = d.stream.accept(exactSlice(d.fedUntil..<processed))
         d.fedUntil = processed
         defer { draft = d }
-        guard !text.isEmpty, text != d.text else { return [] }
+        guard !text.isEmpty else { return [] }
+        lastDraftText[id] = text
+        guard text != d.text else { return [] }
         d.text = text
         drafted.insert(id)
         return [.draft(id: id, start: start, end: processed, text: text, stableChars: DraftCaption.stableScalars(text))]
@@ -402,6 +514,8 @@ final class CaptionStream: @unchecked Sendable {
         hypotheses[id] = nil
         partialSpeakers[id] = nil
         drafted.remove(id)
+        utterancePeakRMS[id] = nil
+        lastDraftText[id] = nil
     }
 
     /// Records how long a partial took and retunes the refresh interval.
@@ -536,6 +650,8 @@ final class LiveCaptioner: @unchecked Sendable {
     private let tracker: OnlineSpeakerTracker
     private let languageName: String?
     private let languageCode: String?
+    private let rawLanguageHint: String?
+    private let cloudConfig: LiveAsrConfig?
     private let notify: Notify
     private let stopping = LockedValue(false)
     private let ready = LockedValue(false)
@@ -602,6 +718,8 @@ final class LiveCaptioner: @unchecked Sendable {
         tracker = OnlineSpeakerTracker(bank: bank, config: .fromEnvironment())
         languageName = ASRLanguage.qwenName(for: preset.captionLanguage)
         languageCode = ASRLanguage.primaryCode(for: preset.captionLanguage)
+        rawLanguageHint = preset.captionLanguage
+        cloudConfig = preset.liveAsr
     }
 
     /// The mic channels the direction analysis uses; the recorder copies them out of each buffer.
@@ -634,17 +752,85 @@ final class LiveCaptioner: @unchecked Sendable {
         system?.close()
     }
 
-    /// Loads models, then processes audio every 100 ms until stopped.
-    private func run() async {
-        let models: LiveModels
-        do {
-            async let asr = SpeechModels.shared.liveASR()
-            async let vad = SpeechModels.shared.vad()
-            async let speaker = try? SpeechModels.shared.speaker()
-            async let turns = Self.loadTurnDiarizer(sessionId)
-            let loaded = (try await asr, try await vad, await speaker, await turns)
-            if loaded.2 == nil { log("captions \(sessionId): speaker embeddings unavailable; speakers will be unknown") }
-            var prefix: PrefixDecoder?
+    private struct CloudActiveSlice: Sendable {
+        let id: Int
+        let startMs: Int
+        let speaker: SpeakerLabel
+        let samples: [Float]
+    }
+
+    private struct CloudRetraction: Sendable {
+        let id: Int
+        let origin: AudioOrigin
+        let startMs: Int
+        let endMs: Int
+    }
+
+    private struct CloudFinalJob: Sendable {
+        let id: Int
+        let origin: AudioOrigin
+        let startMs: Int
+        let endMs: Int
+        let audioMs: Int
+        let hadPartial: Bool
+        let tailAudio: [Float]
+        let fullAudio: [Float]
+        let speaker: SpeakerLabel
+        let captionSpatial: CaptionSpatialCue?
+        let cueEvent: SpatialCueEvent?
+    }
+
+    private struct CloudTickWork: Sendable {
+        let abortId: Int?
+        let retracts: [CloudRetraction]
+        let active: CloudActiveSlice?
+        let finals: [CloudFinalJob]
+    }
+
+    private struct UtteranceJob: Sendable {
+        let id: Int
+        let origin: AudioOrigin
+        let startMs: Int
+        let endMs: Int
+        let audioMs: Int
+        let hadPartial: Bool
+        let draftText: String
+        let fullAudio: [Float]
+        let speaker: SpeakerLabel
+        let captionSpatial: CaptionSpatialCue?
+        let cueEvent: SpatialCueEvent?
+    }
+
+    private enum UtteranceOutcome: Sendable {
+        case success(UtteranceJob, CloudUtteranceTranscript)
+        case failure(UtteranceJob, Error)
+
+        var job: UtteranceJob {
+            switch self {
+            case .success(let j, _), .failure(let j, _): j
+            }
+        }
+    }
+
+    private struct UtterancePartialNotice: Sendable {
+        let id: Int
+        let origin: AudioOrigin
+        let startMs: Int
+        let text: String
+        let speaker: SpeakerLabel
+        let stableChars: Int
+    }
+
+    private struct UtteranceTickWork: Sendable {
+        let partials: [UtterancePartialNotice]
+        let retracts: [CloudRetraction]
+        let jobs: [UtteranceJob]
+    }
+
+    /// Loads local prefix & draft helpers when running local Qwen3-ASR captions (or draft-only for cloud utterance mode).
+    private func loadLocalExtras(loadPrefix: Bool = true) async -> (PrefixDecoder?, DraftModel?, DraftPolicy.Mode) {
+        var prefix: PrefixDecoder?
+        if loadPrefix {
             // MM_PARTIAL_PREFIX=0 restores whole-utterance re-decoding, for A/B runs of eval-captions.
             if ProcessInfo.processInfo.environment["MM_PARTIAL_PREFIX"] == "0" {
                 log("captions \(sessionId): prefix-rollback partials off (MM_PARTIAL_PREFIX=0)")
@@ -653,26 +839,91 @@ final class LiveCaptioner: @unchecked Sendable {
                     log("captions \(sessionId): prefix-rollback partials disabled, re-decoding from scratch: \(error)")
                 }
             }
-            var draft: DraftModel?
-            // MM_DRAFT=0 turns the draft layer off and MM_DRAFT=1 forces it, for A/B runs of
-            // eval-captions; the default switches to it only when Qwen3-ASR partials get slow.
-            // The model is Mandarin-only, so other caption languages keep Qwen3-ASR partials.
-            let draftSetting = ProcessInfo.processInfo.environment["MM_DRAFT"]
-            let draftMode: DraftPolicy.Mode = draftSetting == "1" ? .always : .auto
-            if languageCode != "zh" {
-                log("captions \(sessionId): draft captions off (language \(languageCode ?? "auto"), model is Mandarin-only)")
-            } else if draftSetting == "0" {
-                log("captions \(sessionId): draft captions off (MM_DRAFT=0)")
-            } else {
-                do { draft = try await SpeechModels.shared.draft().value } catch {
-                    log("captions \(sessionId): draft captions unavailable, using Qwen3-ASR partials: \(error)")
-                }
+        }
+        var draft: DraftModel?
+        // MM_DRAFT=0 turns the draft layer off and MM_DRAFT=1 forces it, for A/B runs of
+        // eval-captions; the default switches to it only when Qwen3-ASR partials get slow.
+        // The model is Mandarin-only, so other caption languages keep Qwen3-ASR partials.
+        let draftSetting = ProcessInfo.processInfo.environment["MM_DRAFT"]
+        let draftMode: DraftPolicy.Mode = draftSetting == "1" ? .always : .auto
+        if languageCode != "zh" {
+            log("captions \(sessionId): draft captions off (language \(languageCode ?? "auto"), model is Mandarin-only)")
+        } else if draftSetting == "0" {
+            log("captions \(sessionId): draft captions off (MM_DRAFT=0)")
+        } else {
+            do { draft = try await SpeechModels.shared.draft().value } catch {
+                log("captions \(sessionId): draft captions unavailable, using Qwen3-ASR partials: \(error)")
             }
-            models = LiveModels(asr: loaded.0.value, vad: loaded.1.value, speaker: loaded.2?.value, turns: loaded.3?.value,
-                                prefix: prefix, draft: draft, draftMode: draftMode)
-            // Without a draft model a stream must never switch away from Qwen3-ASR partials.
-            let policy = draft == nil ? DraftPolicy(mode: .auto, switchInterval: .infinity) : DraftPolicy(mode: draftMode)
-            for stream in streams { stream.draftPolicy = policy }
+        }
+        return (prefix, draft, draftMode)
+    }
+
+    /// Loads local Qwen3-ASR + prefix/draft onto existing VAD/speaker/turns models.
+    private func attachLocalASR(to base: LiveModels) async throws -> LiveModels {
+        let asr = try await SpeechModels.shared.liveASR()
+        let (prefix, draft, draftMode) = await loadLocalExtras(loadPrefix: true)
+        // Without a draft model a stream must never switch away from Qwen3-ASR partials.
+        let policy = draft == nil ? DraftPolicy(mode: .auto, switchInterval: .infinity) : DraftPolicy(mode: draftMode)
+        for stream in streams { stream.draftPolicy = policy }
+        return LiveModels(asr: asr.value, vad: base.vad, speaker: base.speaker, turns: base.turns,
+                          prefix: prefix, draft: draft, draftMode: draftMode)
+    }
+
+    /// Creates lazy per-stream WebSocket clients for cloud streaming mode without connecting up front.
+    private func makeCloudStreamClients(_ cfg: LiveAsrConfig) throws -> [AudioOrigin: CloudLiveStreamClient] {
+        var clients: [AudioOrigin: CloudLiveStreamClient] = [:]
+        for stream in streams {
+            clients[stream.origin] = try CloudLiveStreamClient(config: cfg, language: rawLanguageHint, origin: stream.origin)
+        }
+        return clients
+    }
+
+    /// Whether a cloud failure should trigger immediate local Qwen3-ASR fallback instead of waiting 3 errors.
+    private static func isImmediateCloudFallback(_ error: Error, everSucceeded: Bool) -> Bool {
+        if let uttErr = error as? CloudUtteranceError, uttErr.isAuthOrQuotaError { return true }
+        if let liveErr = error as? CloudLiveClientError, liveErr.isAuthOrQuotaError { return true }
+        if CloudAuthErrorDetector.isAuthOrQuotaFailure(statusCode: nil, message: String(describing: error)) {
+            return true
+        }
+        return !everSucceeded
+    }
+
+    /// Loads models (or prepares lazy cloud clients / utterance HTTP client), then processes audio every 50 ms.
+    private func run() async {
+        var models: LiveModels
+        var cloudClients: [AudioOrigin: CloudLiveStreamClient] = [:]
+        var utteranceClient: CloudUtteranceClient?
+        do {
+            async let vad = SpeechModels.shared.vad()
+            async let speaker = try? SpeechModels.shared.speaker()
+            async let turns = Self.loadTurnDiarizer(sessionId)
+            let base = LiveModels(asr: nil, vad: try await vad.value, speaker: await speaker?.value,
+                                  turns: await turns?.value, prefix: nil, draft: nil, draftMode: .auto)
+            if base.speaker == nil { log("captions \(sessionId): speaker embeddings unavailable; speakers will be unknown") }
+
+            if let cfg = cloudConfig {
+                do {
+                    switch cfg.effectiveMode {
+                    case .streaming:
+                        cloudClients = try makeCloudStreamClients(cfg)
+                        models = base
+                    case .utterance:
+                        utteranceClient = try CloudUtteranceClient(config: cfg, language: rawLanguageHint)
+                        let (_, draft, _) = await loadLocalExtras(loadPrefix: false)
+                        let policy = draft == nil
+                            ? DraftPolicy(mode: .auto, switchInterval: .infinity)
+                            : DraftPolicy(mode: .always)
+                        for stream in streams { stream.draftPolicy = policy }
+                        models = LiveModels(asr: nil, vad: base.vad, speaker: base.speaker, turns: base.turns,
+                                            prefix: nil, draft: draft, draftMode: .always)
+                    }
+                } catch {
+                    log("captions \(sessionId): cloud live setup failed (\(cfg.provider)), falling back to local Qwen3-ASR: \(error)")
+                    models = try await attachLocalASR(to: base)
+                }
+            } else {
+                models = try await attachLocalASR(to: base)
+            }
         } catch {
             log("captions \(sessionId): disabled, models unavailable: \(error)")
             microphone?.close()
@@ -682,33 +933,468 @@ final class LiveCaptioner: @unchecked Sendable {
         }
         _ = ready.exchange(true)
         _ = settled.exchange(true)
-        log("captions \(sessionId): running (language \(languageName ?? "auto"))")
+        if let cfg = cloudConfig, utteranceClient != nil {
+            log("captions \(sessionId): running cloud utterance HTTP (\(cfg.provider) · \(cfg.model), "
+                + "draft \(models.draft != nil ? "on" : "off"), language \(rawLanguageHint ?? "auto"))")
+        } else if let cfg = cloudConfig, !cloudClients.isEmpty {
+            log("captions \(sessionId): running cloud live streaming (\(cfg.provider) · \(cfg.model), "
+                + "VAD-gated/lazy WS, language \(rawLanguageHint ?? "auto"))")
+        } else {
+            log("captions \(sessionId): running (language \(languageName ?? "auto"))")
+        }
+
+        let emittedCloudPartials = LockedValue<Set<Int>>([])
+        var consecutiveCloudErrors = 0
+        var cloudEverSucceeded = false
+
+        var pendingUtteranceUploads: [UtteranceJob] = []
+        var inFlightUtteranceTasks: [Int: Task<Void, Never>] = [:]
+        let completedUtteranceUploads = LockedValue<[UtteranceOutcome]>([])
+        let maxConcurrentUtteranceUploads = 4
+
+        /// Dispatches queued utterance HTTP jobs up to `maxConcurrentUtteranceUploads`.
+        func dispatchPendingUtterances(client: CloudUtteranceClient) {
+            while inFlightUtteranceTasks.count < maxConcurrentUtteranceUploads,
+                  !pendingUtteranceUploads.isEmpty {
+                let job = pendingUtteranceUploads.removeFirst()
+                inFlightUtteranceTasks[job.id] = Task {
+                    do {
+                        let transcript = try await client.transcribe(samples16k: job.fullAudio)
+                        completedUtteranceUploads.mutate { $0.append(.success(job, transcript)) }
+                    } catch {
+                        completedUtteranceUploads.mutate { $0.append(.failure(job, error)) }
+                    }
+                }
+            }
+        }
+
+        /// Drains finished utterance HTTP jobs, emitting finals + usage or falling back locally.
+        func drainUtteranceOutcomes(cfg: LiveAsrConfig) async {
+            var batch: [UtteranceOutcome] = []
+            completedUtteranceUploads.mutate {
+                batch = $0
+                $0.removeAll()
+            }
+            if !batch.isEmpty {
+                batch.sort {
+                    let a = $0.job, b = $1.job
+                    return (a.startMs, a.id) < (b.startMs, b.id)
+                }
+                for outcome in batch {
+                    inFlightUtteranceTasks.removeValue(forKey: outcome.job.id)
+                    switch outcome {
+                    case .success(let job, let res):
+                        consecutiveCloudErrors = 0
+                        cloudEverSucceeded = true
+                        if !res.text.isEmpty || job.hadPartial {
+                            emitFinal(id: job.id, origin: job.origin, startMs: job.startMs, endMs: job.endMs,
+                                      text: res.text, speaker: res.text.isEmpty ? .unknown : job.speaker,
+                                      captionSpatial: job.captionSpatial, cueEvent: job.cueEvent)
+                        }
+                        let meteredMs = res.billedAudioMs ?? job.audioMs
+                        if meteredMs > 0 || res.inputTokens > 0 || res.outputTokens > 0 {
+                            send(Methods.Meeting.nCaptionUsage, CaptionUsageEvent(
+                                sessionId: sessionId, provider: cfg.provider, model: cfg.model,
+                                origin: job.origin, audioMs: meteredMs,
+                                inputTokens: res.inputTokens, outputTokens: res.outputTokens, mode: .utterance))
+                        }
+                    case .failure(let job, let error):
+                        consecutiveCloudErrors += 1
+                        let fatal = Self.isImmediateCloudFallback(error, everSucceeded: cloudEverSucceeded)
+                            || consecutiveCloudErrors >= 3
+                        log("captions \(sessionId) \(job.origin.rawValue): cloud utterance \(job.id) failed (\(consecutiveCloudErrors)/3): \(error)")
+                        if fatal {
+                            utteranceClient = nil
+                            if models.asr == nil {
+                                do {
+                                    models = try await attachLocalASR(to: models)
+                                } catch {
+                                    log("captions \(sessionId): local Qwen3-ASR fallback failed: \(error)")
+                                }
+                            }
+                            if models.asr != nil {
+                                let activeModels = models
+                                let localText = (try? await MLXGate.shared.run { self.transcribe(job.fullAudio, activeModels) }) ?? ""
+                                let resolvedText = localText.isEmpty ? job.draftText : localText
+                                if !resolvedText.isEmpty || job.hadPartial {
+                                    emitFinal(id: job.id, origin: job.origin, startMs: job.startMs, endMs: job.endMs,
+                                              text: resolvedText, speaker: resolvedText.isEmpty ? .unknown : job.speaker,
+                                              captionSpatial: job.captionSpatial, cueEvent: job.cueEvent)
+                                }
+                            } else if !job.draftText.isEmpty || job.hadPartial {
+                                let fallbackText = job.draftText
+                                emitFinal(id: job.id, origin: job.origin, startMs: job.startMs, endMs: job.endMs,
+                                          text: fallbackText, speaker: fallbackText.isEmpty ? .unknown : job.speaker,
+                                          captionSpatial: job.captionSpatial, cueEvent: job.cueEvent)
+                            }
+                        } else if !job.draftText.isEmpty || job.hadPartial {
+                            let fallbackText = job.draftText
+                            emitFinal(id: job.id, origin: job.origin, startMs: job.startMs, endMs: job.endMs,
+                                      text: fallbackText, speaker: fallbackText.isEmpty ? .unknown : job.speaker,
+                                      captionSpatial: job.captionSpatial, cueEvent: job.cueEvent)
+                        }
+                    }
+                }
+            }
+
+            // If fatal fallback deactivated the cloud utterance client, drain remaining queued jobs locally.
+            if utteranceClient == nil && !pendingUtteranceUploads.isEmpty {
+                let queued = pendingUtteranceUploads
+                pendingUtteranceUploads.removeAll()
+                if models.asr == nil {
+                    models = (try? await attachLocalASR(to: models)) ?? models
+                }
+                for q in queued {
+                    let localText: String
+                    if models.asr != nil {
+                        let activeModels = models
+                        localText = (try? await MLXGate.shared.run { self.transcribe(q.fullAudio, activeModels) }) ?? ""
+                    } else {
+                        localText = ""
+                    }
+                    let resolved = localText.isEmpty ? q.draftText : localText
+                    if !resolved.isEmpty || q.hadPartial {
+                        emitFinal(id: q.id, origin: q.origin, startMs: q.startMs, endMs: q.endMs,
+                                  text: resolved, speaker: resolved.isEmpty ? .unknown : q.speaker,
+                                  captionSpatial: q.captionSpatial, cueEvent: q.cueEvent)
+                    }
+                }
+            }
+        }
+
         while true {
             let last = stopping.get()
+            let currentModels = models
             for stream in streams {
                 let batch = stream.inbox.take()
+
+                // Branch 1: Solution A — VAD-gated realtime WebSocket streaming.
+                if let client = cloudClients[stream.origin], let cfg = cloudConfig {
+                    if batch.mono.isEmpty && !last && !stream.hasPendingCloudWork {
+                        await client.disconnectIfIdle(after: 60)
+                        continue
+                    }
+                    let tick: CloudTickWork
+                    do {
+                        tick = try await MLXGate.shared.run { [self, currentModels] in
+                            self.collectCloudTick(batch: batch, last: last, on: stream, models: currentModels)
+                        }
+                    } catch {
+                        log("captions \(sessionId) \(stream.origin.rawValue): \(error)")
+                        continue
+                    }
+
+                    if let abortId = tick.abortId {
+                        emittedCloudPartials.mutate { _ = $0.remove(abortId) }
+                        await client.abortUtterance(id: abortId)
+                    }
+                    for r in tick.retracts {
+                        var cloudPartial = false
+                        emittedCloudPartials.mutate { cloudPartial = ($0.remove(r.id) != nil) }
+                        if cloudPartial {
+                            emitFinal(id: r.id, origin: r.origin, startMs: r.startMs, endMs: r.endMs,
+                                      text: "", speaker: .unknown, captionSpatial: nil, cueEvent: nil)
+                        }
+                    }
+
+                    // 1. Finalize completed VAD utterances first.
+                    var fellBackOnFinal = false
+                    for (idx, job) in tick.finals.enumerated() {
+                        var cloudPartial = false
+                        emittedCloudPartials.mutate { cloudPartial = ($0.remove(job.id) != nil) }
+                        let hadPartial = job.hadPartial || cloudPartial
+                        do {
+                            if await client.currentUtteranceId != job.id {
+                                if await client.currentUtteranceId != nil {
+                                    _ = try? await client.finishUtterance()
+                                }
+                                try await client.beginUtterance(id: job.id) { _ in }
+                            }
+                            if !job.tailAudio.isEmpty {
+                                try await client.pushAudio16k(job.tailAudio)
+                            }
+                            let res = try await client.finishUtterance()
+                            consecutiveCloudErrors = 0
+                            cloudEverSucceeded = true
+                            if !res.text.isEmpty || hadPartial {
+                                emitFinal(id: job.id, origin: job.origin, startMs: job.startMs, endMs: job.endMs,
+                                          text: res.text, speaker: res.text.isEmpty ? .unknown : job.speaker,
+                                          captionSpatial: job.captionSpatial, cueEvent: job.cueEvent)
+                            }
+                            if job.audioMs > 0 || res.inputTokens > 0 || res.outputTokens > 0 {
+                                send(Methods.Meeting.nCaptionUsage, CaptionUsageEvent(
+                                    sessionId: sessionId, provider: cfg.provider, model: cfg.model,
+                                    origin: job.origin, audioMs: job.audioMs,
+                                    inputTokens: res.inputTokens, outputTokens: res.outputTokens, mode: .streaming))
+                            }
+                        } catch {
+                            consecutiveCloudErrors += 1
+                            let fatal = Self.isImmediateCloudFallback(error, everSucceeded: cloudEverSucceeded)
+                                || consecutiveCloudErrors >= 3
+                            log("captions \(sessionId) \(job.origin.rawValue): cloud utterance \(job.id) failed (\(consecutiveCloudErrors)/3): \(error)")
+                            if fatal {
+                                fellBackOnFinal = true
+                                for c in cloudClients.values { await c.close() }
+                                cloudClients.removeAll()
+                                do {
+                                    models = try await attachLocalASR(to: models)
+                                } catch {
+                                    log("captions \(sessionId): local Qwen3-ASR fallback failed: \(error)")
+                                }
+                                let activeModels = models
+                                for remIdx in idx..<tick.finals.count {
+                                    let rem = tick.finals[remIdx]
+                                    var remPartial = hadPartial
+                                    if remIdx != idx {
+                                        emittedCloudPartials.mutate { remPartial = rem.hadPartial || ($0.remove(rem.id) != nil) }
+                                    }
+                                    let text = (try? await MLXGate.shared.run { self.transcribe(rem.fullAudio, activeModels) }) ?? ""
+                                    if !text.isEmpty || remPartial {
+                                        emitFinal(id: rem.id, origin: rem.origin, startMs: rem.startMs, endMs: rem.endMs,
+                                                  text: text, speaker: text.isEmpty ? .unknown : rem.speaker,
+                                                  captionSpatial: rem.captionSpatial, cueEvent: rem.cueEvent)
+                                    }
+                                }
+                                break
+                            }
+                            if hadPartial {
+                                emitFinal(id: job.id, origin: job.origin, startMs: job.startMs, endMs: job.endMs,
+                                          text: "", speaker: .unknown, captionSpatial: nil, cueEvent: nil)
+                            }
+                        }
+                    }
+                    if fellBackOnFinal {
+                        continue
+                    }
+
+                    // 2. Stream incremental audio for the currently active utterance.
+                    if let active = tick.active {
+                        do {
+                            if await client.currentUtteranceId != active.id {
+                                if await client.currentUtteranceId != nil {
+                                    _ = try? await client.finishUtterance()
+                                }
+                                let uid = active.id
+                                let origin = stream.origin
+                                let startMs = active.startMs
+                                let speaker = active.speaker
+                                let sid = sessionId
+                                let sink = notify
+                                try await client.beginUtterance(id: uid) { text in
+                                    emittedCloudPartials.mutate { _ = $0.insert(uid) }
+                                    let event = CaptionPartialEvent(
+                                        sessionId: sid, utteranceId: uid, origin: origin,
+                                        startMs: startMs, text: text, speaker: speaker, stableChars: 0)
+                                    if let encoded = try? JSONValue.from(event) {
+                                        sink(Methods.Meeting.nCaptionPartial, encoded)
+                                    }
+                                }
+                            }
+                            try await client.pushAudio16k(active.samples)
+                            consecutiveCloudErrors = 0
+                        } catch {
+                            consecutiveCloudErrors += 1
+                            let fatal = Self.isImmediateCloudFallback(error, everSucceeded: cloudEverSucceeded)
+                                || consecutiveCloudErrors >= 3
+                            log("captions \(sessionId) \(stream.origin.rawValue): cloud stream failed (\(consecutiveCloudErrors)/3): \(error)")
+                            if fatal {
+                                log("captions \(sessionId): cloud live failed, switching to local Qwen3-ASR")
+                                for c in cloudClients.values { await c.close() }
+                                cloudClients.removeAll()
+                                do {
+                                    models = try await attachLocalASR(to: models)
+                                } catch {
+                                    log("captions \(sessionId): local Qwen3-ASR fallback failed: \(error)")
+                                }
+                            }
+                        }
+                    } else if tick.finals.isEmpty {
+                        await client.disconnectIfIdle(after: 60)
+                    }
+                    continue
+                }
+
+                // Branch 2: Solution B — VAD + local CPU draft + per-utterance HTTP upload.
+                if let uClient = utteranceClient {
+                    if !batch.mono.isEmpty || last || stream.hasPendingCloudWork {
+                        let uttTick: UtteranceTickWork
+                        do {
+                            uttTick = try await MLXGate.shared.run { [self, currentModels] in
+                                self.collectUtteranceTick(batch: batch, last: last, on: stream, models: currentModels)
+                            }
+                            for p in uttTick.partials {
+                                send(Methods.Meeting.nCaptionPartial, CaptionPartialEvent(
+                                    sessionId: sessionId, utteranceId: p.id, origin: p.origin,
+                                    startMs: p.startMs, text: p.text, speaker: p.speaker, stableChars: p.stableChars))
+                            }
+                            for r in uttTick.retracts {
+                                emitFinal(id: r.id, origin: r.origin, startMs: r.startMs, endMs: r.endMs,
+                                          text: "", speaker: .unknown, captionSpatial: nil, cueEvent: nil)
+                            }
+                            pendingUtteranceUploads.append(contentsOf: uttTick.jobs)
+                            dispatchPendingUtterances(client: uClient)
+                        } catch {
+                            log("captions \(sessionId) \(stream.origin.rawValue): \(error)")
+                        }
+                    }
+                    continue
+                }
+
+                // Branch 3: Local Qwen3-ASR (+ optional Zipformer draft).
                 let behind = Double(batch.mono.count) / stream.inbox.sampleRate > 1.5
                 do {
-                    try await MLXGate.shared.run { [self] in
-                        var work = stream.ingest(batch, models: models)
+                    try await MLXGate.shared.run { [self, currentModels] in
+                        var work = stream.ingest(batch, models: currentModels)
                         if last { work += stream.flush() }
-                        for item in work { self.perform(item, on: stream, models: models, skipPartials: behind) }
+                        for item in work { self.perform(item, on: stream, models: currentModels, skipPartials: behind) }
                         stream.trim()
                     }
                 } catch {
                     log("captions \(sessionId) \(stream.origin.rawValue): \(error)")
                 }
             }
+            if let cfg = cloudConfig, cfg.effectiveMode == .utterance {
+                if let uClient = utteranceClient {
+                    dispatchPendingUtterances(client: uClient)
+                }
+                await drainUtteranceOutcomes(cfg: cfg)
+            }
             if last { break }
             // 50 ms keeps the loop's own wait well under the 0.2 s partial floor.
             try? await Task.sleep(for: .milliseconds(50))
         }
+
+        // Wait for all in-flight per-utterance HTTP requests before ending `stop()`.
+        if let cfg = cloudConfig, cfg.effectiveMode == .utterance {
+            while !pendingUtteranceUploads.isEmpty || !inFlightUtteranceTasks.isEmpty {
+                if let uClient = utteranceClient {
+                    dispatchPendingUtterances(client: uClient)
+                }
+                await drainUtteranceOutcomes(cfg: cfg)
+                if let nextTask = inFlightUtteranceTasks.values.first {
+                    await nextTask.value
+                    await drainUtteranceOutcomes(cfg: cfg)
+                }
+            }
+        }
+        for client in cloudClients.values { await client.close() }
         for stream in streams {
             stream.logStereoSummary()
             log("captions \(sessionId) \(stream.origin.rawValue): \(stream.stats.summary), "
                 + "partial interval \(Int(stream.partialInterval * 1000)) ms")
         }
         log("captions \(sessionId): stopped")
+    }
+
+    /// Runs synchronous VAD, Sortformer, WeSpeaker, and GCC-PHAT work inside ``MLXGate`` for cloud streaming mode.
+    private func collectCloudTick(batch: CaptionInbox.Batch, last: Bool,
+                                  on stream: CaptionStream, models: LiveModels) -> CloudTickWork {
+        var work = stream.ingest(batch, models: models)
+        if last { work += stream.flush() }
+
+        var finals: [CloudFinalJob] = []
+        var retracts: [CloudRetraction] = []
+        for item in work {
+            guard case .final(let id, let start, let end, let hadPartial, _) = item else { continue }
+            let finalAudio = stream.finalizeCloudUtterance(id: id, start: start, end: end)
+            stream.forget(id)
+            let (startMs, endMs) = (stream.ms(start), stream.ms(end))
+            switch finalAudio {
+            case .skip:
+                if hadPartial {
+                    retracts.append(CloudRetraction(id: id, origin: stream.origin, startMs: startMs, endMs: endMs))
+                }
+            case .commit(let tailAudio, let fullAudio, let uploadedMs, _):
+                let speaker = attribute(fullAudio, start, end, on: stream, models: models)
+                let direction = stream.direction(start, end)
+                let cueEvent = direction.map {
+                    SpatialCueEvent(
+                        sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs, endMs: endMs,
+                        position: $0.position, confidence: $0.fusion.confidence, azimuthDeg: $0.azimuthDeg, speaker: speaker)
+                }
+                finals.append(CloudFinalJob(
+                    id: id, origin: stream.origin, startMs: startMs, endMs: endMs, audioMs: uploadedMs,
+                    hadPartial: hadPartial, tailAudio: tailAudio, fullAudio: fullAudio, speaker: speaker,
+                    captionSpatial: direction?.caption, cueEvent: cueEvent))
+            }
+        }
+
+        var abortId: Int?
+        var activeSlice: CloudActiveSlice?
+        if !last {
+            switch stream.takeCloudStreamingAction() {
+            case .idle:
+                break
+            case .abort(let id):
+                abortId = id
+            case .upload(let id, let start, let end, let startMs, let samples):
+                let speaker = stream.partialSpeaker(id) {
+                    let full = stream.slice(start, end)
+                    guard full.count >= CaptionStream.rate * 3 / 2, let embedding = embed(full, models) else { return nil }
+                    return tracker.peek(SpeechObservation(embedding: embedding, origin: stream.origin,
+                                                          turnSlot: stream.turnSlot(start, end)))
+                }
+                activeSlice = CloudActiveSlice(id: id, startMs: startMs, speaker: speaker, samples: samples)
+            }
+        }
+
+        stream.trim()
+        return CloudTickWork(abortId: abortId, retracts: retracts, active: activeSlice, finals: finals)
+    }
+
+    /// Runs synchronous VAD, Zipformer draft, Sortformer, WeSpeaker, and GCC-PHAT work for Solution B utterance mode.
+    private func collectUtteranceTick(batch: CaptionInbox.Batch, last: Bool,
+                                      on stream: CaptionStream, models: LiveModels) -> UtteranceTickWork {
+        var work = stream.ingest(batch, models: models)
+        if last { work += stream.flush() }
+
+        var partials: [UtterancePartialNotice] = []
+        var retracts: [CloudRetraction] = []
+        var jobs: [UtteranceJob] = []
+
+        for item in work {
+            switch item {
+            case .draft(let id, let start, let end, let text, let stable):
+                let speaker = stream.partialSpeaker(id) {
+                    let audio = stream.slice(start, end)
+                    guard audio.count >= CaptionStream.rate * 3 / 2, let embedding = embed(audio, models) else { return nil }
+                    return tracker.peek(SpeechObservation(embedding: embedding, origin: stream.origin,
+                                                          turnSlot: stream.turnSlot(start, end)))
+                }
+                partials.append(UtterancePartialNotice(
+                    id: id, origin: stream.origin, startMs: stream.ms(start),
+                    text: text, speaker: speaker, stableChars: stable))
+            case .partial:
+                break
+            case .final(let id, let start, let end, let hadPartial, _):
+                let showedPartial = hadPartial || stream.hadDraft(id)
+                let draftBackup = stream.draftText(for: id)
+                let finalAudio = stream.finalizeCloudUtterance(id: id, start: start, end: end)
+                stream.forget(id)
+                let (startMs, endMs) = (stream.ms(start), stream.ms(end))
+                switch finalAudio {
+                case .skip:
+                    if showedPartial {
+                        retracts.append(CloudRetraction(id: id, origin: stream.origin, startMs: startMs, endMs: endMs))
+                    }
+                case .commit(_, let fullAudio, let uploadedMs, _):
+                    let speaker = attribute(fullAudio, start, end, on: stream, models: models)
+                    let direction = stream.direction(start, end)
+                    let cueEvent = direction.map {
+                        SpatialCueEvent(
+                            sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs, endMs: endMs,
+                            position: $0.position, confidence: $0.fusion.confidence, azimuthDeg: $0.azimuthDeg, speaker: speaker)
+                    }
+                    jobs.append(UtteranceJob(
+                        id: id, origin: stream.origin, startMs: startMs, endMs: endMs, audioMs: uploadedMs,
+                        hadPartial: showedPartial, draftText: draftBackup, fullAudio: fullAudio,
+                        speaker: speaker, captionSpatial: direction?.caption, cueEvent: cueEvent))
+                }
+            }
+        }
+
+        stream.trim()
+        return UtteranceTickWork(partials: partials, retracts: retracts, jobs: jobs)
     }
 
     /// Loads Sortformer, logging instead of failing: captions work without it.
@@ -823,16 +1509,27 @@ final class LiveCaptioner: @unchecked Sendable {
                            on stream: CaptionStream) {
         let direction = stream.direction(start, end)
         let (startMs, endMs) = (stream.ms(start), stream.ms(end))
+        let cueEvent = direction.map {
+            SpatialCueEvent(
+                sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs, endMs: endMs,
+                position: $0.position, confidence: $0.fusion.confidence,
+                azimuthDeg: $0.azimuthDeg, speaker: speaker)
+        }
+        emitFinal(id: id, origin: stream.origin, startMs: startMs, endMs: endMs, text: text,
+                  speaker: speaker, captionSpatial: direction?.caption, cueEvent: cueEvent)
+    }
+
+    /// Emits `caption/final` followed by `spatial/cue` when present.
+    private func emitFinal(id: Int, origin: AudioOrigin, startMs: Int, endMs: Int, text: String,
+                           speaker: SpeakerLabel, captionSpatial: CaptionSpatialCue?,
+                           cueEvent: SpatialCueEvent?) {
         send(Methods.Meeting.nCaptionFinal, CaptionFinalEvent(
-            sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs,
+            sessionId: sessionId, utteranceId: id, origin: origin, startMs: startMs,
             endMs: endMs, text: text, language: languageCode ?? ASRLanguage.guess(fromText: text),
-            speaker: speaker, spatial: direction?.caption))
+            speaker: speaker, spatial: captionSpatial))
         // An empty final only retracts a partial: no utterance on screen to place.
-        guard let direction, !text.isEmpty else { return }
-        send(Methods.Meeting.nSpatialCue, SpatialCueEvent(
-            sessionId: sessionId, utteranceId: id, origin: stream.origin, startMs: startMs, endMs: endMs,
-            position: direction.position, confidence: direction.fusion.confidence,
-            azimuthDeg: direction.azimuthDeg, speaker: speaker))
+        guard let cueEvent, !text.isEmpty else { return }
+        send(Methods.Meeting.nSpatialCue, cueEvent)
     }
 
     /// Seconds elapsed since `start` on the monotonic clock.
@@ -860,10 +1557,10 @@ final class LiveCaptioner: @unchecked Sendable {
 
     /// Runs Qwen3-ASR on 16 kHz audio.
     private func transcribe(_ audio: [Float], _ models: LiveModels) -> String {
-        guard audio.count >= CaptionStream.rate / 5 else { return "" }
+        guard let asr = models.asr, audio.count >= CaptionStream.rate / 5 else { return "" }
         let seconds = Double(audio.count) / Double(CaptionStream.rate)
-        return models.asr.transcribe(audio: audio, sampleRate: CaptionStream.rate, language: languageName,
-                                     maxTokens: ASRLanguage.maxTokens(forSeconds: seconds))
+        return asr.transcribe(audio: audio, sampleRate: CaptionStream.rate, language: languageName,
+                              maxTokens: ASRLanguage.maxTokens(forSeconds: seconds))
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

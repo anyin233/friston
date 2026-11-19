@@ -33,8 +33,6 @@ pub enum MinutesBackend {
     ApiKey,
     /// The signed-in Codex CLI (ChatGPT account).
     Codex,
-    /// The signed-in Antigravity CLI (`agy`).
-    Antigravity,
 }
 
 /// A model a CLI offers, as shown in settings.
@@ -63,10 +61,6 @@ pub struct ProviderConfig {
     pub codex_in_auto: bool,
     /// `thread/start.model` for Codex; `None` keeps Codex's own default.
     pub codex_model: Option<String>,
-    /// Path to the `agy` binary, when installed.
-    pub agy: Option<String>,
-    /// `agy --model` id used for minutes.
-    pub antigravity_model: String,
     /// Identifier of a downloaded local MLX model usable for minutes.
     pub local_model: Option<String>,
 }
@@ -78,10 +72,6 @@ pub enum ProviderChoice {
     Codex {
         codex_path: String,
         model: Option<String>,
-    },
-    Antigravity {
-        agy_path: String,
-        model: String,
     },
     LocalMlx {
         model: String,
@@ -125,10 +115,6 @@ fn explicit(cfg: &ProviderConfig) -> Option<ProviderChoice> {
         MinutesBackend::Codex => cfg.codex_signed_in.clone().map(|p| ProviderChoice::Codex {
             codex_path: p,
             model: cfg.codex_model.clone(),
-        }),
-        MinutesBackend::Antigravity => cfg.agy.clone().map(|p| ProviderChoice::Antigravity {
-            agy_path: p,
-            model: cfg.antigravity_model.clone(),
         }),
     }
 }
@@ -256,32 +242,6 @@ mod tests {
             Some(ProviderChoice::LocalMlx { model: "/m".into() })
         );
         assert_eq!(plan.unavailable, None);
-    }
-
-    #[test]
-    fn explicit_antigravity_falls_back_to_the_auto_chain() {
-        let mut cfg = ProviderConfig {
-            backend: MinutesBackend::Antigravity,
-            agy: Some("/u/.local/bin/agy".into()),
-            antigravity_model: "claude-opus-5-5-high".into(),
-            ..codex_cfg()
-        };
-        let plan = plan_providers(&cfg).unwrap();
-        assert_eq!(
-            plan.primary,
-            ProviderChoice::Antigravity {
-                agy_path: "/u/.local/bin/agy".into(),
-                model: "claude-opus-5-5-high".into(),
-            }
-        );
-        assert!(matches!(plan.fallback, Some(ProviderChoice::Codex { .. })));
-
-        // agy missing: the auto chain runs and the plan says why.
-        cfg.agy = None;
-        let plan = plan_providers(&cfg).unwrap();
-        assert!(matches!(plan.primary, ProviderChoice::Codex { .. }));
-        assert_eq!(plan.fallback, None);
-        assert_eq!(plan.unavailable, Some(MinutesBackend::Antigravity));
     }
 
     #[test]

@@ -16,6 +16,8 @@ struct SimulateFileParams: Decodable {
     var spatialFlip: Bool?
     /// Same as `capture/start`: mic spacing of a 2-channel file, for `azimuthDeg`.
     var spatialSpacingCm: Double?
+    /// Optional cloud live ASR backend configuration (`openai` / `gemini`).
+    var liveAsr: LiveAsrConfig?
 }
 
 /// `caption/simulateFile` result: what the app would have shown, after all relabels.
@@ -28,6 +30,8 @@ struct SimulateFileResult: Encodable {
     var relabels: Int
     /// Every `spatial/cue` sent (2-channel microphone files only), speakers relabelled like `finals`.
     var spatialCues: [SpatialCueEvent]
+    /// Every `caption/usage` event emitted while streaming in cloud live mode.
+    var usage: [CaptionUsageEvent]
 }
 
 /// Runs the live caption pipeline over an audio file instead of a capture device.
@@ -67,7 +71,8 @@ enum CaptionSimulator {
             notify(method, payload)
         }
         let preset = CapturePreset(captionLanguage: params.language, voiceprints: params.voiceprints,
-                                   spatialFlip: params.spatialFlip ?? false, spatialSpacingCm: params.spatialSpacingCm)
+                                   spatialFlip: params.spatialFlip ?? false, spatialSpacingCm: params.spatialSpacingCm,
+                                   liveAsr: params.liveAsr)
         // The whole file may arrive at once (speed 0), so the inbox must hold all of it.
         let captioner = LiveCaptioner(
             sessionId: sessionId, preset: preset, microphone: device,
@@ -103,7 +108,8 @@ enum CaptionSimulator {
         await captioner.stop()
         let result = collected.get()
         return SimulateFileResult(sessionId: sessionId, origin: origin, durationMs: Int(seconds * 1000),
-                                  finals: result.finals, relabels: result.relabels, spatialCues: result.spatialCues)
+                                  finals: result.finals, relabels: result.relabels, spatialCues: result.spatialCues,
+                                  usage: result.usage)
     }
 
     /// Decoded audio: one array per channel at `sampleRate`.
@@ -158,6 +164,7 @@ enum CaptionSimulator {
         var finals: [CaptionFinalEvent] = []
         var relabels = 0
         var spatialCues: [SpatialCueEvent] = []
+        var usage: [CaptionUsageEvent] = []
 
         /// Records one notification.
         /// - Parameters:
@@ -169,6 +176,8 @@ enum CaptionSimulator {
                 if let event = try? payload.decode(CaptionFinalEvent.self) { finals.append(event) }
             case Methods.Meeting.nSpatialCue:
                 if let event = try? payload.decode(SpatialCueEvent.self) { spatialCues.append(event) }
+            case Methods.Meeting.nCaptionUsage:
+                if let event = try? payload.decode(CaptionUsageEvent.self) { usage.append(event) }
             case Methods.Meeting.nSpeakerRelabel:
                 guard let event = try? payload.decode(SpeakerRelabelEvent.self) else { return }
                 relabels += 1

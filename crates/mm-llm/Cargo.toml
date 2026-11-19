@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 mm-i18n.workspace = true
 mm-core.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -20,3 +21,6 @@ dirs.workspace = true
 ureq = { version = "3", features = ["json"] }
 keyring = { version = "3", features = ["apple-native"] }
 base64 = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true

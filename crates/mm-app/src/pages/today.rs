@@ -1,6 +1,7 @@
 //! 今天: next meeting, today's schedule, recent meetings and action items.
 
 use chrono::{DateTime, Datelike, Local};
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
@@ -65,7 +66,7 @@ impl TodayPage {
                 div()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(ev.title.clone()),
+                    .child(SharedString::from(ev.title.clone()).test_text(ev.title.clone())),
             )
             .when(!ev.attendees.is_empty(), |el| {
                 el.child(ui::muted(
@@ -115,7 +116,10 @@ impl TodayPage {
                                 } else {
                                     cx.theme().foreground
                                 })
-                                .child(ev.title.clone()),
+                                .child(
+                                    SharedString::from(ev.title.clone())
+                                        .test_text(ev.title.clone()),
+                                ),
                         )
                         .child(ui::muted(
                             [
@@ -149,6 +153,7 @@ impl TodayPage {
                             let id = m.id;
                             h_flex()
                                 .id(("recent", i))
+                                .test_support()
                                 .gap_2()
                                 .p_2()
                                 .rounded_md()
@@ -161,7 +166,12 @@ impl TodayPage {
                                     v_flex()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(div().text_sm().truncate().child(m.title.clone()))
+                                        .child(
+                                            div().text_sm().truncate().child(
+                                                SharedString::from(m.title.clone())
+                                                    .test_text(m.title.clone()),
+                                            ),
+                                        )
                                         .child(ui::muted(logic::short_datetime(m.starts_at), cx)),
                                 )
                                 .child(ui::status_tag(m.status))
@@ -172,34 +182,37 @@ impl TodayPage {
             Loadable::Failed(e) => ui::load_error("meet-err", e, cx).into_any_element(),
             _ => ui::loading(tr!("正在读取会议…", "Loading meetings…"), cx).into_any_element(),
         };
-        let actions = if state.actions.is_empty() {
-            ui::muted(
-                tr!(
-                    "纪要里的待办会出现在这里。",
-                    "Action items from minutes appear here."
-                ),
-                cx,
-            )
-            .into_any_element()
-        } else {
-            v_flex()
-                .gap_2()
-                .children(state.actions.iter().map(|a| {
-                    let src = [
-                        Some(a.meeting_title.clone()),
-                        a.owner.clone(),
-                        a.due.clone(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                    v_flex()
-                        .child(div().text_sm().child(a.task.clone()))
-                        .child(ui::muted(src, cx))
-                }))
+        let actions =
+            if state.actions.is_empty() {
+                ui::muted(
+                    tr!(
+                        "纪要里的待办会出现在这里。",
+                        "Action items from minutes appear here."
+                    ),
+                    cx,
+                )
                 .into_any_element()
-        };
+            } else {
+                v_flex()
+                    .gap_2()
+                    .children(state.actions.iter().map(|a| {
+                        let src = [
+                            Some(a.meeting_title.clone()),
+                            a.owner.clone(),
+                            a.due.clone(),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                        v_flex()
+                            .child(div().text_sm().child(
+                                SharedString::from(a.task.clone()).test_text(a.task.clone()),
+                            ))
+                            .child(ui::muted(src, cx))
+                    }))
+                    .into_any_element()
+            };
         let stats = state
             .index_stats
             .map(|s| {

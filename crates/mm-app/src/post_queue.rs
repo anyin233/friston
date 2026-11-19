@@ -3,7 +3,7 @@
 //! Stopping a recording only takes the short "stop" phase (capture/stop, save the live
 //! transcript); the slow refine and minutes run here one meeting at a time. That frees the
 //! recorder for the next meeting while earlier ones are still being processed, and keeps
-//! refine passes from competing with each other for the GPU and the `agy` quota.
+//! refine passes from competing with each other for the GPU and the Codex quota.
 //!
 //! The queue is plain data so its ordering rules can be tested without GPUI; `AppState`
 //! drives it and runs the work on the background executor.

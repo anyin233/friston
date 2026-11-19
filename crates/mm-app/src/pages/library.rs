@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -295,6 +296,7 @@ impl LibraryPage {
                         let time = logic::locator_ms(&h.locator).map(logic::clock);
                         v_flex()
                             .id(("hit", i))
+                            .test_support()
                             .p_2()
                             .gap_1()
                             .rounded_md()
@@ -315,7 +317,9 @@ impl LibraryPage {
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .truncate()
-                                            .child(title),
+                                            .child(
+                                                SharedString::from(title.clone()).test_text(title),
+                                            ),
                                     )
                                     .when_some(time, |el, t| el.child(ui::muted(t, cx)))
                                     .when(h.keyword_match, |el| {
@@ -351,6 +355,7 @@ impl LibraryPage {
                     let active = self.selected == Some(id);
                     h_flex()
                         .id(("meeting", i))
+                        .test_support()
                         .p_2()
                         .gap_2()
                         .rounded_md()
@@ -362,7 +367,9 @@ impl LibraryPage {
                             v_flex()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().text_sm().truncate().child(m.title.clone()))
+                                .child(div().text_sm().truncate().child(
+                                    SharedString::from(m.title.clone()).test_text(m.title.clone()),
+                                ))
                                 .child(ui::muted(logic::short_datetime(m.starts_at), cx)),
                         )
                         .child(ui::status_tag(m.status))
@@ -379,15 +386,18 @@ impl LibraryPage {
             v_flex()
                 .gap_1()
                 .child(ui::section_title(title.to_string()))
-                .children(
-                    items
-                        .iter()
-                        .map(|s| div().text_sm().child(format!("· {s}"))),
-                )
+                .children(items.iter().map(|s| {
+                    let line: SharedString = format!("· {s}").into();
+                    div().text_sm().child(line.clone().test_text(line))
+                }))
         };
         v_flex()
             .gap_3()
-            .child(div().text_sm().child(m.summary.clone()))
+            .child(
+                div()
+                    .text_sm()
+                    .child(SharedString::from(m.summary.clone()).test_text(m.summary.clone())),
+            )
             .when(!m.decisions.is_empty(), |el| {
                 el.child(list(tr!("决定", "Decisions"), &m.decisions))
             })
@@ -406,9 +416,14 @@ impl LibraryPage {
                             .flatten()
                             .collect::<Vec<_>>()
                             .join(" · ");
+                            let task_line: SharedString = format!("· {}", a.task).into();
                             h_flex()
                                 .gap_2()
-                                .child(div().text_sm().child(format!("· {}", a.task)))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .child(task_line.clone().test_text(task_line)),
+                                )
                                 .child(ui::muted(meta, cx))
                         })),
                 )
@@ -504,7 +519,7 @@ impl LibraryPage {
                                 div()
                                     .text_xl()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(m.title.clone()),
+                                    .child(SharedString::from(m.title.clone()).test_text(m.title.clone())),
                             )
                             .child(ui::status_tag(m.status)),
                     )
@@ -571,6 +586,7 @@ impl LibraryPage {
             .child(
                 div()
                     .id(("seg-spk", i))
+                    .test_support()
                     .w(px(120.))
                     .flex_none()
                     .when(cluster.is_some(), |el| el.cursor_pointer())
@@ -581,7 +597,12 @@ impl LibraryPage {
                         })
                     }),
             )
-            .child(div().flex_1().text_sm().child(s.text.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .child(SharedString::from(s.text.clone()).test_text(s.text.clone())),
+            )
     }
 }
 
@@ -617,7 +638,7 @@ impl Render for LibraryPage {
                             .p_4()
                             .gap_2()
                             .child(ui::section_title(tr!("纪要库", "Library")))
-                            .child(Input::new(&self.search).cleanable(true))
+                            .child(Input::new(&self.search).id("lib-search").cleanable(true))
                             .child(ui::muted(stats, cx)),
                     )
                     .child(

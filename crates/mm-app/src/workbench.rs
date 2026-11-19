@@ -1,5 +1,6 @@
 //! Root view: sidebar navigation (with the window controls on top) and the active page.
 
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::component::notification::Notification;
@@ -25,8 +26,6 @@ use crate::pipeline;
 use crate::state::{AppEvent, AppState, Loadable, NoticeKind};
 use crate::status::{self, Light, MinutesInput, StatusInput, StatusRow};
 use mm_i18n::{tr, trf};
-use mm_llm::MinutesBackend;
-use mm_service::RefineBackend;
 
 /// Product name shown in the sidebar header.
 pub const APP_NAME: &str = "Friston";
@@ -224,6 +223,24 @@ impl Workbench {
     fn status_rows(&self, cx: &App) -> Vec<StatusRow> {
         let app = self.app.read(cx);
         let vault = app.cfg.vault_path.as_deref();
+        let (live_asr_model, live_asr_key_present) =
+            match (app.cfg.live_asr_backend, app.cfg.live_cloud_mode) {
+                (mm_service::LiveAsrBackend::Local, _) => (None, true),
+                (mm_service::LiveAsrBackend::OpenAi, mm_service::CloudLiveMode::Streaming) => {
+                    (app.cfg.live_openai_model.as_deref(), app.openai_key_present)
+                }
+                (mm_service::LiveAsrBackend::OpenAi, mm_service::CloudLiveMode::Utterance) => (
+                    app.cfg.live_openai_utterance_model.as_deref(),
+                    app.openai_key_present,
+                ),
+                (mm_service::LiveAsrBackend::Gemini, mm_service::CloudLiveMode::Streaming) => {
+                    (app.cfg.live_gemini_model.as_deref(), app.gemini_key_present)
+                }
+                (mm_service::LiveAsrBackend::Gemini, mm_service::CloudLiveMode::Utterance) => (
+                    app.cfg.live_gemini_utterance_model.as_deref(),
+                    app.gemini_key_present,
+                ),
+            };
         status::rows(&StatusInput {
             vault,
             // One stat per render; a vault on an unplugged drive must turn the light red.
@@ -231,18 +248,15 @@ impl Workbench {
             meeting_state: &app.meeting_state,
             meeting_models: &app.meeting_models,
             speech: &app.speech_models,
+            live_asr_backend: app.cfg.live_asr_backend,
+            live_cloud_mode: app.cfg.live_cloud_mode,
+            live_asr_model,
+            live_asr_key_present,
             embed: &app.embed_status,
             embed_dir: app.cfg.embedding_model_dir.as_deref(),
             minutes: MinutesInput {
                 backend: app.cfg.minutes_backend,
-                antigravity_model: &app.cfg.antigravity_minutes_model,
-                // A stat of a few PATH folders per render, like `vault_exists` above.
-                agy_found: app.cfg.minutes_backend == MinutesBackend::Antigravity
-                    && mm_llm::antigravity::find_agy().is_some(),
-                // Same condition as the post-meeting pipeline (for a one-part recording).
-                merged_with_refine: app.cfg.refine_after_meeting
-                    && app.cfg.refine_backend == RefineBackend::Antigravity
-                    && pipeline::merges_minutes_into_refine(&app.cfg, 1),
+                merged_with_refine: pipeline::uses_codex_unified_pass(&app.cfg),
                 byok: app.cfg.byok.as_ref().filter(|_| app.byok_key_present),
                 use_codex: app.cfg.use_codex,
                 codex: &app.codex,
@@ -265,6 +279,7 @@ impl Workbench {
         // enlarges the hover target, since 8px dots alone are hard to land on.
         let trigger = h_flex()
             .id("status-lights")
+            .test_support()
             .gap_1p5()
             .px_1p5()
             .py_1()
@@ -416,12 +431,14 @@ impl Workbench {
             ),
         };
         col.when_some(elapsed, |el, ms| {
+            let recording: SharedString =
+                trf!("● 录制中 {}", "● Recording {}", logic::clock(ms)).into();
             el.child(
                 div()
                     .text_xs()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(cx.theme().danger)
-                    .child(trf!("● 录制中 {}", "● Recording {}", logic::clock(ms))),
+                    .child(recording.clone().test_text(recording)),
             )
         })
     }
@@ -468,9 +485,11 @@ fn light_dot(light: Light, id: impl Into<ElementId>, cx: &App) -> AnyElement {
 ///
 /// Params: `rows`; `cx`.
 /// Returns: the card content.
-fn status_card(rows: &[StatusRow], cx: &App) -> Div {
+fn status_card(rows: &[StatusRow], cx: &App) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     v_flex()
+        .id("status-card-body")
+        .test_support()
         .w(px(300.))
         .gap_3()
         .children(rows.iter().enumerate().map(|(i, r)| {
@@ -481,23 +500,29 @@ fn status_card(rows: &[StatusRow], cx: &App) -> Div {
                         .gap_2()
                         .items_center()
                         .child(light_dot(r.light, ("status-card-light", i), cx))
-                        .child(div().text_xs().text_color(muted).child(r.title)),
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child(SharedString::from(r.title).test_text(r.title)),
+                        ),
                 )
                 .child(
                     div()
                         .pl(px(16.))
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(r.value.clone()),
+                        .child(SharedString::from(r.value.clone()).test_text(r.value.clone())),
                 )
                 .children(r.details.iter().map(|d| {
                     div()
                         .pl(px(16.))
                         .text_xs()
                         .text_color(muted)
-                        .child(d.clone())
+                        .child(SharedString::from(d.clone()).test_text(d.clone()))
                 }))
         }))
+        .into_any_element()
 }
 
 impl Render for Workbench {

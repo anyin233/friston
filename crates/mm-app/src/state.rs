@@ -16,12 +16,15 @@ use chrono::{Local, Utc};
 use gpui_kit::*;
 use mm_core::{
     AudioInput, AudioLevels, CalendarEvent, CaptureSources, CaptureStarted, CaptureState,
-    ClipRequest, LevelSource, Meeting, MeetingId, Person, PersonId, Voiceprint, VoiceprintId,
-    VoiceprintSource,
+    ClipRequest, CloudLiveMode, LevelSource, Meeting, MeetingId, Person, PersonId, Voiceprint,
+    VoiceprintId, VoiceprintSource,
 };
 use mm_engine::EngineEvent;
 use mm_i18n::{tr, trf};
-use mm_llm::ModelOption;
+use mm_llm::{
+    AsrMode, AsrModelList, AsrProvider, ModelOption, OpenAiCostsReport, asr_pricing, byok,
+    openai_costs,
+};
 use mm_service::config::{data_dir_overridden, default_recordings_dir};
 use mm_service::engines::{
     EMBEDD, EmbedEngine, EmbedStatus, LlmStatus, MEETINGD, MeetingEngine, MeetingNotice,
@@ -32,7 +35,7 @@ use mm_service::indexer::{Indexer, IndexerEvent, IndexerMsg, current_stamp};
 use mm_service::legacy::{self, FolderMove};
 use mm_service::live::{CaptionBoard, SpeakerDirectory, person_hue};
 use mm_service::{AppConfig, ServiceError, data_dir, flow, models_dir};
-use mm_store::{IndexStats, Store};
+use mm_store::{AsrUsageRecord, IndexStats, ProviderUsageSummary, Store};
 
 use crate::logic::{self, ActionRow};
 use crate::pages::Page;
@@ -272,12 +275,26 @@ pub struct AppState {
     pub codex: Loadable<CodexStatus>,
     /// Models the signed-in Codex offers (`model/list`); loaded when settings open.
     pub codex_models: Loadable<Vec<ModelOption>>,
-    /// Models the signed-in Antigravity CLI offers (`agy models`); loaded when settings open.
-    pub agy_models: Loadable<Vec<ModelOption>>,
+    /// Dynamically fetched OpenAI transcription models (`/v1/models`).
+    pub openai_asr_models: Loadable<AsrModelList>,
+    /// Dynamically fetched Google Gemini transcription models (`/v1beta/models`).
+    pub gemini_asr_models: Loadable<AsrModelList>,
     pub embed_status: Loadable<EmbedStatus>,
     pub llm_status: Loadable<LlmStatus>,
     pub index_stats: Option<IndexStats>,
     pub byok_key_present: bool,
+    /// An OpenAI API key is stored in the Keychain (`openai`).
+    pub openai_key_present: bool,
+    /// A Google Gemini API key is stored in the Keychain (`gemini`).
+    pub gemini_key_present: bool,
+    /// An OpenAI Admin API key (`sk-admin-...`) is stored in the Keychain (`openai-admin`).
+    pub openai_admin_key_present: bool,
+    /// Accumulated local OpenAI cloud ASR usage (this calendar month + all-time).
+    pub openai_usage: ProviderUsageSummary,
+    /// Accumulated local Google Gemini cloud ASR usage (this calendar month + all-time).
+    pub gemini_usage: ProviderUsageSummary,
+    /// Org-wide OpenAI billing spend fetched with the optional Admin API key.
+    pub openai_org_costs: Loadable<OpenAiCostsReport>,
     /// A Hugging Face token is stored in the Keychain.
     pub hf_token_present: bool,
     /// Model download in progress, if any.
@@ -300,11 +317,180 @@ impl AppState {
     /// Params: `cx` – entity context.
     /// Returns: the state; failures become startup notices instead of panics.
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let dir = data_dir();
+        Self::new_with_options(data_dir(), !data_dir_overridden(), true, cx)
+    }
+
+    /// Opens an isolated `AppState` rooted at `dir` for headless GPUI tests, skipping external
+    /// engine launches, Keychain reads and legacy directory moves.
+    ///
+    /// Params: `dir` – isolated data directory; `cx` – entity context.
+    /// Returns: the test state.
+    #[cfg(test)]
+    pub fn new_for_test(dir: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self::new_with_options(dir, false, false, cx)
+    }
+
+    /// Sets the cached Codex CLI probe status for deterministic GPUI tests.
+    ///
+    /// Params: `status` – mock Codex CLI account status; `cx` – entity context.
+    #[cfg(test)]
+    pub fn set_codex_status_for_test(&mut self, status: CodexStatus, cx: &mut Context<Self>) {
+        self.codex = Loadable::Ready(status);
+        cx.notify();
+    }
+
+    /// Sets calendar events for deterministic GPUI tests.
+    #[cfg(test)]
+    pub fn set_events_for_test(
+        &mut self,
+        events: Loadable<Vec<CalendarEvent>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.events = events;
+        cx.notify();
+    }
+
+    /// Sets macOS privacy permission snapshot for deterministic GPUI tests.
+    #[cfg(test)]
+    pub fn set_permissions_for_test(
+        &mut self,
+        perms: Loadable<mm_core::PermissionStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        self.permissions = perms;
+        cx.notify();
+    }
+
+    /// Starts a mock live session in state for deterministic GPUI tests without `mm-meetingd`.
+    #[cfg(test)]
+    pub fn start_mock_live_for_test(
+        &mut self,
+        meeting: Meeting,
+        started: CaptureStarted,
+        note_path: Option<PathBuf>,
+        initial_notes: String,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = {
+            let s = lock(&self.store).expect("lock store for mock live session");
+            flow::directory_for(&s, meeting.id).expect("load speaker directory")
+        };
+        let mut board = CaptionBoard::default();
+        board.begin(&started.session_id);
+        self.live = Some(LiveSession {
+            meeting,
+            started,
+            started_at: Instant::now(),
+            board,
+            directory,
+            capture_state: CaptureState::Recording,
+            capture_error: None,
+            levels: HashMap::new(),
+            positions: logic::SpeakerPositions::default(),
+            note_path,
+            window_id: None,
+            last_sync: Instant::now(),
+        });
+        cx.emit(AppEvent::LiveStarted {
+            notes: initial_notes,
+        });
+        cx.notify();
+    }
+
+    /// Ends the mock live session in state for deterministic GPUI tests.
+    #[cfg(test)]
+    pub fn end_mock_live_for_test(&mut self, cx: &mut Context<Self>) {
+        self.live = None;
+        cx.notify();
+    }
+
+    /// Feeds one engine notification into the live session and notifies views.
+    #[cfg(test)]
+    pub fn inject_notice_for_test(&mut self, notice: MeetingNotice, cx: &mut Context<Self>) {
+        self.on_notice(notice, cx);
+        cx.notify();
+    }
+
+    /// Mutable access to the post-meeting queue for deterministic GPUI tests.
+    #[cfg(test)]
+    pub fn post_queue_mut_for_test(&mut self) -> &mut PostQueue<StoppedMeeting> {
+        &mut self.post
+    }
+
+    /// Attaches a real `mm-embedd` handle and forwards it to the background vault indexer for tests.
+    #[cfg(test)]
+    pub fn attach_embed_engine_for_test(
+        &mut self,
+        engine: EmbedEngine,
+        status: EmbedStatus,
+        cx: &mut Context<Self>,
+    ) {
+        self.embed_engine = Some(engine.clone());
+        self.embed_state = EngineState::Ready;
+        self.embed_status = Loadable::Ready(status);
+        self.indexer
+            .send(IndexerMsg::SetEmbedder(Some(Arc::new(engine))));
+        cx.notify();
+    }
+
+    /// Blocks until pending writes on `LiveWriter` have committed to SQLite.
+    #[cfg(test)]
+    pub fn writer_flush_for_test(&self) {
+        self.writer.flush_blocking();
+    }
+
+    /// Marks `mm-meetingd` and its speech models as ready in state for E2E UI verification.
+    #[cfg(test)]
+    pub fn set_speech_models_for_test(
+        &mut self,
+        status: Loadable<SpeechModelsStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        self.meeting_state = EngineState::Ready;
+        self.speech_models = status;
+        cx.notify();
+    }
+
+    /// Sets cached dynamically fetched cloud ASR models for deterministic GPUI tests.
+    #[cfg(test)]
+    pub fn set_asr_models_for_test(
+        &mut self,
+        provider: AsrProvider,
+        models: Loadable<AsrModelList>,
+        cx: &mut Context<Self>,
+    ) {
+        match provider {
+            AsrProvider::OpenAi => self.openai_asr_models = models,
+            AsrProvider::Gemini => self.gemini_asr_models = models,
+        }
+        cx.notify();
+    }
+
+    /// Sets Keychain key presence flag for deterministic GPUI tests without touching Keychain.
+    #[cfg(test)]
+    pub fn set_asr_key_present_for_test(
+        &mut self,
+        provider: AsrProvider,
+        present: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match provider {
+            AsrProvider::OpenAi => self.openai_key_present = present,
+            AsrProvider::Gemini => self.gemini_key_present = present,
+        }
+        cx.notify();
+    }
+
+    fn new_with_options(
+        dir: PathBuf,
+        allow_legacy_migration: bool,
+        start_external: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut notices = Vec::new();
         // The rename to Friston moved the data folder; tests that redirect it never had one.
         let legacy_data = legacy::legacy_sibling(&dir);
-        let data_moved = !data_dir_overridden()
+        let data_moved = allow_legacy_migration
             && match legacy::move_folder(&legacy_data, &dir) {
                 Ok(FolderMove::Moved) => true,
                 Ok(FolderMove::BothExist) => {
@@ -391,7 +577,7 @@ impl AppState {
         {
             notices.push((NoticeKind::Error, e.to_string()));
         }
-        if !data_dir_overridden() {
+        if allow_legacy_migration {
             let new_rec = default_recordings_dir();
             let old_rec = legacy::legacy_sibling(&new_rec);
             match legacy::migrate_recordings(&store, &cfg, &old_rec, &new_rec) {
@@ -483,13 +669,24 @@ impl AppState {
             inputs: Loadable::Idle,
             sources: Loadable::Idle,
             permissions: Loadable::Idle,
-            codex: Loadable::Loading,
+            codex: if start_external {
+                Loadable::Loading
+            } else {
+                Loadable::Idle
+            },
             codex_models: Loadable::Idle,
-            agy_models: Loadable::Idle,
+            openai_asr_models: Loadable::Idle,
+            gemini_asr_models: Loadable::Idle,
             embed_status: Loadable::Idle,
             llm_status: Loadable::Idle,
             index_stats: None,
             byok_key_present: false,
+            openai_key_present: false,
+            gemini_key_present: false,
+            openai_admin_key_present: false,
+            openai_usage: ProviderUsageSummary::default(),
+            gemini_usage: ProviderUsageSummary::default(),
+            openai_org_costs: Loadable::Idle,
             hf_token_present: false,
             model_download: None,
             enrolling: None,
@@ -498,22 +695,28 @@ impl AppState {
             floating: None,
             startup_notices: notices,
         };
-        state.ensure_meeting_engine(cx);
+        if start_external {
+            state.ensure_meeting_engine(cx);
+        }
         state.refresh_meetings(cx);
         state.refresh_people(cx);
         state.refresh_stats(cx);
-        state.refresh_codex(cx);
-        state.refresh_key_presence(cx);
-        state.refresh_hf_token(cx);
-        // Load every configured model at launch, so the first search, meeting or local
-        // minutes run does not wait. The minutes model follows the embedding load
-        // (`autoload_llm`) because both live in the same `mm-embedd` process.
-        if let Some(dir) = state.cfg.embedding_model_dir.clone() {
-            state.load_embedding(dir, cx);
-        } else if state.cfg.auto_download_embedding {
-            state.load_default_embedding(cx);
-        } else {
-            state.autoload_local_llm(cx);
+        state.refresh_asr_usage(cx);
+        if start_external {
+            state.refresh_codex(cx);
+            state.refresh_key_presence(cx);
+            state.refresh_asr_keys(cx);
+            state.refresh_hf_token(cx);
+            // Load every configured model at launch, so the first search, meeting or local
+            // minutes run does not wait. The minutes model follows the embedding load
+            // (`autoload_llm`) because both live in the same `mm-embedd` process.
+            if let Some(dir) = state.cfg.embedding_model_dir.clone() {
+                state.load_embedding(dir, cx);
+            } else if state.cfg.auto_download_embedding {
+                state.load_default_embedding(cx);
+            } else {
+                state.autoload_local_llm(cx);
+            }
         }
         state
     }
@@ -759,6 +962,48 @@ impl AppState {
                     && let Some(x) = c.lateral()
                 {
                     live.positions.apply(&c.speaker, x, c.confidence);
+                }
+            }
+            MeetingNotice::Usage(u) => {
+                if u.session_id == live.started.session_id
+                    && let Some(provider) = AsrProvider::parse(&u.provider)
+                {
+                    let meeting_id = live.meeting.id;
+                    let (pricing_mode, mode_tag) = match u.mode.unwrap_or(CloudLiveMode::Streaming)
+                    {
+                        CloudLiveMode::Streaming => (AsrMode::Live, AsrMode::Live.as_str()),
+                        CloudLiveMode::Utterance => (AsrMode::Refine, "live_utterance"),
+                    };
+                    let cost_usd = asr_pricing::estimate_cost_usd(
+                        provider,
+                        pricing_mode,
+                        &u.model,
+                        u.audio_ms,
+                        u.input_tokens,
+                        u.output_tokens,
+                    );
+                    let rec = AsrUsageRecord {
+                        recorded_at: Utc::now(),
+                        meeting_id: Some(meeting_id),
+                        provider: provider.as_str().to_string(),
+                        mode: mode_tag.to_string(),
+                        model: u.model,
+                        audio_ms: u.audio_ms,
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                        cost_usd,
+                    };
+                    self.writer.send(WriteMsg::AsrUsage(rec));
+                    let summary = match provider {
+                        AsrProvider::OpenAi => &mut self.openai_usage,
+                        AsrProvider::Gemini => &mut self.gemini_usage,
+                    };
+                    summary
+                        .month
+                        .add(u.audio_ms, cost_usd, u.input_tokens, u.output_tokens);
+                    summary
+                        .total
+                        .add(u.audio_ms, cost_usd, u.input_tokens, u.output_tokens);
                 }
             }
             MeetingNotice::Other { .. } => {}
@@ -1321,38 +1566,70 @@ impl AppState {
         );
     }
 
-    /// Lists the models the Antigravity CLI offers.
+    /// Fetches available cloud transcription models for `provider` using its Keychain API key.
     ///
-    /// Params: `cx`.
-    pub fn refresh_agy_models(&mut self, cx: &mut Context<Self>) {
-        self.agy_models = Loadable::Loading;
+    /// Params: `provider`; `cx`.
+    pub fn refresh_asr_models(&mut self, provider: AsrProvider, cx: &mut Context<Self>) {
+        match provider {
+            AsrProvider::OpenAi => self.openai_asr_models = Loadable::Loading,
+            AsrProvider::Gemini => self.gemini_asr_models = Loadable::Loading,
+        }
         cx.notify();
         bg(
             cx,
-            || -> Result<Vec<ModelOption>, String> {
-                let agy = mm_llm::antigravity::find_agy()
-                    .ok_or_else(|| tr!("没有找到 agy", "agy not found").to_string())?;
-                mm_llm::antigravity::list_models(&agy).map_err(|e| e.to_string())
+            move || -> Result<AsrModelList, String> {
+                let account = match provider {
+                    AsrProvider::OpenAi => byok::OPENAI_KEY_ACCOUNT,
+                    AsrProvider::Gemini => byok::GEMINI_KEY_ACCOUNT,
+                };
+                let key = byok::read_account_key(account)
+                    .map_err(|e| e.to_string())?
+                    .map(|k| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+                    .ok_or_else(|| match provider {
+                        AsrProvider::OpenAi => tr!(
+                            "尚未保存 OpenAI API 密钥，无法拉取模型列表。",
+                            "No OpenAI API key saved to fetch models."
+                        )
+                        .to_string(),
+                        AsrProvider::Gemini => tr!(
+                            "尚未保存 Gemini API 密钥，无法拉取模型列表。",
+                            "No Gemini API key saved to fetch models."
+                        )
+                        .to_string(),
+                    })?;
+                match provider {
+                    AsrProvider::OpenAi => mm_llm::openai_asr::list_models(&key),
+                    AsrProvider::Gemini => mm_llm::gemini_asr::list_models(&key),
+                }
+                .map_err(|e| e.to_string())
             },
-            |this, res, cx| {
-                this.agy_models = match res {
+            move |this, res, cx| {
+                let state = match res {
                     Ok(m) => Loadable::Ready(m),
                     Err(e) => Loadable::Failed(e.into()),
                 };
+                match provider {
+                    AsrProvider::OpenAi => this.openai_asr_models = state,
+                    AsrProvider::Gemini => this.gemini_asr_models = state,
+                }
                 cx.notify();
             },
         );
     }
 
-    /// Loads both model lists once; later loads only happen through the refresh buttons.
+    /// Loads model lists once; later loads only happen through the refresh buttons or key saves.
     ///
     /// Params: `cx`.
     pub fn ensure_model_lists(&mut self, cx: &mut Context<Self>) {
         if matches!(self.codex_models, Loadable::Idle) {
             self.refresh_codex_models(cx);
         }
-        if matches!(self.agy_models, Loadable::Idle) {
-            self.refresh_agy_models(cx);
+        if self.openai_key_present && matches!(self.openai_asr_models, Loadable::Idle) {
+            self.refresh_asr_models(AsrProvider::OpenAi, cx);
+        }
+        if self.gemini_key_present && matches!(self.gemini_asr_models, Loadable::Idle) {
+            self.refresh_asr_models(AsrProvider::Gemini, cx);
         }
     }
 
@@ -1619,6 +1896,25 @@ impl AppState {
         cx.notify();
     }
 
+    /// Updates cached key presence and fetches or clears dynamic ASR models after a Keychain write.
+    fn sync_asr_key_change(&mut self, account: &str, saved: bool, cx: &mut Context<Self>) {
+        if account == byok::OPENAI_KEY_ACCOUNT {
+            self.openai_key_present = saved;
+            if saved {
+                self.refresh_asr_models(AsrProvider::OpenAi, cx);
+            } else {
+                self.openai_asr_models = Loadable::Idle;
+            }
+        } else if account == byok::GEMINI_KEY_ACCOUNT {
+            self.gemini_key_present = saved;
+            if saved {
+                self.refresh_asr_models(AsrProvider::Gemini, cx);
+            } else {
+                self.gemini_asr_models = Loadable::Idle;
+            }
+        }
+    }
+
     /// Stores or deletes the BYOK key in the Keychain.
     ///
     /// Params: `key` – `None` deletes; `cx`.
@@ -1634,13 +1930,15 @@ impl AppState {
             );
             return;
         };
+        let account = byok::keychain_account(&p);
         bg(
             cx,
             move || mm_llm::byok::write_key(&p, key.as_deref()).map(|_| key.is_some()),
-            |this, res, cx| {
+            move |this, res, cx| {
                 match res {
                     Ok(saved) => {
                         this.byok_key_present = saved;
+                        this.sync_asr_key_change(account, saved, cx);
                         let msg = if saved {
                             tr!("API 密钥已保存到钥匙串。", "API key saved to Keychain.")
                         } else {
@@ -1653,6 +1951,202 @@ impl AppState {
                         trf!("写入钥匙串失败：{e}", "Couldn’t write to the Keychain: {e}"),
                         cx,
                     ),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Checks whether the independent cloud ASR API keys are stored in the Keychain.
+    ///
+    /// Params: `cx`.
+    pub fn refresh_asr_keys(&mut self, cx: &mut Context<Self>) {
+        bg(
+            cx,
+            || -> Result<(bool, bool, bool), String> {
+                let has = |account: &str| {
+                    byok::read_account_key(account)
+                        .map(|k| k.is_some_and(|v| !v.trim().is_empty()))
+                        .map_err(|e| e.to_string())
+                };
+                Ok((
+                    has(byok::OPENAI_KEY_ACCOUNT)?,
+                    has(byok::GEMINI_KEY_ACCOUNT)?,
+                    has(byok::OPENAI_ADMIN_KEY_ACCOUNT)?,
+                ))
+            },
+            |this, res, cx| {
+                match res {
+                    Ok((openai, gemini, admin)) => {
+                        this.openai_key_present = openai;
+                        this.gemini_key_present = gemini;
+                        this.openai_admin_key_present = admin;
+                        if openai && matches!(this.openai_asr_models, Loadable::Idle) {
+                            this.refresh_asr_models(AsrProvider::OpenAi, cx);
+                        }
+                        if gemini && matches!(this.gemini_asr_models, Loadable::Idle) {
+                            this.refresh_asr_models(AsrProvider::Gemini, cx);
+                        }
+                    }
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!("读取钥匙串失败：{e}", "Couldn’t read the Keychain: {e}"),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Stores or deletes one independent cloud ASR / OpenAI Admin key in the Keychain.
+    ///
+    /// Params: `account` – Keychain account name; `key` – secret or `None` to remove; `cx`.
+    pub fn write_asr_key(
+        &mut self,
+        account: &'static str,
+        key: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let key = key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+        let expected_byok_account = self.cfg.byok.as_ref().map(byok::keychain_account);
+        bg(
+            cx,
+            move || {
+                byok::write_account_key(account, key.as_deref())
+                    .map(|_| key.is_some())
+                    .map_err(|e| e.to_string())
+            },
+            move |this, res, cx| {
+                match res {
+                    Ok(saved) => {
+                        if account == byok::OPENAI_ADMIN_KEY_ACCOUNT {
+                            this.openai_admin_key_present = saved;
+                            if !saved {
+                                this.openai_org_costs = Loadable::Idle;
+                            }
+                        } else {
+                            this.sync_asr_key_change(account, saved, cx);
+                        }
+                        if expected_byok_account == Some(account) {
+                            this.byok_key_present = saved;
+                        }
+                        let msg = if saved {
+                            tr!("API 密钥已保存到钥匙串。", "API key saved to Keychain.")
+                        } else {
+                            tr!("API 密钥已删除。", "API key removed.")
+                        };
+                        this.notify(NoticeKind::Success, msg, cx);
+                    }
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!("写入钥匙串失败：{e}", "Couldn’t write to the Keychain: {e}"),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Refreshes local cumulative cloud ASR usage for OpenAI and Google Gemini from SQLite.
+    ///
+    /// Params: `cx`.
+    pub fn refresh_asr_usage(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        let month_start = logic::local_month_start_utc(Local::now());
+        bg(
+            cx,
+            move || -> Result<(ProviderUsageSummary, ProviderUsageSummary), String> {
+                let s = lock(&store)?;
+                let openai = s
+                    .asr_usage_summary(AsrProvider::OpenAi.as_str(), month_start)
+                    .map_err(|e| e.to_string())?;
+                let gemini = s
+                    .asr_usage_summary(AsrProvider::Gemini.as_str(), month_start)
+                    .map_err(|e| e.to_string())?;
+                Ok((openai, gemini))
+            },
+            |this, res, cx| {
+                if let Ok((openai, gemini)) = res {
+                    this.openai_usage = openai;
+                    this.gemini_usage = gemini;
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    /// Clears locally accumulated cloud ASR usage rows (`None` clears all providers).
+    ///
+    /// Params: `provider` – `"openai"`, `"gemini"`, or `None`; `cx`.
+    pub fn clear_asr_usage(&mut self, provider: Option<&'static str>, cx: &mut Context<Self>) {
+        let store = self.store.clone();
+        bg(
+            cx,
+            move || -> Result<(), String> {
+                let s = lock(&store)?;
+                s.clear_asr_usage(provider).map_err(|e| e.to_string())?;
+                Ok(())
+            },
+            |this, res, cx| {
+                match res {
+                    Ok(()) => {
+                        this.refresh_asr_usage(cx);
+                        this.notify(
+                            NoticeKind::Success,
+                            tr!(
+                                "本机转写花费统计已重置。",
+                                "Local transcription spend stats reset."
+                            ),
+                            cx,
+                        );
+                    }
+                    Err(e) => this.notify(
+                        NoticeKind::Error,
+                        trf!("重置统计失败：{e}", "Couldn’t reset stats: {e}"),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Queries OpenAI organization-wide billing spend for the current calendar month using the
+    /// optional Admin API key (`sk-admin-...`).
+    ///
+    /// Params: `cx`.
+    pub fn sync_openai_costs(&mut self, cx: &mut Context<Self>) {
+        self.openai_org_costs = Loadable::Loading;
+        cx.notify();
+        let start = logic::local_month_start_utc(Local::now()).timestamp();
+        let end = Utc::now().timestamp();
+        bg(
+            cx,
+            move || -> Result<OpenAiCostsReport, String> {
+                let admin_key = byok::read_account_key(byok::OPENAI_ADMIN_KEY_ACCOUNT)
+                    .map_err(|e| e.to_string())?
+                    .filter(|k| !k.trim().is_empty())
+                    .ok_or_else(|| {
+                        tr!(
+                            "查询组织账单需要 OpenAI Admin API 密钥（sk-admin-…）。普通项目密钥仅用于转写，不会影响正常使用。",
+                            "Checking org billing requires an OpenAI Admin API key (sk-admin-…). Standard project keys still work for transcription without it.",
+                        )
+                        .to_string()
+                    })?;
+                openai_costs::fetch_openai_costs(&admin_key, start, Some(end))
+                    .map_err(|e| e.to_string())
+            },
+            |this, res, cx| {
+                match res {
+                    Ok(report) => {
+                        this.openai_org_costs = Loadable::Ready(report);
+                    }
+                    Err(e) => {
+                        this.openai_org_costs = Loadable::Failed(LoadError::from(e.clone()));
+                        this.notify(NoticeKind::Error, e, cx);
+                    }
                 }
                 cx.notify();
             },
@@ -1818,7 +2312,7 @@ impl AppState {
             cx,
             move || -> Result<_, String> {
                 let mut meeting = meeting;
-                let (note, preset, directory) = {
+                let (note, mut preset, directory) = {
                     let s = lock(&store)?;
                     let note =
                         flow::ensure_note(&cfg, &s, &mut meeting, &attendees).map_err(|e| {
@@ -1840,6 +2334,11 @@ impl AppState {
                     let dir = flow::directory_for(&s, meeting.id).map_err(|e| e.to_string())?;
                     (note, preset, dir)
                 };
+                let (live_asr, live_warning) = match flow::resolve_live_asr(&cfg) {
+                    Ok(c) => (c, None),
+                    Err(w) => (None, Some(w)),
+                };
+                preset.live_asr = live_asr;
                 // Without Screen Recording permission, keep the meeting going on the microphone
                 // alone rather than failing the whole start.
                 let (started, degraded) = match engine.capture_start(&preset) {
@@ -1878,13 +2377,24 @@ impl AppState {
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .map(|md| flow::notes_section(&md))
                     .unwrap_or_default();
-                Ok((meeting, note, started, directory, notes, degraded))
+                Ok((
+                    meeting,
+                    note,
+                    started,
+                    directory,
+                    notes,
+                    degraded,
+                    live_warning,
+                ))
             },
             move |this, res, cx| {
                 this.live_starting = false;
                 match res {
-                    Ok((meeting, note_path, started, directory, notes, degraded)) => {
+                    Ok((meeting, note_path, started, directory, notes, degraded, live_warning)) => {
                         if let Some(warning) = degraded {
+                            this.notify(NoticeKind::Warning, warning, cx);
+                        }
+                        if let Some(warning) = live_warning {
                             this.notify(NoticeKind::Warning, warning, cx);
                         }
                         let mut board = CaptionBoard::default();
@@ -2190,6 +2700,7 @@ impl AppState {
                 this.run_next_post(cx);
                 this.refresh_meetings(cx);
                 this.refresh_stats(cx);
+                this.refresh_asr_usage(cx);
                 cx.notify();
             },
         );

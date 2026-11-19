@@ -8,8 +8,8 @@
 //! * [`live`] – live caption board and speaker names/hues.
 //! * [`flow`] – note → recording → transcript → minutes steps of one meeting.
 //! * [`indexer`] – vault watcher, debouncing and background embedding.
-//! * [`external`] – preparing recordings for an external speech model (Antigravity) and
-//!   mapping what it heard back onto this meeting's speakers.
+//! * [`external`] – mapping externally transcribed sentences (e.g. Codex unified pass)
+//!   back onto this meeting's speakers.
 //! * [`hub`] – downloading model checkpoints from Hugging Face (token in the Keychain).
 
 pub mod config;
@@ -21,7 +21,8 @@ pub mod indexer;
 pub mod legacy;
 pub mod live;
 
-pub use config::{AppConfig, RefineBackend, data_dir, models_dir};
+pub use config::{AppConfig, LiveAsrBackend, RefineBackend, data_dir, models_dir};
+pub use mm_core::CloudLiveMode;
 
 /// Errors surfaced to the UI. Messages carry the path, method or value involved.
 ///

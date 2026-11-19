@@ -1,5 +1,6 @@
 //! Small shared building blocks for pages: headings, cards, tags, speaker colours.
 
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::tag::Tag;
@@ -100,19 +101,21 @@ pub fn caption_text(text: &str, stable_bytes: usize, tail: Hsla) -> StyledText {
 /// Params: `title`; `sub`; `cx`.
 /// Returns: the header element.
 pub fn page_head(title: impl Into<SharedString>, sub: impl Into<SharedString>, cx: &App) -> Div {
+    let title = title.into();
+    let sub = sub.into();
     v_flex()
         .gap_1()
         .child(
             div()
                 .text_xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(title.into()),
+                .child(title.clone().test_text(title)),
         )
         .child(
             div()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(sub.into()),
+                .child(sub.clone().test_text(sub)),
         )
 }
 
@@ -121,10 +124,11 @@ pub fn page_head(title: impl Into<SharedString>, sub: impl Into<SharedString>, c
 /// Params: `title`.
 /// Returns: the element.
 pub fn section_title(title: impl Into<SharedString>) -> Div {
+    let title = title.into();
     div()
         .text_sm()
         .font_weight(FontWeight::SEMIBOLD)
-        .child(title.into())
+        .child(title.clone().test_text(title))
 }
 
 /// Bordered card container.
@@ -146,10 +150,11 @@ pub fn card(cx: &App) -> Div {
 /// Params: `text`; `cx`.
 /// Returns: the element.
 pub fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
+    let text = text.into();
     div()
         .text_sm()
         .text_color(cx.theme().muted_foreground)
-        .child(text.into())
+        .child(text.clone().test_text(text))
 }
 
 /// Status tag of a meeting.
@@ -157,13 +162,14 @@ pub fn muted(text: impl Into<SharedString>, cx: &App) -> Div {
 /// Params: `s`.
 /// Returns: a coloured tag.
 pub fn status_tag(s: MeetingStatus) -> Tag {
+    let label: SharedString = logic::status_label(s).into();
     let tag = match s {
         MeetingStatus::Done => Tag::success(),
         MeetingStatus::Live => Tag::danger(),
         MeetingStatus::Processing => Tag::warning(),
         _ => Tag::secondary(),
     };
-    tag.small().child(logic::status_label(s))
+    tag.small().child(label.clone().test_text(label))
 }
 
 /// A row showing a load error; permission errors get a button to System Settings.
@@ -172,13 +178,14 @@ pub fn status_tag(s: MeetingStatus) -> Tag {
 /// Returns: the element.
 pub fn load_error(id: impl Into<ElementId>, err: &LoadError, cx: &App) -> Div {
     let url = logic::privacy_settings_url(&err.message);
+    let msg: SharedString = err.message.clone().into();
     h_flex()
         .gap_2()
         .items_center()
         .text_sm()
         .text_color(cx.theme().danger)
         .child(Icon::new(IconName::TriangleAlert).small())
-        .child(div().flex_1().child(err.message.clone()))
+        .child(div().flex_1().child(msg.clone().test_text(msg)))
         .when(err.permission, |el| {
             el.child(
                 Button::new(id)
@@ -208,6 +215,7 @@ pub fn loading(text: impl Into<SharedString>, cx: &App) -> Div {
 /// Returns: the element.
 pub fn speaker_name(name: impl Into<SharedString>, hue: Option<u16>) -> Div {
     let color = hue_color(hue);
+    let name = name.into();
     h_flex()
         .gap_1()
         .items_center()
@@ -217,7 +225,7 @@ pub fn speaker_name(name: impl Into<SharedString>, hue: Option<u16>) -> Div {
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color)
-                .child(name.into()),
+                .child(name.clone().test_text(name)),
         )
 }
 

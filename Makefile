@@ -1,5 +1,5 @@
 # Meeting Master developer entry points. See README.md.
-.PHONY: bootstrap test test-rust test-swift engines engines-release run mockup lint
+.PHONY: bootstrap test test-rust test-swift engines engines-release run mockup lint e2e-probe e2e
 
 bootstrap:          ## Install / verify toolchains and resolve dependencies
 	scripts/bootstrap.sh
@@ -27,3 +27,9 @@ mockup:             ## Rebuild design/mockups/index.html
 lint:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
+
+e2e-probe:          ## Deterministic GUI E2E + real engine capability & live-caption probes
+	scripts/run-e2e.sh --probe
+
+e2e:                ## Full E2E suite (GUI + local engines + Codex/cloud when configured)
+	scripts/run-e2e.sh --full

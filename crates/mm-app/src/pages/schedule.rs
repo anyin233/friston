@@ -1,6 +1,7 @@
 //! 日程: the next seven days from the system calendar.
 
 use chrono::Local;
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
@@ -39,12 +40,10 @@ impl SchedulePage {
                 .child(
                     v_flex()
                         .w(px(110.))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(logic::time_span(ev.start, ev.end)),
-                        )
+                        .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).child({
+                            let span: SharedString = logic::time_span(ev.start, ev.end).into();
+                            span.clone().test_text(span)
+                        }))
                         .child(ui::muted(
                             logic::relative_start(now(), ev.start, ev.end),
                             cx,
@@ -55,11 +54,9 @@ impl SchedulePage {
                         .flex_1()
                         .min_w_0()
                         .gap_1()
-                        .child(
-                            div()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(ev.title.clone()),
-                        )
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(
+                            SharedString::from(ev.title.clone()).test_text(ev.title.clone()),
+                        ))
                         .child(ui::muted(
                             [Some(ev.calendar.clone()), ev.location.clone()]
                                 .into_iter()

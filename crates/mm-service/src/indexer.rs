@@ -80,21 +80,26 @@ fn watch(
     vault: &Path,
     tx: async_channel::Sender<IndexerMsg>,
 ) -> Result<notify::RecommendedWatcher, ServiceError> {
-    let root = vault.to_path_buf();
+    let vault_root = vault.to_path_buf();
+    let canonical_root = std::fs::canonicalize(vault).unwrap_or_else(|_| vault_root.clone());
     let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
         Ok(ev) => {
             for p in ev.paths {
                 let is_note = p.extension().is_some_and(|e| e == "md");
                 // Only folders *inside* the vault count (.obsidian, .trash); the vault itself may live under a dot folder.
-                let hidden = p
-                    .strip_prefix(&root)
-                    .map(|rel| {
-                        rel.components()
-                            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-                    })
-                    .unwrap_or(true);
-                if is_note && !hidden {
-                    let _ = tx.send_blocking(IndexerMsg::Touch(p, Priority::Interactive));
+                let rel = p
+                    .strip_prefix(&canonical_root)
+                    .or_else(|_| p.strip_prefix(&vault_root));
+                if is_note
+                    && let Ok(rel) = rel
+                    && !rel
+                        .components()
+                        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+                {
+                    let _ = tx.send_blocking(IndexerMsg::Touch(
+                        vault_root.join(rel),
+                        Priority::Interactive,
+                    ));
                 }
             }
         }
@@ -131,15 +136,15 @@ fn run(
             need_scan = false;
             watcher = None;
             if let Some(v) = &vault {
+                match watch(v, self_tx.clone()) {
+                    Ok(w) => watcher = Some(w),
+                    Err(e) => report(e.to_string()),
+                }
                 match scan_vault(&mut store.lock().expect("store lock"), v) {
                     Ok(_) => {
                         let _ = events.send_blocking(IndexerEvent::Updated { embedded: 0 });
                     }
                     Err(e) => report(format!("scanning vault {}: {e}", v.display())),
-                }
-                match watch(v, self_tx.clone()) {
-                    Ok(w) => watcher = Some(w),
-                    Err(e) => report(e.to_string()),
                 }
             }
         }
@@ -249,16 +254,43 @@ mod tests {
         let (ix, events) = Indexer::start(store.clone(), Some(vault.clone()));
         ix.send(IndexerMsg::SetEmbedder(Some(Arc::new(OneHot))));
 
-        // Edit the note; the watcher + debouncer must pick it up.
+        let init_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let s = store.lock().unwrap().index_stats(&current_stamp()).unwrap();
+            if s.sources == 1 && s.chunks == 1 && s.embedded == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < init_deadline,
+                "initial scan/embed did not converge: {s:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Write a new note; the watcher + debouncer must pick it up.
         std::thread::sleep(Duration::from_millis(300));
-        std::fs::write(vault.join("b.md"), "# 发布计划\n\n上线").unwrap();
+        let b_path = vault.join("b.md");
+        std::fs::write(&b_path, "# 发布计划\n\n上线").unwrap();
+        let mut write_at = Instant::now();
+        let mut rewrites = 0u32;
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let s = store.lock().unwrap().index_stats(&current_stamp()).unwrap();
             if s.sources == 2 && s.embedded == s.chunks && s.chunks == 2 {
                 break;
             }
-            assert!(Instant::now() < deadline, "indexer did not converge: {s:?}");
+            if rewrites < 2 && write_at.elapsed() >= Duration::from_secs(3) {
+                std::fs::write(&b_path, format!("# 发布计划\n\n上线 {rewrites}")).unwrap();
+                write_at = Instant::now();
+                rewrites += 1;
+            }
+            if Instant::now() >= deadline {
+                let mut seen = Vec::new();
+                while let Ok(ev) = events.try_recv() {
+                    seen.push(ev);
+                }
+                panic!("indexer did not converge: {s:?}; events={seen:?}");
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
         ix.send(IndexerMsg::Stop);

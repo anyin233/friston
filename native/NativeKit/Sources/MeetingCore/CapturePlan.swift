@@ -1,5 +1,39 @@
 import Foundation
 
+/// Upload strategy for cloud live captions.
+public enum CloudLiveMode: String, Codable, Sendable, Equatable {
+    case streaming
+    case utterance
+}
+
+/// Cloud live-streaming ASR configuration handed to `mm-meetingd` at `capture/start`.
+public struct LiveAsrConfig: Codable, Sendable, Equatable, CustomStringConvertible {
+    /// Cloud provider id: `"openai"` or `"gemini"`.
+    public var provider: String
+    /// Model id on that provider.
+    public var model: String
+    /// API key read from Keychain right before `capture/start`.
+    public var apiKey: String
+    /// Upload strategy (`streaming` = VAD-gated WebSocket; `utterance` = per-sentence HTTP).
+    public var mode: CloudLiveMode?
+
+    /// Effective upload mode, defaulting to `.streaming` when omitted by older callers.
+    public var effectiveMode: CloudLiveMode { mode ?? .streaming }
+
+    /// Creates a cloud live ASR config.
+    public init(provider: String, model: String, apiKey: String, mode: CloudLiveMode? = nil) {
+        self.provider = provider
+        self.model = model
+        self.apiKey = apiKey
+        self.mode = mode
+    }
+
+    /// Redacts the API key so logs never expose secrets.
+    public var description: String {
+        "LiveAsrConfig(provider: \(provider), model: \(model), mode: \(effectiveMode.rawValue), apiKey: <redacted>)"
+    }
+}
+
 /// `capture/start` params: what one recording session should capture.
 ///
 /// Wire keys are camelCase and must match `mm_core::CapturePreset` in `crates/mm-core/src/capture.rs`.
@@ -27,13 +61,15 @@ public struct CapturePreset: Codable, Sendable, Equatable {
     public var spatialFlip: Bool
     /// Distance between the two spatial mics in centimetres; enables `azimuthDeg`. `nil` = unknown.
     public var spatialSpacingCm: Double?
+    /// Optional cloud live-streaming ASR override; `nil` uses local Qwen3-ASR.
+    public var liveAsr: LiveAsrConfig?
 
     /// Creates a preset.
     /// - Parameters: see the stored properties; everything is optional and audio is off by default.
     public init(title: String? = nil, windowID: UInt32? = nil, displayID: UInt32? = nil, microphoneUID: String? = nil,
                 systemAudio: Bool = false, captionLanguage: String? = nil, fps: Int? = nil,
                 outputDirectory: String? = nil, voiceprints: [VoiceprintSample]? = nil,
-                spatialFlip: Bool = false, spatialSpacingCm: Double? = nil) {
+                spatialFlip: Bool = false, spatialSpacingCm: Double? = nil, liveAsr: LiveAsrConfig? = nil) {
         self.title = title
         self.windowID = windowID
         self.displayID = displayID
@@ -45,6 +81,7 @@ public struct CapturePreset: Codable, Sendable, Equatable {
         self.voiceprints = voiceprints
         self.spatialFlip = spatialFlip
         self.spatialSpacingCm = spatialSpacingCm
+        self.liveAsr = liveAsr
     }
 
     /// `microphoneUID` value meaning "the system default input", for apps that want the mic
@@ -54,7 +91,7 @@ public struct CapturePreset: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case title, windowID, displayID, microphoneUID, systemAudio, captionLanguage, fps, outputDirectory, voiceprints
-        case spatialFlip, spatialSpacingCm
+        case spatialFlip, spatialSpacingCm, liveAsr
     }
 
     /// Decodes a preset, treating a missing `systemAudio` or `spatialFlip` as `false`.
@@ -72,6 +109,7 @@ public struct CapturePreset: Codable, Sendable, Equatable {
         voiceprints = try c.decodeIfPresent([VoiceprintSample].self, forKey: .voiceprints)
         spatialFlip = try c.decodeIfPresent(Bool.self, forKey: .spatialFlip) ?? false
         spatialSpacingCm = try c.decodeIfPresent(Double.self, forKey: .spatialSpacingCm)
+        liveAsr = try c.decodeIfPresent(LiveAsrConfig.self, forKey: .liveAsr)
     }
 }
 

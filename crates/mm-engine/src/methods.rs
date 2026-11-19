@@ -33,6 +33,7 @@ pub mod meeting {
     // Notifications (engine → app)
     pub const N_CAPTION_PARTIAL: &str = "caption/partial";
     pub const N_CAPTION_FINAL: &str = "caption/final";
+    pub const N_CAPTION_USAGE: &str = "caption/usage";
     pub const N_SPEAKER_RELABEL: &str = "speaker/relabel";
     pub const N_SPATIAL_CUE: &str = "spatial/cue";
     pub const N_AUDIO_LEVELS: &str = "audio/levels";

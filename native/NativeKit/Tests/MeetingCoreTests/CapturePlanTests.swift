@@ -124,3 +124,31 @@ private let builtIn = AudioInputInfo(uid: "BuiltInMicrophoneDevice", name: "MacB
     // Plain paths, not file:// URLs, so the Rust side reads them as PathBuf.
     #expect(String(decoding: files, as: UTF8.self) == #"{"microphone":"/tmp/a b/mic.caf"}"#)
 }
+
+@Test func liveAsrConfigRoundTripsAndRedactsDescription() throws {
+    let cfg = LiveAsrConfig(provider: "gemini", model: "gemini-3.5-transcribe-live", apiKey: "AIza-secret")
+    #expect(!cfg.description.contains("AIza-secret"))
+    #expect(cfg.description.contains("<redacted>"))
+    #expect(cfg.effectiveMode == .streaming)
+    let preset = CapturePreset(systemAudio: true, liveAsr: cfg)
+    let data = try JSONEncoder().encode(preset)
+    let back = try JSONDecoder().decode(CapturePreset.self, from: data)
+    #expect(back == preset)
+
+    // Backwards compatibility when `mode` is omitted on the wire.
+    let legacyJSON = #"{"provider":"openai","model":"gpt-live-transcribe","apiKey":"sk-abc"}"#
+    let legacy = try JSONDecoder().decode(LiveAsrConfig.self, from: Data(legacyJSON.utf8))
+    #expect(legacy.effectiveMode == .streaming)
+
+    // Explicit `utterance` mode round-trips on both LiveAsrConfig and CaptionUsageEvent.
+    let uttCfg = LiveAsrConfig(provider: "openai", model: "gpt-transcribe", apiKey: "sk-abc", mode: .utterance)
+    let uttData = try JSONEncoder().encode(uttCfg)
+    let uttBack = try JSONDecoder().decode(LiveAsrConfig.self, from: uttData)
+    #expect(uttBack.effectiveMode == .utterance)
+
+    let usage = CaptionUsageEvent(sessionId: "s1", provider: "openai", model: "gpt-transcribe",
+                                  origin: .microphone, audioMs: 2400, inputTokens: 10, outputTokens: 5,
+                                  mode: .utterance)
+    let usageBack = try JSONDecoder().decode(CaptionUsageEvent.self, from: JSONEncoder().encode(usage))
+    #expect(usageBack == usage)
+}

@@ -27,7 +27,7 @@
 | `transcribe/file` | ✅ | 见下方“整段转写”；会后精转写（Qwen3-ASR 1.7B + Pyannote 分离） |
 | `caption/simulateFile` | ✅ | 见下方“用文件模拟实时字幕”；不需要麦克风或屏幕录制权限 |
 | `models/preload` | ✅ | 预先加载实时字幕模型，见“录制”一节 |
-| `caption/partial` · `caption/final` · `speaker/relabel` | ✅ 通知 | 见下方“实时字幕” |
+| `caption/partial` · `caption/final` · `caption/usage` · `speaker/relabel` | ✅ 通知 | 见下方“实时字幕” |
 | `audio/levels` · `capture/state` | ✅ 通知 | 电平：`{sessionId,source,rmsDb[],peakDb[]}`，每路最多 100 ms 一次；状态：`{sessionId,state,error?}` |
 | `spatial/cue` | ✅ 通知 | 方位，见下方“实时字幕” |
 
@@ -47,6 +47,7 @@
 | `voiceprints` | 可选，预录声纹 `[{personId, model, vector:[Float]}]`；`model` 与 `initialize` 返回的 `capabilities.speakerEmbeddingModel` 不同的向量会被忽略 |
 | `spatialFlip` | 可选，默认 `false`。左右翻转：交换方位分析用的两个声道，所有方位线索镜像 |
 | `spatialSpacingCm` | 可选，两支麦克风的间距（厘米）。知道间距时引擎会给出 `azimuthDeg`；硬件预设（如 ReSpeaker）自带的间距优先 |
+| `liveAsr` | 可选，`{provider, model, apiKey}`。指定云端实时字幕提供方（`"openai"` 或 `"gemini"`）时跳过本地 Qwen3-ASR，仅保留 Silero VAD、WeSpeaker、Sortformer 与方位线索，并走 WebSocket 流式转写；失败时回退到本地 Qwen3-ASR |
 
 `initialize` 的 `capabilities.models` 列出实际使用的模型：`liveASR`、`offlineASR`、`vad`、`speakerEmbedding`、`segmentation`、`liveDiarization`（实时 Sortformer）。
 
@@ -73,6 +74,7 @@
 | --- | --- |
 | `caption/partial` | `{sessionId, utteranceId, origin, startMs, text, speaker, stableChars}`，同一 `utteranceId` 的新 partial 替换旧的。`stableChars` 是 `text` 开头不会再变的 Unicode 标量（Rust `char`）个数，其余部分界面用浅色显示；旧引擎不发这个字段，按 0 处理 |
 | `caption/final` | `{sessionId, utteranceId, origin, startMs, endMs, text, language?, speaker, spatial?}`，收到后撤掉该句的 partial |
+| `caption/usage` | `{sessionId, provider, model, origin, audioMs, inputTokens, outputTokens}`，云端实时字幕每句定稿时发送一次，供应用侧累计时长、Token 与估算费用 |
 | `spatial/cue` | `{sessionId, utteranceId, origin, startMs, endMs, position:[Float], confidence, azimuthDeg?, speaker}`，紧跟在同一句的 `caption/final` 之后 |
 | `speaker/relabel` | `{sessionId, from, to}`：本场所有标为 `from` 的字幕改标为 `to`（匿名簇被认出是预录的人，或两个簇合并） |
 

@@ -3,6 +3,7 @@
 //! On macOS the panel follows the user onto every Space, including other apps' full-screen
 //! Spaces, and never takes focus from the app they are working in.
 
+use gpui_kit::base::TestTextExt as _;
 use gpui_kit::component::{IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -127,11 +128,17 @@ impl Render for FloatingCaptions {
                     .text_xs()
                     .text_color(dim)
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
-                    .child(div().flex_1().child(title))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(SharedString::from(title.clone()).test_text(title)),
+                    )
                     .child(
                         div()
                             .id("float-close")
+                            .test_support()
                             .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 gpui_kit::component::Icon::new(IconName::Close)
                                     .small()
@@ -147,10 +154,12 @@ impl Render for FloatingCaptions {
                     ),
             )
             .when(lines.is_empty(), |el| {
+                let waiting: SharedString =
+                    tr!("等待有人发言…", "Waiting for someone to speak…").into();
                 el.child(
                     div()
                         .text_color(dim)
-                        .child(tr!("等待有人发言…", "Waiting for someone to speak…")),
+                        .child(waiting.clone().test_text(waiting)),
                 )
             })
             .children(
@@ -167,7 +176,7 @@ impl Render for FloatingCaptions {
                                     .flex_none()
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(ui::hue_color(hue))
-                                    .child(name),
+                                    .child(SharedString::from(name.clone()).test_text(name)),
                             )
                             .child(
                                 div()
@@ -178,7 +187,8 @@ impl Render for FloatingCaptions {
                                     // volatile tail is dimmed, so new words grow in place.
                                     .text_color(if last { ink } else { dim })
                                     .when(last, |el| el.text_xl())
-                                    .child(crate::ui::caption_text(&text, stable, dim)),
+                                    .child(crate::ui::caption_text(&text, stable, dim))
+                                    .test_text(text),
                             )
                     }),
             )

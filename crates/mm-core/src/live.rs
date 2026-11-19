@@ -45,6 +45,23 @@ pub struct CaptionFinal {
     pub spatial: Option<SpatialCue>,
 }
 
+/// `caption/usage`: cloud live-streaming ASR usage emitted per finalized utterance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionUsage {
+    pub session_id: String,
+    pub provider: String,
+    pub model: String,
+    pub origin: AudioOrigin,
+    pub audio_ms: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::CloudLiveMode>,
+}
+
 /// `speaker/relabel`: every caption labelled `from` is now `to`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -281,6 +298,22 @@ mod tests {
         )
         .expect("decode speaker/relabel");
         assert_eq!(relabel.to, SpeakerLabel::Cluster { index: 1 });
+
+        let usage: CaptionUsage = serde_json::from_str(
+            r#"{"sessionId":"s","provider":"openai","model":"gpt-live-transcribe","origin":"microphone","audioMs":4200,"inputTokens":120,"outputTokens":18}"#,
+        )
+        .expect("decode caption/usage");
+        assert_eq!(usage.provider, "openai");
+        assert_eq!(usage.audio_ms, 4200);
+        assert_eq!(usage.input_tokens, 120);
+        assert_eq!(usage.output_tokens, 18);
+        assert_eq!(usage.mode, None);
+
+        let utt_usage: CaptionUsage = serde_json::from_str(
+            r#"{"sessionId":"s","provider":"openai","model":"gpt-transcribe","origin":"microphone","audioMs":2400,"inputTokens":10,"outputTokens":5,"mode":"utterance"}"#,
+        )
+        .expect("decode utterance caption/usage");
+        assert_eq!(utt_usage.mode, Some(crate::CloudLiveMode::Utterance));
     }
 
     #[test]

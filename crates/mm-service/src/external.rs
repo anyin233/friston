@@ -1,42 +1,42 @@
-//! Post-meeting transcription by an external speech model (Gemini via `agy`).
+//! Post-meeting transcription helpers for external speech/agent models (Codex, OpenAI, Gemini).
 //!
-//! Two pure halves, so the orchestration in the app stays thin:
-//!
-//! * [`prepare_recordings`] turns the engine's `.caf` files into 16 kHz mono AAC parts of at
-//!   most [`CHUNK_MS`]. Long parts make the model's single JSON answer too long to finish
-//!   reliably; 10 minutes took 52 s and ~18k output tokens in testing. Silent tracks are
-//!   dropped: given a digitally silent system-audio file, a model can invent a whole meeting.
-//! * [`heard_to_segments`] maps the model's sentences onto this meeting's speakers. The
-//!   model's labels ("说话人1") only hold within one run, while the live diarization knows
-//!   enrolled people and keeps one hue per person, so identity comes from the live pass.
+//! Provides macOS `afconvert` chunking + silence-gated utterance segmentation for cloud audio
+//! endpoints, maps external sentences back onto this meeting's speakers, and provides WAV I/O
+//! helpers for synthesis and integration tests.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use mm_core::{AudioOrigin, MeetingId, SpeakerLabel, TranscriptSegment};
-use mm_llm::antigravity::{AudioTrack, HeardLine};
+use mm_llm::HeardLine;
 
 use crate::ServiceError;
 
-/// Longest audio part sent in one run.
+/// Longest audio part sent in one track-level run (safely below Gemini's 30-min diarization cap
+/// and OpenAI's 25 MB upload limit at 16 kHz mono AAC).
 pub const CHUNK_MS: u64 = 15 * 60 * 1000;
 
-/// Tracks quieter than this (RMS, dBFS) are treated as silent and not sent. Room noise on
-/// the built-in mic sits around −57 dBFS; a muted system-audio tap is digital zero.
+/// Maximum speech span when splitting audio for OpenAI models that omit segment timestamps.
+pub const DEFAULT_UTTERANCE_MS: u64 = 45 * 1000;
+
+/// Tracks quieter than this (RMS, dBFS) are treated as silent and dropped.
 pub const SILENCE_DBFS: f64 = -70.0;
 
-/// Sample rate of the prepared audio.
+/// Sample rate of prepared audio chunks.
 const RATE: u32 = 16_000;
 
-/// One part of the meeting, ready for a model run.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chunk {
-    /// Position of this part from the start of the recording.
+/// One prepared audio chunk on disk ready for cloud transcription.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedChunk {
+    /// Start offset relative to the beginning of the recording, in milliseconds.
     pub offset_ms: u64,
-    /// Working directory of the run: holds exactly `tracks`.
-    pub dir: PathBuf,
-    pub tracks: Vec<AudioTrack>,
+    /// Chunk duration, in milliseconds.
+    pub duration_ms: u64,
+    /// Recorded stream the chunk came from.
+    pub origin: AudioOrigin,
+    /// Absolute path to the `.m4a` chunk file inside the work directory.
+    pub path: PathBuf,
 }
 
 /// File stem used for a track.
@@ -47,10 +47,7 @@ fn stem(origin: AudioOrigin) -> &'static str {
     }
 }
 
-/// Runs macOS `afconvert`.
-///
-/// Params: `args` – arguments after the program name.
-/// Returns: `Ok(())` when it exits 0.
+/// Runs macOS `/usr/bin/afconvert`.
 fn afconvert(args: &[&str]) -> Result<(), ServiceError> {
     let out = Command::new("/usr/bin/afconvert")
         .args(args)
@@ -66,14 +63,149 @@ fn afconvert(args: &[&str]) -> Result<(), ServiceError> {
     }
 }
 
-/// Converts recordings into silent-free, size-limited parts under `work`.
+/// RMS level in dBFS.
 ///
-/// Params: `files` – `(origin, recording)` pairs; `work` – scratch folder, emptied first.
-/// Returns: the parts that contain sound, in time order.
-pub fn prepare_recordings(
+/// Params: `samples` – 16-bit PCM.
+/// Returns: the level; −∞ maps to −180 for empty or all-zero input.
+pub fn dbfs(samples: &[i16]) -> f64 {
+    if samples.is_empty() {
+        return -180.0;
+    }
+    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    let rms = (sum / samples.len() as f64).sqrt() / 32_768.0;
+    if rms <= 0.0 {
+        -180.0
+    } else {
+        20.0 * rms.log10()
+    }
+}
+
+/// Splits `len` samples into consecutive ranges of at most `per_chunk`.
+///
+/// Params: `len`; `per_chunk` – clamped to at least 1.
+/// Returns: the ranges (empty for `len == 0`).
+pub fn split_ranges(len: usize, per_chunk: usize) -> Vec<Range<usize>> {
+    (0..len)
+        .step_by(per_chunk.max(1))
+        .map(|start| start..(start + per_chunk.max(1)).min(len))
+        .collect()
+}
+
+/// Segments 16-bit PCM mono audio into active speech spans bounded by `max_span_ms`.
+///
+/// Uses 50 ms frame RMS energy with an adaptive noise-floor threshold, merges brief pauses
+/// (< 600 ms), adds 150 ms edge padding, drops short blips (< 250 ms), and splits long
+/// monologues at the quietest 100 ms window inside their final 10 seconds.
+///
+/// Params: `samples` – PCM samples; `rate` – sample rate (Hz); `max_span_ms` – max chunk length.
+/// Returns: non-overlapping active speech ranges in ascending sample order.
+pub fn find_speech_spans(samples: &[i16], rate: u32, max_span_ms: u64) -> Vec<Range<usize>> {
+    if samples.is_empty() || rate == 0 || dbfs(samples) < SILENCE_DBFS {
+        return Vec::new();
+    }
+    let frame = ((rate as usize * 50) / 1000).max(1);
+    let mut frame_dbs: Vec<f64> = samples.chunks(frame).map(dbfs).collect();
+    if frame_dbs.is_empty() {
+        return Vec::new();
+    }
+    let mut sorted = frame_dbs.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let p10 = sorted[(sorted.len() / 10).min(sorted.len() - 1)];
+    let threshold = (p10 + 10.0).clamp(-52.0, -35.0);
+
+    // Collect raw active spans.
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    let mut active_start: Option<usize> = None;
+    for (i, db) in frame_dbs.drain(..).enumerate() {
+        let s = i * frame;
+        let e = ((i + 1) * frame).min(samples.len());
+        if db >= threshold {
+            active_start.get_or_insert(s);
+        } else if let Some(start) = active_start.take() {
+            spans.push(start..e.saturating_sub(frame).max(start));
+        }
+    }
+    if let Some(start) = active_start {
+        spans.push(start..samples.len());
+    }
+    if spans.is_empty() {
+        return Vec::new();
+    }
+
+    // Merge pauses shorter than 600 ms, then pad by 150 ms and drop short blips (< 250 ms).
+    let merge_gap = (rate as usize * 600) / 1000;
+    let pad = (rate as usize * 150) / 1000;
+    let min_speech = (rate as usize * 250) / 1000;
+
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for span in spans {
+        if let Some(prev) = merged.last_mut()
+            && span.start <= prev.end + merge_gap
+        {
+            prev.end = prev.end.max(span.end);
+        } else {
+            merged.push(span);
+        }
+    }
+
+    let mut padded: Vec<Range<usize>> = Vec::new();
+    for span in merged {
+        if span.len() < min_speech {
+            continue;
+        }
+        let s = span.start.saturating_sub(pad);
+        let e = (span.end + pad).min(samples.len());
+        if let Some(prev) = padded.last_mut()
+            && s <= prev.end
+        {
+            prev.end = prev.end.max(e);
+        } else {
+            padded.push(s..e);
+        }
+    }
+
+    // Bound each span to `max_span_ms`, splitting near the quietest 100 ms window in its last 10 s.
+    let max_samples = ((rate as u64 * max_span_ms.max(1000)) / 1000) as usize;
+    let search_tail = (rate as usize) * 10;
+    let win = ((rate as usize * 100) / 1000).max(1);
+    let mut bounded = Vec::new();
+    for span in padded {
+        let mut cur = span.start;
+        while span.end - cur > max_samples {
+            let hard_end = cur + max_samples;
+            let search_start = hard_end
+                .saturating_sub(search_tail)
+                .max(cur + rate as usize);
+            let mut best_pos = hard_end;
+            if search_start + win < hard_end {
+                let mut best_db = f64::INFINITY;
+                let mut pos = search_start;
+                while pos + win <= hard_end {
+                    let db = dbfs(&samples[pos..pos + win]);
+                    if db < best_db {
+                        best_db = db;
+                        best_pos = pos + win / 2;
+                    }
+                    pos += win;
+                }
+            }
+            let cut = best_pos.clamp(cur + 1, span.end);
+            bounded.push(cur..cut);
+            cur = cut;
+        }
+        if span.end > cur {
+            bounded.push(cur..span.end);
+        }
+    }
+    bounded
+}
+
+/// Decodes each recording to 16 kHz mono PCM and writes `.m4a` chunks for the supplied ranges.
+fn prepare_with_ranges(
     files: &[(AudioOrigin, PathBuf)],
     work: &Path,
-) -> Result<Vec<Chunk>, ServiceError> {
+    plan_ranges: impl Fn(&[(AudioOrigin, Vec<i16>)]) -> Vec<(AudioOrigin, Range<usize>)>,
+) -> Result<Vec<PreparedChunk>, ServiceError> {
     match std::fs::remove_dir_all(work) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -86,6 +218,7 @@ pub fn prepare_recordings(
     }
     std::fs::create_dir_all(work)
         .map_err(|e| ServiceError::External(format!("creating {}: {e}", work.display())))?;
+
     let mut decoded = Vec::new();
     for (origin, src) in files {
         let wav = work.join(format!("{}-full.wav", stem(*origin)));
@@ -110,74 +243,89 @@ pub fn prepare_recordings(
             .map_err(|e| ServiceError::External(format!("removing {}: {e}", wav.display())))?;
         decoded.push((*origin, samples));
     }
-    let longest = decoded.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
-    let per_chunk = (CHUNK_MS * RATE as u64 / 1000) as usize;
+
     let mut chunks = Vec::new();
-    for (i, range) in split_ranges(longest, per_chunk).into_iter().enumerate() {
-        let dir = work.join(format!("part-{i:02}"));
-        let mut tracks = Vec::new();
-        for (origin, samples) in &decoded {
-            let slice = &samples[range.start.min(samples.len())..range.end.min(samples.len())];
-            if dbfs(slice) < SILENCE_DBFS {
-                continue;
-            }
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| ServiceError::External(format!("creating {}: {e}", dir.display())))?;
-            let wav = dir.join(format!("{}.wav", stem(*origin)));
-            let m4a = dir.join(format!("{}.m4a", stem(*origin)));
-            write_wav_mono16(&wav, RATE, slice)?;
-            afconvert(&[
-                "-f",
-                "m4af",
-                "-d",
-                "aac",
-                &wav.to_string_lossy(),
-                &m4a.to_string_lossy(),
-            ])?;
-            std::fs::remove_file(&wav)
-                .map_err(|e| ServiceError::External(format!("removing {}: {e}", wav.display())))?;
-            tracks.push(AudioTrack {
-                origin: *origin,
-                file_name: format!("{}.m4a", stem(*origin)),
-            });
+    for (idx, (origin, range)) in plan_ranges(&decoded).into_iter().enumerate() {
+        let Some((_, samples)) = decoded.iter().find(|(o, _)| *o == origin) else {
+            continue;
+        };
+        let lo = range.start.min(samples.len());
+        let hi = range.end.min(samples.len());
+        if hi <= lo {
+            continue;
         }
-        if !tracks.is_empty() {
-            chunks.push(Chunk {
-                offset_ms: range.start as u64 * 1000 / RATE as u64,
-                dir,
-                tracks,
-            });
+        let slice = &samples[lo..hi];
+        if dbfs(slice) < SILENCE_DBFS {
+            continue;
         }
+        let wav = work.join(format!("{}-{idx:04}.wav", stem(origin)));
+        let m4a = work.join(format!("{}-{idx:04}.m4a", stem(origin)));
+        write_wav_mono16(&wav, RATE, slice)?;
+        afconvert(&[
+            "-f",
+            "m4af",
+            "-d",
+            "aac",
+            &wav.to_string_lossy(),
+            &m4a.to_string_lossy(),
+        ])?;
+        std::fs::remove_file(&wav)
+            .map_err(|e| ServiceError::External(format!("removing {}: {e}", wav.display())))?;
+        chunks.push(PreparedChunk {
+            offset_ms: lo as u64 * 1000 / RATE as u64,
+            duration_ms: (hi - lo) as u64 * 1000 / RATE as u64,
+            origin,
+            path: m4a,
+        });
     }
+    chunks.sort_by_key(|c| c.offset_ms);
     Ok(chunks)
 }
 
-/// Splits `len` samples into consecutive ranges of at most `per_chunk`.
+/// Converts recordings into silent-free `.m4a` chunks of at most `max_chunk_ms`.
 ///
-/// Params: `len`; `per_chunk` – must be > 0.
-/// Returns: the ranges (empty for `len == 0`).
-pub fn split_ranges(len: usize, per_chunk: usize) -> Vec<Range<usize>> {
-    (0..len)
-        .step_by(per_chunk.max(1))
-        .map(|start| start..(start + per_chunk).min(len))
-        .collect()
+/// Params: `files` – `(origin, recording)` pairs; `work` – scratch folder (cleared first);
+/// `max_chunk_ms` – maximum chunk length in milliseconds.
+/// Returns: non-silent chunks ordered by start time.
+pub fn prepare_track_chunks(
+    files: &[(AudioOrigin, PathBuf)],
+    work: &Path,
+    max_chunk_ms: u64,
+) -> Result<Vec<PreparedChunk>, ServiceError> {
+    let per_chunk = ((max_chunk_ms.max(1000) * RATE as u64) / 1000) as usize;
+    prepare_with_ranges(files, work, |decoded| {
+        let longest = decoded.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+        let mut out = Vec::new();
+        for range in split_ranges(longest, per_chunk) {
+            for (origin, _) in decoded {
+                out.push((*origin, range.clone()));
+            }
+        }
+        out
+    })
 }
 
-/// RMS level in dBFS.
+/// Converts recordings into silence-gated speech-utterance `.m4a` chunks (at most `max_utterance_ms`).
 ///
-/// Params: `samples` – 16-bit PCM.
-/// Returns: the level; −∞ maps to −180 for empty or all-zero input.
-pub fn dbfs(samples: &[i16]) -> f64 {
-    if samples.is_empty() {
-        return -180.0;
-    }
-    let sum: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-    let rms = (sum / samples.len() as f64).sqrt() / 32768.0;
-    if rms <= 0.0 {
-        -180.0
-    } else {
-        20.0 * rms.log10()
-    }
+/// Used for cloud endpoints (`gpt-transcribe`, `gpt-4o-transcribe`) that return flat text
+/// without segment timestamps so each utterance keeps accurate timestamps and speaker alignment.
+///
+/// Params: `files` – `(origin, recording)` pairs; `work` – scratch folder; `max_utterance_ms`.
+/// Returns: active speech chunks ordered by start time.
+pub fn prepare_utterance_chunks(
+    files: &[(AudioOrigin, PathBuf)],
+    work: &Path,
+    max_utterance_ms: u64,
+) -> Result<Vec<PreparedChunk>, ServiceError> {
+    prepare_with_ranges(files, work, |decoded| {
+        let mut out = Vec::new();
+        for (origin, samples) in decoded {
+            for range in find_speech_spans(samples, RATE, max_utterance_ms) {
+                out.push((*origin, range));
+            }
+        }
+        out
+    })
 }
 
 /// Reads a 16-bit PCM mono WAV, skipping chunks such as afconvert's `FLLR` padding.
@@ -270,14 +418,32 @@ fn overlap(a: (u64, u64), b: (u64, u64)) -> u64 {
     a.1.min(b.1).saturating_sub(a.0.max(b.0))
 }
 
-/// Turns one run's sentences into final-pass segments with this meeting's speakers.
+/// Next available anonymous cluster index for `origin`, staying above all live clusters
+/// on that stream (remote system speakers start at `101`, matching `flow::merge_file_transcripts`).
+fn next_cluster_start(live: &[TranscriptSegment], origin: AudioOrigin) -> u32 {
+    let base = match origin {
+        AudioOrigin::Microphone => 1,
+        AudioOrigin::System => 101,
+    };
+    live.iter()
+        .filter(|s| s.origin == origin)
+        .filter_map(|s| match s.speaker {
+            SpeakerLabel::Cluster { index } => Some(index),
+            _ => None,
+        })
+        .max()
+        .map_or(base, |m| m.saturating_add(1).max(base))
+}
+
+/// Turns an external run's sentences into final-pass segments with this meeting's speakers.
 ///
 /// A sentence takes the speaker of the live segment covering most of it (at least half).
-/// Otherwise it takes the speaker that the model's label for it overlaps most across the
-/// run, and failing that `Unknown`.
+/// Otherwise it takes the live speaker that its model label overlaps most across the run.
+/// Unmatched non-empty model labels are allocated distinct fresh `Cluster` indices per stream
+/// (instead of collapsing together into `Unknown`); only empty labels map to `Unknown`.
 ///
-/// Params: `meeting`; `offset_ms` – the part's start; `heard` – the run's sentences;
-/// `live` – the live-pass segments; `language` – caption language.
+/// Params: `meeting`; `offset_ms` – start offset added to each sentence; `heard` – the run's
+/// sentences; `live` – the live-pass segments; `language` – caption language.
 /// Returns: segments on the meeting's timeline.
 pub fn heard_to_segments(
     meeting: MeetingId,
@@ -290,7 +456,7 @@ pub fn heard_to_segments(
     // Votes per (track, model label): live speaker → overlapping milliseconds.
     let mut votes: Vec<(LabelKey, Tally)> = Vec::new();
     for l in heard {
-        let key = (l.source, l.speaker.as_str());
+        let key = (l.source, l.speaker.trim());
         let idx = match votes.iter().position(|(k, _)| *k == key) {
             Some(i) => i,
             None => {
@@ -317,33 +483,54 @@ pub fn heard_to_segments(
             .and_then(|(_, tally)| tally.iter().max_by_key(|(_, ms)| *ms))
             .map(|(who, _)| who.clone())
     };
-    heard
-        .iter()
-        .filter(|l| !l.text.trim().is_empty())
-        .map(|l| {
-            let (start, end) = span(l);
-            let direct = live
-                .iter()
-                .filter(|s| s.origin == l.source)
-                .map(|s| (overlap((start, end), (s.start_ms, s.end_ms)), s))
-                .filter(|(ms, _)| *ms > 0 && ms * 2 >= (end - start))
-                .max_by_key(|(ms, _)| *ms)
-                .map(|(_, s)| s.speaker.clone());
-            let speaker = direct
-                .or_else(|| by_label((l.source, l.speaker.as_str())))
-                .unwrap_or(SpeakerLabel::Unknown);
-            TranscriptSegment {
-                meeting_id: meeting,
-                start_ms: start,
-                end_ms: end,
-                text: l.text.trim().to_string(),
-                language: language.clone(),
-                speaker,
-                origin: l.source,
-                spatial: None,
-            }
-        })
-        .collect()
+
+    let mut next_mic = next_cluster_start(live, AudioOrigin::Microphone);
+    let mut next_sys = next_cluster_start(live, AudioOrigin::System);
+    let mut fresh: Vec<(LabelKey<'_>, SpeakerLabel)> = Vec::new();
+    let mut out = Vec::new();
+
+    for l in heard {
+        let text = l.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let (start, end) = span(l);
+        let label = l.speaker.trim();
+        let direct = live
+            .iter()
+            .filter(|s| s.origin == l.source)
+            .map(|s| (overlap((start, end), (s.start_ms, s.end_ms)), s))
+            .filter(|(ms, _)| *ms > 0 && ms * 2 >= (end - start))
+            .max_by_key(|(ms, _)| *ms)
+            .map(|(_, s)| s.speaker.clone());
+        let speaker = if let Some(s) = direct.or_else(|| by_label((l.source, label))) {
+            s
+        } else if label.is_empty() {
+            SpeakerLabel::Unknown
+        } else if let Some((_, existing)) = fresh.iter().find(|(k, _)| *k == (l.source, label)) {
+            existing.clone()
+        } else {
+            let next = match l.source {
+                AudioOrigin::Microphone => &mut next_mic,
+                AudioOrigin::System => &mut next_sys,
+            };
+            let assigned = SpeakerLabel::Cluster { index: *next };
+            *next = next.saturating_add(1);
+            fresh.push(((l.source, label), assigned.clone()));
+            assigned
+        };
+        out.push(TranscriptSegment {
+            meeting_id: meeting,
+            start_ms: start,
+            end_ms: end,
+            text: text.to_string(),
+            language: language.clone(),
+            speaker,
+            origin: l.source,
+            spatial: None,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -374,19 +561,23 @@ mod tests {
     }
 
     #[test]
-    fn speakers_come_from_live_overlap_then_label_votes() {
+    fn speakers_come_from_live_overlap_then_label_votes_then_fresh_clusters() {
         let mic = AudioOrigin::Microphone;
+        let sys = AudioOrigin::System;
         let live_pass = vec![
             live(mic, 900_000, 905_000, 1),
             live(mic, 906_000, 910_000, 2),
             // Same time, other track: must never be borrowed.
-            live(AudioOrigin::System, 900_000, 990_000, 101),
+            live(sys, 900_000, 990_000, 101),
         ];
         let lines = vec![
             heard(mic, 0, 5_000, "说话人1"),       // covered by cluster 1
             heard(mic, 6_000, 9_000, "说话人2"),   // covered by cluster 2
             heard(mic, 30_000, 31_000, "说话人1"), // no live segment: label vote → cluster 1
-            heard(mic, 40_000, 41_000, "说话人3"), // nothing known → Unknown
+            heard(mic, 40_000, 41_000, "说话人3"), // unmatched mic label → fresh cluster 3
+            heard(mic, 42_000, 43_000, "说话人3"), // same unmatched label → reuses cluster 3
+            heard(sys, 100_000, 101_000, "远程1"), // unmatched system label → fresh cluster 102
+            heard(mic, 45_000, 46_000, " "),       // empty speaker → Unknown
         ];
         let segs = heard_to_segments(
             MeetingId::new(),
@@ -402,15 +593,39 @@ mod tests {
                 SpeakerLabel::Cluster { index: 1 },
                 SpeakerLabel::Cluster { index: 2 },
                 SpeakerLabel::Cluster { index: 1 },
+                SpeakerLabel::Cluster { index: 3 },
+                SpeakerLabel::Cluster { index: 3 },
+                SpeakerLabel::Cluster { index: 102 },
                 SpeakerLabel::Unknown,
             ]
         );
         assert_eq!((segs[0].start_ms, segs[0].end_ms), (900_000, 905_000));
-        assert!(segs.iter().all(|s| s.origin == mic));
+        assert_eq!(segs[5].origin, sys);
     }
 
     #[test]
-    fn wav_round_trip_skips_padding_chunks_and_measures_level() {
+    fn empty_live_transcript_preserves_distinct_speakers_per_stream() {
+        let lines = vec![
+            heard(AudioOrigin::Microphone, 0, 2_000, "说话人1"),
+            heard(AudioOrigin::Microphone, 2_500, 4_000, "说话人2"),
+            heard(AudioOrigin::System, 4_500, 6_000, "说话人1"),
+            heard(AudioOrigin::Microphone, 6_500, 7_000, ""),
+        ];
+        let segs = heard_to_segments(MeetingId::new(), 0, &lines, &[], Some("zh".into()));
+        let who: Vec<SpeakerLabel> = segs.iter().map(|s| s.speaker.clone()).collect();
+        assert_eq!(
+            who,
+            vec![
+                SpeakerLabel::Cluster { index: 1 },
+                SpeakerLabel::Cluster { index: 2 },
+                SpeakerLabel::Cluster { index: 101 },
+                SpeakerLabel::Unknown,
+            ]
+        );
+    }
+
+    #[test]
+    fn wav_round_trip_skips_padding_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.wav");
         let samples: Vec<i16> = (0..1600)
@@ -425,45 +640,85 @@ mod tests {
         bytes.splice(36..36, fllr);
         std::fs::write(&path, &bytes).unwrap();
         let (rate, back) = read_wav_mono16(&path).unwrap();
-        assert_eq!((rate, back), (16_000, samples.clone()));
-        assert!((dbfs(&samples) - -20.0).abs() < 0.1);
-        assert_eq!(dbfs(&[0, 0, 0]), -180.0);
+        assert_eq!((rate, back), (16_000, samples));
         assert!(read_wav_mono16(&dir.path().join("missing.wav")).is_err());
     }
 
     #[test]
-    fn ranges_cover_everything_once() {
-        assert_eq!(split_ranges(0, 10), Vec::<Range<usize>>::new());
-        assert_eq!(split_ranges(25, 10), vec![0..10, 10..20, 20..25]);
-        assert_eq!(split_ranges(10, 10), vec![0..10]);
+    fn dbfs_and_split_ranges_handle_silence_and_boundaries() {
+        assert_eq!(dbfs(&[]), -180.0);
+        assert_eq!(dbfs(&[0; 160]), -180.0);
+        assert!(dbfs(&[16_384; 160]) > -10.0);
+        assert!(split_ranges(0, 100).is_empty());
+        assert_eq!(split_ranges(250, 100), vec![0..100, 100..200, 200..250]);
     }
 
-    /// Exercises afconvert end to end: silent tracks and silent parts are dropped.
     #[test]
-    fn prepare_drops_silent_tracks() {
+    fn find_speech_spans_drops_silence_splits_pauses_and_bounds_long_monologues() {
+        // Pure digital silence produces zero spans.
+        assert!(find_speech_spans(&vec![0i16; 32_000], RATE, DEFAULT_UTTERANCE_MS).is_empty());
+
+        // Two bursts separated by 1.2 s silence produce two distinct spans.
+        let mut audio = vec![0i16; 8_000]; // 0.5 s silence
+        audio.extend(vec![4_000i16; 16_000]); // 1.0 s speech
+        audio.extend(vec![0i16; 19_200]); // 1.2 s silence (> 600 ms)
+        audio.extend(vec![4_000i16; 16_000]); // 1.0 s speech
+        audio.extend(vec![0i16; 8_000]); // 0.5 s silence
+        let spans = find_speech_spans(&audio, RATE, DEFAULT_UTTERANCE_MS);
+        assert_eq!(spans.len(), 2, "got spans: {spans:?}");
+        assert!(spans[0].start < 8_000 && spans[0].end >= 24_000);
+        assert!(spans[1].start > spans[0].end);
+
+        // Long continuous monologue exceeding max_span_ms gets split at quietest dip.
+        let mut long = vec![5_000i16; RATE as usize * 14];
+        // Insert a 200 ms dip at 10.5 s inside [4 s..12 s].
+        let dip_start = RATE as usize * 10 + RATE as usize / 2;
+        for s in &mut long[dip_start..dip_start + RATE as usize / 5] {
+            *s = 100;
+        }
+        let bounded = find_speech_spans(&long, RATE, 12_000);
+        assert_eq!(bounded.len(), 2, "got bounded: {bounded:?}");
+        assert!(
+            bounded[0].end >= dip_start && bounded[0].end <= dip_start + RATE as usize / 5,
+            "split should land in the dip: {:?}",
+            bounded[0]
+        );
+    }
+
+    #[test]
+    fn prepare_chunks_encode_active_m4a_and_drop_silent_tracks() {
         let dir = tempfile::tempdir().unwrap();
-        let tone: Vec<i16> = (0..16_000 * 2)
-            .map(|i| ((i as f64 * 0.05).sin() * 8000.0) as i16)
-            .collect();
         let mic = dir.path().join("mic.wav");
-        let sys = dir.path().join("system.wav");
-        write_wav_mono16(&mic, 16_000, &tone).unwrap();
-        write_wav_mono16(&sys, 16_000, &vec![0; tone.len()]).unwrap();
-        let work = dir.path().join("work");
-        let chunks = prepare_recordings(
-            &[(AudioOrigin::Microphone, mic), (AudioOrigin::System, sys)],
-            &work,
+        let sys = dir.path().join("sys.wav");
+        let mut speech = vec![0i16; 8_000];
+        speech.extend(vec![3_000i16; 16_000]);
+        speech.extend(vec![0i16; 8_000]);
+        write_wav_mono16(&mic, RATE, &speech).unwrap();
+        write_wav_mono16(&sys, RATE, &vec![0i16; 32_000]).unwrap();
+
+        let track_work = dir.path().join("track-work");
+        let track_chunks = prepare_track_chunks(
+            &[
+                (AudioOrigin::Microphone, mic.clone()),
+                (AudioOrigin::System, sys.clone()),
+            ],
+            &track_work,
+            CHUNK_MS,
         )
         .unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].offset_ms, 0);
-        assert_eq!(chunks[0].tracks.len(), 1);
-        assert_eq!(chunks[0].tracks[0].origin, AudioOrigin::Microphone);
-        let files: Vec<_> = std::fs::read_dir(&chunks[0].dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .collect();
-        // Only the audio the agent may read is in its working directory.
-        assert_eq!(files, vec!["microphone.m4a".to_string()]);
+        assert_eq!(track_chunks.len(), 1);
+        assert_eq!(track_chunks[0].origin, AudioOrigin::Microphone);
+        assert!(track_chunks[0].path.is_file());
+
+        let utt_work = dir.path().join("utt-work");
+        let utt_chunks = prepare_utterance_chunks(
+            &[(AudioOrigin::Microphone, mic), (AudioOrigin::System, sys)],
+            &utt_work,
+            DEFAULT_UTTERANCE_MS,
+        )
+        .unwrap();
+        assert_eq!(utt_chunks.len(), 1);
+        assert_eq!(utt_chunks[0].origin, AudioOrigin::Microphone);
+        assert!(utt_chunks[0].path.is_file());
     }
 }

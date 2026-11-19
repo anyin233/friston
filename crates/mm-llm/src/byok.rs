@@ -18,17 +18,42 @@ const ANTHROPIC_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 /// Images are attached up to this count; more add cost without changing the minutes.
 const MAX_IMAGES: usize = 8;
 
+/// Keychain account for OpenAI API keys (shared across minutes and ASR).
+pub const OPENAI_KEY_ACCOUNT: &str = "openai";
+/// Keychain account for Google Gemini API keys (shared across minutes and ASR).
+pub const GEMINI_KEY_ACCOUNT: &str = "gemini";
+/// Keychain account for OpenAI Organization Admin API keys (`sk-admin-...`).
+pub const OPENAI_ADMIN_KEY_ACCOUNT: &str = "openai-admin";
+
 /// Keychain account used for a provider's key.
 ///
 /// Params: `p` – provider.
 /// Returns: the account name.
 pub fn keychain_account(p: &ByokProvider) -> &'static str {
     match p {
-        ByokProvider::OpenAi { .. } => "openai",
+        ByokProvider::OpenAi { .. } => OPENAI_KEY_ACCOUNT,
         ByokProvider::Anthropic { .. } => "anthropic",
-        ByokProvider::Gemini { .. } => "gemini",
+        ByokProvider::Gemini { .. } => GEMINI_KEY_ACCOUNT,
         ByokProvider::OpenAiCompatible { .. } => "openai-compatible",
     }
+}
+
+/// Reads an API key by Keychain account name (`"openai"`, `"gemini"`, `"openai-admin"`, …).
+///
+/// Params: `account` – Keychain account under service `Friston`.
+/// Returns: the key, or `None` if absent.
+pub fn read_account_key(account: &str) -> Result<Option<String>, LlmError> {
+    read_secret(&SystemKeychain, account)
+        .map_err(|e| LlmError::Keychain(format!("reading {account}: {e}")))
+}
+
+/// Stores (or with `None`, deletes) an API key by Keychain account name.
+///
+/// Params: `account` – Keychain account under service `Friston`; `key` – secret.
+/// Returns: `Ok(())` once stored or removed.
+pub fn write_account_key(account: &str, key: Option<&str>) -> Result<(), LlmError> {
+    write_secret(&SystemKeychain, account, key)
+        .map_err(|e| LlmError::Keychain(format!("writing {account}: {e}")))
 }
 
 /// Reads a provider's API key from the Keychain.
@@ -36,8 +61,7 @@ pub fn keychain_account(p: &ByokProvider) -> &'static str {
 /// Params: `p` – provider.
 /// Returns: the key, or `None` if none is stored.
 pub fn read_key(p: &ByokProvider) -> Result<Option<String>, LlmError> {
-    read_secret(&SystemKeychain, keychain_account(p))
-        .map_err(|e| LlmError::Keychain(format!("reading {}: {e}", keychain_account(p))))
+    read_account_key(keychain_account(p))
 }
 
 /// Stores (or with `None`, deletes) a provider's API key in the Keychain.
@@ -45,8 +69,7 @@ pub fn read_key(p: &ByokProvider) -> Result<Option<String>, LlmError> {
 /// Params: `p` – provider; `key` – the secret.
 /// Returns: `Ok(())` once the Keychain accepted the change.
 pub fn write_key(p: &ByokProvider, key: Option<&str>) -> Result<(), LlmError> {
-    write_secret(&SystemKeychain, keychain_account(p), key)
-        .map_err(|e| LlmError::Keychain(format!("writing {}: {e}", keychain_account(p))))
+    write_account_key(keychain_account(p), key)
 }
 
 /// Guesses an image MIME type from the file extension.
@@ -192,20 +215,23 @@ pub fn parse_minutes(text: &str) -> Result<Minutes, LlmError> {
     })
 }
 
-/// POSTs JSON and returns the decoded body, turning HTTP errors into messages with the body.
-fn post_json(url: &str, headers: &[(&str, String)], body: &Value) -> Result<Value, LlmError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+/// Builds a `ureq` agent configured to return HTTP error bodies without auto-throwing.
+///
+/// Params: `timeout_secs` – global request timeout in seconds.
+/// Returns: configured HTTP agent.
+pub(crate) fn http_agent(timeout_secs: u64) -> ureq::Agent {
+    ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(std::time::Duration::from_secs(600)))
+        .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
         .build()
-        .into();
-    let mut req = agent.post(url);
-    for (k, v) in headers {
-        req = req.header(*k, v.as_str());
-    }
-    let mut resp = req
-        .send_json(body)
-        .map_err(|e| LlmError::Provider(format!("POST {url}: {e}")))?;
+        .into()
+}
+
+/// Reads an HTTP response body, returning a detailed [`LlmError::Provider`] on non-2xx status.
+pub(crate) fn decode_json_response(
+    url: &str,
+    mut resp: ureq::http::Response<ureq::Body>,
+) -> Result<Value, LlmError> {
     let status = resp.status();
     let text = resp
         .body_mut()
@@ -213,11 +239,28 @@ fn post_json(url: &str, headers: &[(&str, String)], body: &Value) -> Result<Valu
         .map_err(|e| LlmError::Provider(format!("reading response from {url}: {e}")))?;
     if !status.is_success() {
         return Err(LlmError::Provider(format!(
-            "POST {url} returned {status}: {text}"
+            "HTTP {status} from {url}: {text}"
         )));
     }
     serde_json::from_str(&text)
         .map_err(|e| LlmError::Provider(format!("decoding response from {url}: {e}")))
+}
+
+/// POSTs JSON and returns the decoded body, turning HTTP errors into messages with the body.
+pub(crate) fn post_json(
+    url: &str,
+    headers: &[(&str, String)],
+    body: &Value,
+) -> Result<Value, LlmError> {
+    let agent = http_agent(600);
+    let mut req = agent.post(url);
+    for (k, v) in headers {
+        req = req.header(*k, v.as_str());
+    }
+    let resp = req
+        .send_json(body)
+        .map_err(|e| LlmError::Provider(format!("POST {url}: {e}")))?;
+    decode_json_response(url, resp)
 }
 
 /// Generates minutes with a BYOK provider.

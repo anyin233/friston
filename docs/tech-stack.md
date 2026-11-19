@@ -16,7 +16,7 @@
 | 多模态嵌入 | **EmbeddingGemma 2**（文字/图片/音频/视频，768 维，MRL） | mlx-swift-lm `main@c8dabc6` | 已实测：文字检索排序正确，录音按时间窗嵌入可用 |
 | 存储 / 检索 | SQLite（rusqlite bundled）+ **sqlite-vec** + FTS5 trigram | rusqlite 0.41，sqlite-vec =0.1.9 | 已测试（KNN、中文全文） |
 | 笔记系统 | Obsidian 库（直接写 Markdown）+ `obsidian://` URI；Obsidian CLI 可选 | Obsidian 1.12+ | 已实现并测试 |
-| 纪要生成 | 自动：BYOK（Anthropic / OpenAI / Gemini / 兼容端点）→ **Codex app-server**（ChatGPT 登录）→ 本地 MLX（Qwen3-4B-Instruct 4bit，JSON Schema 约束）；也可指定 BYOK / Codex / **Antigravity CLI**，Codex 与 Antigravity 可选模型 | codex-cli 0.166.0 | Codex 与本地模型已端到端实测 |
+| 纪要与一体化精转 | 自动：BYOK（Anthropic / OpenAI / Gemini / 兼容端点）→ **Codex app-server**（ChatGPT 登录）→ 本地 MLX（Qwen3-4B-Instruct 4bit，JSON Schema 约束）；也可指定 BYOK / Codex，或选用 **Codex 一体化**会后路线一次完成转写、说话人区分与纪要 | codex-cli 0.166.0+（0.169.0 实测） | Codex 纪要、本地模型及 Codex 一体化精转已端到端实测 |
 | 录制 | ScreenCaptureKit（窗口级）、AVFoundation、Core Audio process tap | 系统框架 | 窗口枚举、窗口/显示器录制、麦克风多声道与系统声音录制已实现 |
 | 日程 | EventKit | 系统框架 | 已实现读取 |
 
@@ -58,25 +58,15 @@
   - `UserInput` 支持 `text`、`localImage`、`localAudio`，所以会中截图和存疑的录音片段都可以直接交给模型。
   - `turn/start.outputSchema` 约束最终输出为我们的纪要 JSON。
   - 线程设为 `ephemeral` + `read-only` sandbox + `approvalPolicy: never`，不碰文件系统。
-- 模型选择（2026-11-09）：设置里的列表来自 `model/list`（`includeHidden: false`，按 `nextCursor` 翻页），选中的 id 放进 `thread/start.model`；选“Codex 默认模型”时不传该字段。codex-cli 0.167.0 实测列出 `gpt-6.1-sol`（默认）、`gpt-6.1-terra`、`gpt-6-luna` 等 8 个模型，都只支持 `text`、`image` 输入。
-- 也可以指定 **Antigravity**（`agy -p`）写纪要：只给文字，工作目录为空，用 `--json-schema` 约束输出。模型列表来自 `agy models`（Gemini、Claude、GPT-OSS 等），实测 `claude-opus-5-5-low` 约 8 秒写出符合 schema 的纪要。复跑：`cargo test -p mm-llm --test antigravity_minutes_live -- --ignored --nocapture`。
+- 模型选择（2026-11-09）：设置里的列表来自 `model/list`（`includeHidden: false`，按 `nextCursor` 翻页），选中的 id 放进 `thread/start.model`；选“Codex 默认模型”时不传该字段。codex-cli 0.169.0 实测列出 `gpt-6.2-sol`（默认）、`gpt-6.2-astra`、`gpt-6.1-terra`、`gpt-5.6-*` 等模型。
 - 注意：OpenAI 文档写明 app-server 认证**不得**用于商业或托管服务。本项目是个人本地应用，可以使用；如果将来要分发，需要改用 “Sign in with ChatGPT”。
 
-### 5b. 会后精转写的外部工具：Antigravity（Gemini 3.8 Flash）（2026-11-08）
-- 选项在设置“精转方式”里，默认仍是本地 Qwen3-ASR。选 Antigravity 后录音会上传到 Google。
-- 调用方式：`agy -p … --model gemini-3.8-flash-medium --output-format json --json-schema … --settings '{"permissions":{"allow":["read_file(<工作目录>/**)"]}}'`。工作目录里只有准备好的录音；无头模式下其他需要权限的工具（运行命令、写文件）自动拒绝，不传 `--dangerously-skip-permissions`。
-- agy 可能以退出码 0 返回 `status: "ERROR"`（服务端 500 后报 "The stream was interrupted"），所以必须检查 `status`；失败时重试一次。噪声多的录音上，Flash 偶尔在 JSON 之后继续生成直到被切断（3 句话输出 1.7 万 token），此时已有的结构化结果是完整的，只在没有干净结果时使用，并在会后报告里提示可能不完整。
-- **Codex 不能直接听音频**：`model/list` 里 `gpt-6.1-terra`、`gpt-6.1-sol` 等都只声明 `text`、`image` 输入；把录音作为 `localAudio` 发过去，两者都回复“无法读取音频”，terra 还会自己去找本机的 whisper 来跑。所以 Codex 不做这条路，只保留原来的纪要提供方角色。
-- 实测（M5 Pro，`gemini-3.8-flash-medium`）：
-
-| 录音 | 结果 |
-| --- | --- |
-| 合成两人会议 10 分 25 秒，64 句 | 52 秒完成；64 句全对，时间戳误差约 1 秒，说话人交替正确，末尾的金额和待办都写进纪要 |
-| 真实录音 2 分钟，麦克风大部分是键盘声，系统声音为数字静音 | 只转出 98–110 秒的几句话，正确报告系统声音没有人声；部分运行被服务端中断（见上） |
-| 同上，改用 `gemini-3.8-flash-low` | **编造了一整场“模型服务优化”会议**，还带人名。所以不提供 low，并且静音音轨不发送 |
-
-- 精转模型只列能听音频的 Gemini 模型，并去掉 `-low`。纪要也选 Antigravity 且模型相同、录音只有一段时，一次调用同时返回转写和纪要（合成的两人短会议实测：两句全对，纪要的决定、金额和待办人都正确）；否则精转后再单独写纪要。
-- 复跑：`cargo test -p mm-service --test antigravity_live -- --ignored --nocapture`（`MM_AGY_RECORDING=<录音>` 换成真实录音）。
+### 5b. 会后精转 + 纪要一体化路线：本机 Codex（2026-11-19）
+- 选项在设置“录制与字幕 › 精转方式”里（`RefineBackend::Codex`），默认仍是本地 `Qwen3-ASR`。失败时自动回退到本地精转写。
+- **不走 `localAudio` 多模态字段**：codex-cli 0.169.0 实测即使 `gpt-6.2-sol` 在 `model/list` 中声明了 `"audio"` 输入模态，传入 `UserInput::LocalAudio` 仍会被服务端以 HTTP 400 `"Audio input is not available."` 拒绝。因此改为在 `thread/start` 中将 `cwd` 设为录音共同父目录（保持 `ephemeral: true`、`sandbox: "read-only"`、`approvalPolicy: "never"`），在提示词里直接传递录音文件路径，由本机 Codex 自主调用可用的音视频/ASR 工具读取与转写，随后一次输出 `{transcript, minutes}`。
+- **Prompt 设计**：`mm_llm::prompt` 按 OpenAI 官方针对不同代际模型的 Prompting Guide 构造开发者指令（`OpenAiModelFamily` 区分 `Gpt6`、`Gpt5`、`OSeries`、`Gpt4`），使用 XML 标签分隔指令与被动参考数据（`<audio_files>`、`<meeting_metadata>`、`<user_notes>`、`<spelling_hints>`），显式禁止转储原始二进制/base64 音频、禁止编造未听到的话，并在 `read-only` 沙箱下要求内存/管道处理；配合 `turn/start.outputSchema`（`transcript_and_minutes_schema()`）一次拿到逐句转写（含 `source`、毫秒时间戳、说话人标签）与结构化纪要。
+- **无需 15 分钟分段**：长录音直接整场交给 Codex 及其本机工具链一次处理，再经 `external::heard_to_segments` 对齐到本场说话人并写入 Obsidian 笔记。
+- 复跑：`cargo test -p mm-service --test codex_refine_live -- --ignored --nocapture`（可用 `MM_CODEX_RECORDING=<录音>` 换成真实录音，`MM_CODEX_MODEL=<模型id>` 指定模型）。
 
 ### 6. 存储：SQLite + sqlite-vec + FTS5
 - 单个数据库文件，可备份、可查看。向量表 `vec0(float[768], cosine)`；FTS5 用 trigram 分词，中文不需要分词器（测试已覆盖“预算评审”这类子串）。

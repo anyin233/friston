@@ -69,7 +69,7 @@ pub fn open(
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().flex_1().child(Input::new(&input)))
+                            .child(div().flex_1().child(Input::new(&input).id("assign-name")))
                             .child(
                                 Button::new("assign-new")
                                     .primary()

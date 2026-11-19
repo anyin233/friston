@@ -10,12 +10,14 @@ use mm_core::{Meeting, MeetingId, SpeakerLabel, TranscriptSegment};
 use mm_i18n::trf;
 use mm_service::AppConfig;
 use mm_service::indexer::{Indexer, IndexerMsg};
-use mm_store::{SegmentPass, Store};
+use mm_store::{AsrUsageRecord, SegmentPass, Store};
 
 /// Work for the writer thread.
 pub enum WriteMsg {
     /// Persist a final caption (live pass) with its engine utterance id.
     Segment(TranscriptSegment, u64),
+    /// Persist one cloud live-ASR usage delta.
+    AsrUsage(AsrUsageRecord),
     /// Apply an engine `speaker/relabel` to stored segments.
     Relabel(MeetingId, SpeakerLabel, SpeakerLabel),
     /// Rewrite the note's transcript block and re-index the transcript.
@@ -87,6 +89,12 @@ fn handle(store: &Arc<Mutex<Store>>, indexer: &Indexer, msg: WriteMsg) -> Result
                     "Couldn’t save caption (utterance {utterance}): {e}",
                 )
             }),
+        WriteMsg::AsrUsage(rec) => lock(store)?.record_asr_usage(&rec).map_err(|e| {
+            trf!(
+                "记录云端转写用量失败：{e}",
+                "Couldn’t record cloud ASR usage: {e}"
+            )
+        }),
         WriteMsg::Relabel(meeting, from, to) => lock(store)?
             .relabel_segments(meeting, &from, &to)
             .map(|_| ())

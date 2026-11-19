@@ -11,7 +11,9 @@ use std::path::Path;
 use mm_i18n::{tr, trf};
 use mm_llm::{ByokProvider, MinutesBackend};
 use mm_service::engines::{EmbedStatus, LlmStatus, SpeechModelsStatus};
+use mm_service::{CloudLiveMode, LiveAsrBackend};
 
+use crate::logic;
 use crate::pipeline::CodexStatus;
 use crate::state::{EngineState, Loadable};
 
@@ -47,6 +49,10 @@ pub struct StatusInput<'a> {
     /// `initialize`'s `capabilities.models`, so the card can name a model still loading.
     pub meeting_models: &'a BTreeMap<String, String>,
     pub speech: &'a Loadable<SpeechModelsStatus>,
+    pub live_asr_backend: LiveAsrBackend,
+    pub live_cloud_mode: CloudLiveMode,
+    pub live_asr_model: Option<&'a str>,
+    pub live_asr_key_present: bool,
     pub embed: &'a Loadable<EmbedStatus>,
     pub embed_dir: Option<&'a Path>,
     pub minutes: MinutesInput<'a>,
@@ -56,11 +62,7 @@ pub struct StatusInput<'a> {
 pub struct MinutesInput<'a> {
     /// The backend the user picked.
     pub backend: MinutesBackend,
-    /// `agy --model` id for minutes.
-    pub antigravity_model: &'a str,
-    /// Whether the `agy` executable was found.
-    pub agy_found: bool,
-    /// The Antigravity refine writes the minutes in the same run (short meetings).
+    /// Post-meeting unified Codex refine writes the minutes in the same run.
     pub merged_with_refine: bool,
     /// BYOK provider, only when its key is in the Keychain.
     pub byok: Option<&'a ByokProvider>,
@@ -80,7 +82,15 @@ pub struct MinutesInput<'a> {
 pub fn rows(input: &StatusInput) -> Vec<StatusRow> {
     vec![
         vault_row(input.vault, input.vault_exists),
-        caption_row(input.meeting_state, input.meeting_models, input.speech),
+        caption_row(
+            input.meeting_state,
+            input.meeting_models,
+            input.speech,
+            input.live_asr_backend,
+            input.live_cloud_mode,
+            input.live_asr_model,
+            input.live_asr_key_present,
+        ),
         embed_row(input.embed, input.embed_dir),
         minutes_row(&input.minutes),
     ]
@@ -168,13 +178,82 @@ fn role_label(role: &str) -> &str {
     }
 }
 
-/// Caption engine: green only once the live models are resident, not merely when the
-/// process answered `initialize`, because the first recording would otherwise still wait.
+/// Caption engine: green only once the live models are resident (or cloud live is configured
+/// with a key and `mm-meetingd` is ready), not merely when the process answered `initialize`.
 fn caption_row(
     state: &EngineState,
     advertised: &BTreeMap<String, String>,
     speech: &Loadable<SpeechModelsStatus>,
+    live_asr_backend: LiveAsrBackend,
+    live_cloud_mode: CloudLiveMode,
+    live_asr_model: Option<&str>,
+    live_asr_key_present: bool,
 ) -> StatusRow {
+    if live_asr_backend != LiveAsrBackend::Local && matches!(state, EngineState::Ready) {
+        let provider_label = logic::live_asr_backend_label(live_asr_backend);
+        let default_model = match (live_asr_backend, live_cloud_mode) {
+            (LiveAsrBackend::OpenAi, CloudLiveMode::Streaming) => mm_llm::DEFAULT_OPENAI_LIVE_MODEL,
+            (LiveAsrBackend::OpenAi, CloudLiveMode::Utterance) => {
+                mm_llm::DEFAULT_OPENAI_REFINE_MODEL
+            }
+            (LiveAsrBackend::Gemini, CloudLiveMode::Streaming) => mm_llm::DEFAULT_GEMINI_LIVE_MODEL,
+            (LiveAsrBackend::Gemini, CloudLiveMode::Utterance) => {
+                mm_llm::DEFAULT_GEMINI_REFINE_MODEL
+            }
+            (LiveAsrBackend::Local, _) => "",
+        };
+        let model = live_asr_model
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_model);
+        let value = format!("{provider_label} · {model}");
+        let mut details: Vec<String> = vec![trf!(
+            "策略：{}",
+            "Mode: {}",
+            logic::cloud_live_mode_label(live_cloud_mode)
+        )];
+        if let Loadable::Ready(s) = speech {
+            details.extend(
+                s.models
+                    .iter()
+                    .filter(|(role, _)| match live_cloud_mode {
+                        CloudLiveMode::Streaming => {
+                            !matches!(role.as_str(), "liveASR" | "draft" | "prefixDecoder")
+                        }
+                        CloudLiveMode::Utterance => {
+                            !matches!(role.as_str(), "liveASR" | "prefixDecoder")
+                        }
+                    })
+                    .map(|(role, id)| trf!("{}：{}", "{}: {}", role_label(role), model_name(id))),
+            );
+        }
+        let light = if live_asr_key_present {
+            details.push(
+                tr!(
+                    "断网或连接失败时自动改用本地 Qwen3-ASR",
+                    "Falls back to local Qwen3-ASR if offline or disconnected",
+                )
+                .into(),
+            );
+            Light::Green
+        } else {
+            details.push(
+                tr!(
+                    "未保存 API 密钥，录制时将改用本地 Qwen3-ASR",
+                    "API key not saved; recording will fall back to local Qwen3-ASR",
+                )
+                .into(),
+            );
+            Light::Yellow
+        };
+        return StatusRow {
+            title: tr!("字幕引擎", "Caption engine"),
+            light,
+            value,
+            details,
+        };
+    }
+
     let asr = |models: &BTreeMap<String, String>| {
         models
             .get("liveASR")
@@ -485,7 +564,7 @@ fn fallback_note(m: &MinutesInput, pick: MinutesBackend) -> String {
 /// An explicit pick that can run is green and lists its fallback, because any failure there
 /// drops to the automatic order; a pick that cannot run shows the stand-in in yellow.
 fn minutes_row(m: &MinutesInput) -> StatusRow {
-    let (light, value, details) = match m.backend {
+    let (light, value, mut details) = match m.backend {
         MinutesBackend::Auto => minutes_provider(m, MinutesBackend::Auto),
         MinutesBackend::ApiKey => match m.byok {
             Some(p) => (
@@ -528,35 +607,16 @@ fn minutes_row(m: &MinutesInput) -> StatusRow {
                 .into(),
             ),
         },
-        MinutesBackend::Antigravity if m.agy_found => {
-            let value = if m.antigravity_model.trim().is_empty() {
-                "Antigravity".to_string()
-            } else {
-                format!("Antigravity · {}", m.antigravity_model)
-            };
-            let mut details = Vec::new();
-            if m.merged_with_refine {
-                details.push(
-                    tr!(
-                        "15 分钟内的会议在精转写时一并生成纪要",
-                        "Meetings up to 15 minutes get minutes during the refine pass"
-                    )
-                    .into(),
-                );
-            }
-            details.push(fallback_note(m, MinutesBackend::Antigravity));
-            (Light::Green, value, details)
-        }
-        MinutesBackend::Antigravity => stand_in(
-            m,
-            MinutesBackend::Antigravity,
+    };
+    if m.merged_with_refine {
+        details.push(
             tr!(
-                "选了 Antigravity，但没有找到 agy",
-                "Antigravity is picked, but agy wasn’t found"
+                "会后由 Codex 一体化路线在精转写时一并生成纪要",
+                "Written with the transcript by the unified Codex post-meeting pass"
             )
             .into(),
-        ),
-    };
+        );
+    }
     StatusRow {
         title: tr!("纪要", "Minutes"),
         light,
@@ -578,13 +638,15 @@ mod tests {
         meeting_state: EngineState,
         meeting_models: BTreeMap<String, String>,
         speech: Loadable<SpeechModelsStatus>,
+        live_asr_backend: LiveAsrBackend,
+        live_cloud_mode: CloudLiveMode,
+        live_asr_model: Option<String>,
+        live_asr_key_present: bool,
         embed: Loadable<EmbedStatus>,
         embed_dir: Option<PathBuf>,
         llm: Loadable<LlmStatus>,
         llm_dir: Option<PathBuf>,
         backend: MinutesBackend,
-        antigravity_model: String,
-        agy_found: bool,
         merged_with_refine: bool,
         byok: Option<ByokProvider>,
         use_codex: bool,
@@ -601,13 +663,15 @@ mod tests {
                 meeting_state: EngineState::Starting,
                 meeting_models: BTreeMap::new(),
                 speech: Loadable::Idle,
+                live_asr_backend: LiveAsrBackend::Local,
+                live_cloud_mode: CloudLiveMode::Streaming,
+                live_asr_model: None,
+                live_asr_key_present: false,
                 embed: Loadable::Idle,
                 embed_dir: None,
                 llm: Loadable::Idle,
                 llm_dir: None,
                 backend: MinutesBackend::Auto,
-                antigravity_model: String::new(),
-                agy_found: false,
                 merged_with_refine: false,
                 byok: None,
                 use_codex: false,
@@ -629,12 +693,14 @@ mod tests {
                 meeting_state: &self.meeting_state,
                 meeting_models: &self.meeting_models,
                 speech: &self.speech,
+                live_asr_backend: self.live_asr_backend,
+                live_cloud_mode: self.live_cloud_mode,
+                live_asr_model: self.live_asr_model.as_deref(),
+                live_asr_key_present: self.live_asr_key_present,
                 embed: &self.embed,
                 embed_dir: self.embed_dir.as_deref(),
                 minutes: MinutesInput {
                     backend: self.backend,
-                    antigravity_model: &self.antigravity_model,
-                    agy_found: self.agy_found,
                     merged_with_refine: self.merged_with_refine,
                     byok: self.byok.as_ref(),
                     use_codex: self.use_codex,
@@ -809,30 +875,24 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_writes_minutes_and_lists_its_fallback() {
+    fn unified_codex_refine_notes_combined_minutes() {
         let mut f = Fixture::new();
-        f.backend = MinutesBackend::Antigravity;
-        f.antigravity_model = "gemini-3-pro".into();
-        f.agy_found = true;
+        f.backend = MinutesBackend::Codex;
+        f.codex_model = Some("gpt-6.2-sol".into());
+        f.codex = Loadable::Ready(CodexStatus {
+            path: Some("/opt/homebrew/bin/codex".into()),
+            signed_in: true,
+            label: Some("me@example.com".into()),
+            error: None,
+        });
         f.merged_with_refine = true;
         let row = f.minutes();
         assert_eq!(
             (row.light, row.value.as_str()),
-            (Light::Green, "Antigravity · gemini-3-pro")
+            (Light::Green, "Codex（ChatGPT · gpt-6.2-sol）")
         );
-        assert_eq!(row.details[1], "失败时改用：没有可用的纪要生成方式");
-
-        // Without agy the automatic order stands in, in yellow, and says why.
-        f.agy_found = false;
-        f.byok = Some(ByokProvider::OpenAi {
-            model: "gpt-6".into(),
-        });
-        let row = f.minutes();
-        assert_eq!(
-            (row.light, row.value.as_str()),
-            (Light::Yellow, "API 密钥 · OpenAI · gpt-6")
-        );
-        assert!(row.details[0].contains("没有找到 agy"));
+        assert!(row.details.iter().any(|d| d.contains("Codex 一体化路线")));
+        assert!(row.details.iter().any(|d| d.contains("失败时改用")));
     }
 
     #[test]
@@ -864,7 +924,7 @@ mod tests {
     }
 
     /// English rows keep the same composition rules: role labels, list separators,
-    /// the backup note and the Antigravity fallback all switch language together.
+    /// the backup note and the unified Codex fallback note all switch language together.
     #[test]
     fn rows_read_naturally_in_english() {
         mm_i18n::with_lang(mm_i18n::Lang::En, || {
@@ -910,11 +970,51 @@ mod tests {
             f.byok = None;
             f.llm = Loadable::Idle;
             f.llm_dir = None;
-            f.backend = MinutesBackend::Antigravity;
-            f.agy_found = true;
+            f.backend = MinutesBackend::Codex;
+            f.codex = Loadable::Ready(CodexStatus {
+                path: Some("/bin/codex".into()),
+                signed_in: true,
+                label: None,
+                error: None,
+            });
+            f.merged_with_refine = true;
             let row = f.minutes();
-            assert_eq!(row.value, "Antigravity");
+            assert_eq!(row.value, "Codex (ChatGPT)");
             assert_eq!(row.details[0], "Falls back to: No way to write minutes");
+            assert!(row.details[1].contains("unified Codex post-meeting pass"));
+        });
+    }
+
+    #[test]
+    fn cloud_live_caption_row_reports_provider_and_key_status() {
+        let mut f = Fixture::new();
+        f.meeting_state = EngineState::Ready;
+        f.live_asr_backend = LiveAsrBackend::OpenAi;
+        f.live_cloud_mode = CloudLiveMode::Streaming;
+        f.live_asr_model = None;
+        f.live_asr_key_present = true;
+        let row = &f.rows()[1];
+        assert_eq!(row.light, Light::Green);
+        assert_eq!(row.value, "OpenAI · gpt-live-transcribe");
+        assert!(row.details.iter().any(|d| d.contains("实时流式")));
+        assert!(row.details.iter().any(|d| d.contains("Qwen3-ASR")));
+
+        f.live_cloud_mode = CloudLiveMode::Utterance;
+        let row_utt = &f.rows()[1];
+        assert_eq!(row_utt.light, Light::Green);
+        assert_eq!(row_utt.value, "OpenAI · gpt-transcribe");
+        assert!(row_utt.details.iter().any(|d| d.contains("按句上传")));
+
+        f.live_asr_backend = LiveAsrBackend::Gemini;
+        f.live_cloud_mode = CloudLiveMode::Streaming;
+        f.live_asr_model = Some("gemini-3.5-transcribe-live".into());
+        f.live_asr_key_present = false;
+        mm_i18n::with_lang(mm_i18n::Lang::En, || {
+            let row = &f.rows()[1];
+            assert_eq!(row.light, Light::Yellow);
+            assert_eq!(row.value, "Google Gemini · gemini-3.5-transcribe-live");
+            assert!(row.details.iter().any(|d| d.contains("VAD-gated")));
+            assert!(row.details.iter().any(|d| d.contains("API key not saved")));
         });
     }
 

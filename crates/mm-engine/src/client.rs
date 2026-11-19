@@ -52,16 +52,30 @@ impl EngineClient {
         program: &std::path::Path,
         args: &[&str],
     ) -> std::io::Result<(Self, async_channel::Receiver<EngineEvent>)> {
-        let mut child = Command::new(program)
-            .args(args)
+        Self::spawn_with_env(program, args, &[])
+    }
+
+    /// Spawns an engine executable with additional environment variables and connects to its stdio.
+    ///
+    /// Params: `program` – path to the helper binary; `args` – CLI arguments; `env` – extra env pairs.
+    /// Returns: the client plus the receiver for notifications/lifecycle events.
+    pub fn spawn_with_env(
+        program: &std::path::Path,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> std::io::Result<(Self, async_channel::Receiver<EngineEvent>)> {
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // stderr is reserved for engine logs; inherit so they land in the app log.
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                std::io::Error::new(e.kind(), format!("spawning {}: {e}", program.display()))
-            })?;
+            .stderr(Stdio::inherit());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().map_err(|e| {
+            std::io::Error::new(e.kind(), format!("spawning {}: {e}", program.display()))
+        })?;
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
         let (mut client, events) = Self::connect(stdout, stdin);
